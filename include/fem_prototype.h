@@ -36,6 +36,12 @@ void crs_alloc_edge(crs_t *);
 void edge_element(int, const double [6], double, double [6][6], double [6][6]);
 void assemble_edge(crs_t *, crs_t *);
 int solve_edge_test(FILE *);
+int edge_tree(unsigned char *);
+void edge_grad(const double *, double *);
+void edge_gradT(const double *, double *);
+void edge_nodal_aux(const crs_t *, crs_t *);
+int solver_cg_edge(const crs_t *, const crs_t *, const double *, double *,
+	const unsigned char *, int, int, int, double, FILE *, const char *);
 int tet_grad_pub(const int32_t [4], double [4][3], double *);
 
 // assemble.c (公開した材料係数)

@@ -110,6 +110,12 @@ void edge_build(void)
 	free(lst);
 	free(un);
 
+	// 辺の始点 (節点番号の小さい方)
+	EdgeFrom = (int32_t *)malloc((size_t)NEdge * sizeof(int32_t));
+	for (int i = 0; i < n; i++) {
+		for (int64_t p = EdgePtr[i]; p < EdgePtr[i + 1]; p++) EdgeFrom[p] = (int32_t)i;
+	}
+
 	// 四面体毎の辺番号と向き
 	TetEdge = (int32_t *)malloc((size_t)NTet * 6 * sizeof(int32_t));
 	TetEdgeSgn = (signed char *)malloc((size_t)NTet * 6 * sizeof(signed char));
@@ -148,10 +154,12 @@ void edge_free(void)
 {
 	free(EdgePtr);
 	free(EdgeTo);
+	free(EdgeFrom);
 	free(TetEdge);
 	free(TetEdgeSgn);
 	EdgePtr = NULL;
 	EdgeTo = NULL;
+	EdgeFrom = NULL;
 	TetEdge = NULL;
 	TetEdgeSgn = NULL;
 	NEdge = 0;
@@ -511,6 +519,140 @@ int solve_edge_test(FILE *fp_log)
 		(void)tdif;
 	}
 
+	// (e) ゲージ固定 (tree-cotree)
+	{
+		unsigned char *tree = (unsigned char *)malloc((size_t)ne * sizeof(unsigned char));
+		const int ncomp = edge_tree(tree);
+		int ntree = 0;
+		for (int i = 0; i < ne; i++) ntree += tree[i];
+		fprintf(fp_log, "  (e) spanning tree       : %d tree edges, %d components "
+			"(nodes - components = %d), gauged unknowns = %d\n",
+			ntree, ncomp, NNode - ncomp, ne - ntree);
+		if (ntree != (NNode - ncomp)) {
+			fprintf(fp_log, "*** the spanning tree is not spanning\n");
+			ierr = 1;
+		}
+
+		// 勾配はゲージ前は S の零空間に入るが、木辺を落とすと外れる
+		double *phi = (double *)malloc((size_t)NNode * sizeof(double));
+		for (int i = 0; i < NNode; i++) phi[i] = fmod(i * 0.31830988618, 1.0) - 0.5;
+		edge_grad(phi, u);
+		crs_spmv(&S, u, y, NULL);
+		double q0 = 0, uu = 0;
+		for (int i = 0; i < ne; i++) {
+			q0 += u[i] * y[i];
+			uu += u[i] * u[i];
+		}
+		for (int i = 0; i < ne; i++) {
+			if (tree[i]) u[i] = 0;			// ゲージ : 木辺を 0 にする
+		}
+		crs_spmv(&S, u, y, NULL);
+		double q1 = 0, vv = 0;
+		for (int i = 0; i < ne; i++) {
+			q1 += u[i] * y[i];
+			vv += u[i] * u[i];
+		}
+		const double r0 = fabs(q0) / ((dmax * uu > 0) ? (dmax * uu) : 1);
+		const double r1 = fabs(q1) / ((dmax * vv > 0) ? (dmax * vv) : 1);
+		fprintf(fp_log, "      gradient energy : before gauge %.3e, after gauge %.3e\n", r0, r1);
+		if (r1 < 1e-6) {
+			fprintf(fp_log, "*** the gauge did not remove the gradient null space\n");
+			ierr = 1;
+		}
+		free(phi);
+		free(tree);
+	}
+
+	// (f) 前処理 (Hiptmair vs Jacobi)
+	//     A = S + β T (β を小さくすると回転回転支配になり悪条件になる)
+	{
+		const double beta = 1e-3;
+		crs_t A2;
+		crs_alloc_edge(&A2);
+		for (int64_t p = 0; p < A2.nnz; p++) A2.val[p] = S.val[p] + (beta * T.val[p]);
+
+		crs_t N;
+		edge_nodal_aux(&A2, &N);
+
+		unsigned char *nofix = (unsigned char *)malloc((size_t)ne * sizeof(unsigned char));
+		memset(nofix, 0, (size_t)ne * sizeof(unsigned char));
+
+		double *xe = (double *)malloc((size_t)ne * sizeof(double));
+		double *bb = (double *)malloc((size_t)ne * sizeof(double));
+		double *xs = (double *)malloc((size_t)ne * sizeof(double));
+		for (int i = 0; i < ne; i++) xe[i] = fmod(i * 0.7548776662, 1.0) - 0.5;
+		crs_spmv(&A2, xe, bb, NULL);
+
+		const double tol = 1e-12;
+		const int mx = 20000;
+
+		// 誤差は 2 通りで測る。回転回転系の悪条件は「勾配に近い成分」に効くが、
+		// その成分は curl A = B に寄与しないので物理量には影響しない。
+		//   raw  : 辺自由度そのものの相対誤差 (ゲージ成分を含む)
+		//   curl : S ノルムの相対誤差 = 磁束密度の誤差 (物理量)
+		double *er = (double *)malloc((size_t)ne * sizeof(double));
+		double xn = 0, xs2 = 0;
+		for (int i = 0; i < ne; i++) xn += xe[i] * xe[i];
+		crs_spmv(&S, xe, y, NULL);
+		for (int i = 0; i < ne; i++) xs2 += xe[i] * y[i];
+
+		int it[2];
+		double eraw[2], ecurl[2];
+		for (int mode = 0; mode < 2; mode++) {
+			it[mode] = solver_cg_edge(&A2, ((mode == 1) ? &N : NULL), bb, xs, nofix,
+				mode, mx, 0, tol, NULL, ((mode == 1) ? "hiptmair" : "jacobi"));
+			double e1 = 0;
+			for (int i = 0; i < ne; i++) {
+				er[i] = xs[i] - xe[i];
+				e1 += er[i] * er[i];
+			}
+			eraw[mode] = sqrt(e1 / ((xn > 0) ? xn : 1));
+			crs_spmv(&S, er, y, NULL);
+			double e2 = 0;
+			for (int i = 0; i < ne; i++) e2 += er[i] * y[i];
+			ecurl[mode] = sqrt(fabs(e2) / ((xs2 > 0) ? xs2 : 1));
+		}
+		free(er);
+
+		fprintf(fp_log, "  (f) preconditioner      : A = S + %.0e T, tol %.0e\n", beta, tol);
+		for (int mode = 0; mode < 2; mode++) {
+			fprintf(fp_log, "      %-8s : %6d iterations, raw error %.3e, curl error %.3e\n",
+				((mode == 1) ? "Hiptmair" : "Jacobi"),
+				(it[mode] < 0 ? -it[mode] : it[mode]), eraw[mode], ecurl[mode]);
+		}
+		if (it[1] > 0) {
+			fprintf(fp_log, "      -> %.1fx fewer iterations, %.0fx smaller raw error\n",
+				(double)(it[0] < 0 ? -it[0] : it[0]) / (double)it[1],
+				(eraw[1] > 0) ? (eraw[0] / eraw[1]) : 0.0);
+		}
+		if ((it[0] < 0) || (it[1] < 0)) {
+			fprintf(fp_log, "*** the edge solver did not converge\n");
+			ierr = 1;
+		}
+		// 物理量 (curl) は両者とも正しく出ていなければならない
+		if ((ecurl[0] > 1e-6) || (ecurl[1] > 1e-6)) {
+			fprintf(fp_log, "*** the edge solver did not reproduce the curl of the "
+				"manufactured solution\n");
+			ierr = 1;
+		}
+		// 前処理は反復回数と (ゲージ成分を含む) 生の誤差の両方を改善すること
+		if ((it[1] > 0) && (it[0] > 0) && (it[1] >= it[0])) {
+			fprintf(fp_log, "*** the Hiptmair preconditioner did not reduce the iteration count\n");
+			ierr = 1;
+		}
+		if (eraw[1] > (eraw[0] / 10)) {
+			fprintf(fp_log, "*** the Hiptmair preconditioner did not reduce the raw error\n");
+			ierr = 1;
+		}
+
+		free(nofix);
+		free(xe);
+		free(bb);
+		free(xs);
+		crs_free(&A2);
+		crs_free(&N);
+	}
+
 	fprintf(fp_log, "  %s\n", (ierr ? "*** edge element self test FAILED" : "edge element self test passed"));
 	fflush(fp_log);
 
@@ -522,4 +664,245 @@ int solve_edge_test(FILE *fp_log)
 	edge_free();
 
 	return ierr;
+}
+
+
+// ---- 段階 3 : ゲージ固定 (tree-cotree) ----
+//
+// 回転回転行列 S の零空間は「節点関数の勾配」全体 (連結成分あたり次元 節点数-1)
+// なので、非導電領域を含む系は特異になる。全域木 (spanning tree) の辺で
+// A_e = 0 と置くと、この零空間がちょうど消える:
+//   勾配 u_e = φ_hi - φ_lo が全ての木辺で 0 <=> φ が木上で一定 <=> φ が一定 <=> u = 0
+//
+// tree[e] = 1 が木辺。戻り値は連結成分数 (木辺の数は 節点数 - 連結成分数)。
+int edge_tree(unsigned char *tree)
+{
+	const int n = NNode;
+
+	// 双方向の隣接リスト (辺番号つき)
+	int *cnt = (int *)malloc((size_t)n * sizeof(int));
+	memset(cnt, 0, (size_t)n * sizeof(int));
+	for (int e = 0; e < NEdge; e++) {
+		cnt[EdgeFrom[e]]++;
+		cnt[EdgeTo[e]]++;
+	}
+	int64_t *ptr = (int64_t *)malloc(((size_t)n + 1) * sizeof(int64_t));
+	ptr[0] = 0;
+	for (int i = 0; i < n; i++) ptr[i + 1] = ptr[i] + cnt[i];
+	int32_t *ato = (int32_t *)malloc((size_t)ptr[n] * sizeof(int32_t));
+	int32_t *aed = (int32_t *)malloc((size_t)ptr[n] * sizeof(int32_t));
+	memset(cnt, 0, (size_t)n * sizeof(int));
+	for (int e = 0; e < NEdge; e++) {
+		const int32_t a = EdgeFrom[e], b = EdgeTo[e];
+		ato[ptr[a] + cnt[a]] = b;  aed[ptr[a] + cnt[a]] = (int32_t)e;  cnt[a]++;
+		ato[ptr[b] + cnt[b]] = a;  aed[ptr[b] + cnt[b]] = (int32_t)e;  cnt[b]++;
+	}
+
+	memset(tree, 0, (size_t)NEdge * sizeof(unsigned char));
+	unsigned char *vis = (unsigned char *)malloc((size_t)n * sizeof(unsigned char));
+	memset(vis, 0, (size_t)n * sizeof(unsigned char));
+	int32_t *que = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+
+	int ncomp = 0;
+	for (int root = 0; root < n; root++) {
+		if (vis[root]) continue;
+		ncomp++;
+		int head = 0, tail = 0;
+		vis[root] = 1;
+		que[tail++] = (int32_t)root;
+		while (head < tail) {
+			const int32_t u = que[head++];
+			for (int64_t p = ptr[u]; p < ptr[u + 1]; p++) {
+				const int32_t v = ato[p];
+				if (vis[v]) continue;
+				vis[v] = 1;
+				tree[aed[p]] = 1;
+				que[tail++] = v;
+			}
+		}
+	}
+
+	free(cnt);
+	free(ptr);
+	free(ato);
+	free(aed);
+	free(vis);
+	free(que);
+
+	return ncomp;
+}
+
+
+// ---- 段階 4 : 離散勾配と節点補助行列 (Hiptmair 前処理) ----
+
+// G : 節点ベクトル -> 辺ベクトル  (u_e = φ_hi - φ_lo)
+void edge_grad(const double *phi, double *u)
+{
+	for (int e = 0; e < NEdge; e++) {
+		u[e] = phi[EdgeTo[e]] - phi[EdgeFrom[e]];
+	}
+}
+
+
+// G^T : 辺ベクトル -> 節点ベクトル
+void edge_gradT(const double *u, double *c)
+{
+	memset(c, 0, (size_t)NNode * sizeof(double));
+	for (int e = 0; e < NEdge; e++) {
+		c[EdgeTo[e]]   += u[e];
+		c[EdgeFrom[e]] -= u[e];
+	}
+}
+
+
+// 節点補助行列 N = G^T A G (節点の CRS パターンに入る)
+//
+// 辺 e, f が同じ四面体に属するとき、その端点はすべて同じ四面体の節点なので
+// 4 つの寄与先はいずれも節点隣接に含まれる。
+void edge_nodal_aux(const crs_t *A, crs_t *N)
+{
+	crs_alloc_tet(N);			// 節点の隣接パターン
+
+	for (int e = 0; e < NEdge; e++) {
+		const int32_t eh = EdgeTo[e], el = EdgeFrom[e];
+		for (int64_t p = A->rowptr[e]; p < A->rowptr[e + 1]; p++) {
+			const int32_t f = A->col[p];
+			const double v = A->val[p];
+			if (v == 0) continue;
+			const int32_t fh = EdgeTo[f], fl = EdgeFrom[f];
+			const int32_t row[4] = {eh, eh, el, el};
+			const int32_t col[4] = {fh, fl, fh, fl};
+			const double  sgn[4] = {+1, -1, -1, +1};
+			for (int q = 0; q < 4; q++) {
+				int64_t lo = N->rowptr[row[q]];
+				int64_t hi = N->rowptr[row[q] + 1] - 1;
+				int64_t pos = -1;
+				while (lo <= hi) {
+					const int64_t mid = (lo + hi) / 2;
+					if      (N->col[mid] < col[q]) lo = mid + 1;
+					else if (N->col[mid] > col[q]) hi = mid - 1;
+					else { pos = mid; break; }
+				}
+				if (pos >= 0) N->val[pos] += sgn[q] * v;
+			}
+		}
+	}
+}
+
+
+// ---- 辺系の PCG (Jacobi / Hiptmair 前処理) ----
+//
+// precond = 0 : 対角 (Jacobi)
+//         = 1 : Hiptmair (辺の対角 + 節点空間の補正)
+//
+//   M^-1 r = D_e^-1 r + G [ N^-1 (G^T r) ]
+//
+// 回転回転演算子の悪条件は「勾配に近い成分」が原因なので、その成分を節点空間へ
+// 移して処理する。節点空間の解は N の Jacobi 多項式 (固定回数) で近似するので、
+// 前処理全体は固定の対称正定値作用素になり CG の前提を壊さない。
+int solver_cg_edge(const crs_t *A, const crs_t *N, const double *b, double *x,
+	const unsigned char *fix, int precond, int maxiter, int nout, double converg,
+	FILE *fp_log, const char *label)
+{
+	const int n = (int)A->n;
+
+	double *r = (double *)malloc((size_t)n * sizeof(double));
+	double *rp = (double *)malloc((size_t)n * sizeof(double));
+	double *p = (double *)malloc((size_t)n * sizeof(double));
+	double *q = (double *)malloc((size_t)n * sizeof(double));
+	double *z = (double *)malloc((size_t)n * sizeof(double));
+	double *d = (double *)malloc((size_t)n * sizeof(double));
+	double *nc = NULL, *ny = NULL, *gy = NULL;
+	unsigned char *nfix = NULL;
+
+	crs_diag(A, d);
+	for (int i = 0; i < n; i++) {
+		if (fix[i] || (d[i] <= 0)) d[i] = 1;
+	}
+	if (precond == 1) {
+		nc = (double *)malloc((size_t)NNode * sizeof(double));
+		ny = (double *)malloc((size_t)NNode * sizeof(double));
+		gy = (double *)malloc((size_t)n * sizeof(double));
+		// 節点補助系は定数 (勾配の定数分) だけ不定なので 1 点を固定する
+		nfix = (unsigned char *)malloc((size_t)NNode * sizeof(unsigned char));
+		memset(nfix, 0, (size_t)NNode * sizeof(unsigned char));
+		nfix[0] = 1;
+	}
+
+	for (int i = 0; i < n; i++) {
+		x[i] = 0;
+		r[i] = (fix[i] ? 0 : b[i]);
+		rp[i] = 0;
+	}
+	double bn = 0;
+	for (int i = 0; i < n; i++) bn += r[i] * r[i];
+	bn = sqrt(bn);
+	if (bn <= 0) {
+		free(r); free(rp); free(p); free(q); free(z); free(d);
+		free(nc); free(ny); free(gy); free(nfix);
+		return 0;
+	}
+
+	// 前処理の適用 : z = D_e^-1 r + G [ N^-1 (G^T r) ]
+	// 節点空間の解は内側 Jacobi-PCG で近似する。近似度が反復毎に変わるので
+	// 外側は flexible CG (Polak-Ribiere 型の β) にして前提を壊さないようにする。
+	#define APPLY_M                                                            \
+		do {                                                                   \
+			for (int i = 0; i < n; i++) z[i] = (fix[i] ? 0 : r[i] / d[i]);     \
+			if (precond == 1) {                                                \
+				edge_gradT(r, nc);                                             \
+				nc[0] = 0;                                                     \
+				solver_cg(N, nc, ny, nfix, 2000, 0, 1e-12, NULL, "aux");         \
+				edge_grad(ny, gy);                                             \
+				for (int i = 0; i < n; i++) {                                  \
+					if (!fix[i]) z[i] += gy[i];                                \
+				}                                                              \
+			}                                                                  \
+		} while (0)
+
+	APPLY_M;
+	for (int i = 0; i < n; i++) p[i] = z[i];
+	double rz = 0;
+	for (int i = 0; i < n; i++) rz += r[i] * z[i];
+
+	int iter = 0;
+	double resid = 1;
+	int converged = 0;
+	for (iter = 1; iter <= maxiter; iter++) {
+		crs_spmv(A, p, q, fix);
+		double pq = 0;
+		for (int i = 0; i < n; i++) pq += p[i] * q[i];
+		if (pq <= 0) break;
+		const double alpha = rz / pq;
+		for (int i = 0; i < n; i++) {
+			x[i] += alpha * p[i];
+			r[i] -= alpha * q[i];
+		}
+		double rr = 0;
+		for (int i = 0; i < n; i++) rr += r[i] * r[i];
+		resid = sqrt(rr) / bn;
+		if ((fp_log != NULL) && (nout > 0) && ((iter % nout) == 0)) {
+			fprintf(fp_log, "  %-12s %8d %13.5e\n", label, iter, resid);
+		}
+		if (resid < converg) {
+			converged = 1;
+			break;
+		}
+		for (int i = 0; i < n; i++) rp[i] = r[i] + (alpha * q[i]);	// 直前の r
+		APPLY_M;
+		double rzn = 0, ryn = 0;
+		for (int i = 0; i < n; i++) {
+			rzn += r[i] * z[i];
+			ryn += (r[i] - rp[i]) * z[i];		// flexible CG (Polak-Ribiere)
+		}
+		const double beta = ryn / rz;
+		rz = rzn;
+		for (int i = 0; i < n; i++) p[i] = z[i] + (beta * p[i]);
+	}
+	#undef APPLY_M
+
+	free(r); free(rp); free(p); free(q); free(z); free(d);
+	free(nc); free(ny); free(gy); free(nfix);
+
+	return (converged ? iter : -iter);
 }

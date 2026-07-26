@@ -25,6 +25,7 @@
 #   box_tet        : 非構造格子 (四面体) の平行平板 C     (厳密、許容 0.1%)
 #   coax_tet       : 円形境界に適合した四面体格子の同軸 C', L' (許容 1%)
 #   edge_test      : Whitney 辺要素 (1 次 Nedelec) の自己検証 (機械精度)
+#                    + ゲージ固定 (tree-cotree) と Hiptmair 前処理の検証
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -201,6 +202,12 @@ for pair in "gradient-null:$grad" "mass:$mass" "uniform-curl:$curl0" "rotational
 	echo "  $nm : $vv -> $res"
 	case "$res" in NG*) status=1 ;; esac
 done
+# ゲージ固定と前処理の要約を表示する (合否は自己検証の総合判定で見る)
+awk '/\(e\) spanning tree/ { print "  " $0 }
+     /gradient energy/       { print "  " $0 }
+     /Jacobi   :/            { print "  " $0 }
+     /Hiptmair :/            { print "  " $0 }
+     /-> .*fewer iterations/ { print "  " $0 }' "$WORK/ofe.log"
 if ! grep -q "edge element self test passed" "$WORK/ofe.log"; then
 	echo "  *** edge element self test failed" >&2
 	status=1

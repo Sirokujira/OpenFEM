@@ -152,6 +152,7 @@ EXTERN unsigned char *TetMat;	// [NTet] 材料番号
 EXTERN int NEdge;
 EXTERN int64_t *EdgePtr;		// [NNode+1] 節点 i を始点とする辺の範囲
 EXTERN int32_t *EdgeTo;			// [NEdge] 終点 (昇順)
+EXTERN int32_t *EdgeFrom;		// [NEdge] 始点 (節点番号の小さい方)
 EXTERN int32_t *TetEdge;		// [6*NTet] 四面体の辺番号
 EXTERN signed char *TetEdgeSgn;	// [6*NTet] 局所の並びと全体の向きの符号
 
