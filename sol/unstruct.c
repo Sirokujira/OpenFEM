@@ -126,9 +126,15 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 				Tri = (int32_t *)realloc(Tri, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
 				TriTag = (int *)realloc(TriTag, (size_t)(NTri + ARRAY_INC) * sizeof(int));
 			}
+			// 四面体と同じく未解決の節点番号は打ち切る。ここで continue すると
+			// Tri[] の該当要素が未初期化のまま確定し、setup_unstruct() が
+			// それを添字に使って領域外書き込みになる
 			for (int l = 0; l < 3; l++) {
 				const long g = v[off + l];
-				if ((g < 0) || (g > maxid) || (idmap[g] < 0)) continue;
+				if ((g < 0) || (g > maxid) || (idmap[g] < 0)) {
+					printf("*** mesh : element %d refers to an unknown node %ld\n", e + 1, g);
+					return 1;
+				}
 				Tri[(NTri * 3) + l] = idmap[g];
 			}
 			TriTag[NTri] = tag;

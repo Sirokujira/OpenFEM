@@ -361,15 +361,24 @@ void assemble_edge(crs_t *S, crs_t *T)
 
 // ---- 段階 1+2 の検証 (analysis = E) ----
 //
-// 辺要素の性質を厳密に満たすべき 3 つの量で検査する。
+// 辺要素の性質を厳密に満たすべき量で検査する。
 // いずれも解析解が閉形式で分かるので、要素行列・辺の向き・組み立ての
 // どこかが間違っていれば必ず落ちる。
 //
 //  (a) 勾配は回転回転行列の零空間に入る
 //      節点値 φ の勾配は辺自由度 u_e = φ_hi - φ_lo で厳密に表せるので u^T S u = 0
 //  (b) 一様場 E0 の質量 : u_e = E0・(p_hi - p_lo) として u^T T u = |E0|^2 Σ σ_e V_e
-//  (c) 回転場 E = (1/2)(z × r) : curl E = z なので u^T S u = Σ ν_e V_e
-//      (この場は最低次 Nedelec 空間 {a + b × r} に含まれるので補間は厳密)
+//  (b') 一様場は回転が 0 なので u^T S u = 0
+//  (c) 回転場 E = (1/2)(a × r) : curl E = a なので u^T S u = Σ (a^T ν_e a) V_e
+//      a は軸に平行でない向き (1,2,3) にとる。軸に平行だと ν の 1 成分しか
+//      比較に効かず、他の対角成分や非対角成分の誤りを見逃す
+//  (c2) 同じ回転場の質量 : u^T T u = Σ σ_e ∫|E|^2 dV
+//      (b) の一様場は Nedelec 補間が要素内で定数になるのでどんな数値積分でも
+//      厳密になってしまう。空間変化する場でないと質量行列の階数落ちを検出できない
+//  (d) S と T の対称性
+//
+// (b) (c) (c2) の場はいずれも最低次 Nedelec 空間 {a + b × r} に含まれるので
+// 補間は厳密で、比較は機械精度の恒等式になる。
 int solve_edge_test(FILE *fp_log)
 {
 	int ierr = 0;
@@ -387,8 +396,17 @@ int solve_edge_test(FILE *fp_log)
 	fprintf(fp_log, "  edge matrix : %lld nonzeros (%.1f per row)\n",
 		(long long)S.nnz, (double)S.nnz / ((NEdge > 0) ? NEdge : 1));
 
-	// 材料の体積積分 (Σ σ V, Σ ν V)
-	double svol = 0, nvol = 0, vtot = 0;
+	// (c) (c2) で使う回転場 E = (1/2)(av × r) の回転ベクトル。
+	// 軸に平行にすると ν の 1 成分しか比較に効かないので斜めにとる
+	const double av[3] = {1.0, 2.0, 3.0};
+
+	// 材料の体積積分
+	//   svol = Σ σ_e V_e                   ... (b) の厳密値 / |E0|^2
+	//   nvol = Σ (av^T ν_e av) V_e         ... (c) の厳密値
+	//   mvol = Σ σ_e ∫|E|^2 dV             ... (c2) の厳密値
+	// ∫|E|^2 は E が 1 次なので節点値から厳密に出せる:
+	//   ∫ λ_a λ_b dV = V (1 + δ_ab) / 20 より ∫ p q dV = V[(Σp_a)(Σq_b) + Σ_a p_a q_a] / 20
+	double svol = 0, nvol = 0, mvol = 0, vtot = 0;
 	for (int e = 0; e < NTet; e++) {
 		double g[4][3], vol;
 		if (tet_grad_pub(&Tet[e * 4], g, &vol)) continue;
@@ -396,10 +414,28 @@ int solve_edge_test(FILE *fp_log)
 		double nu[6];
 		material_coef_pub(m, 3, nu);
 		svol += Material[m].sigma * vol;
-		nvol += nu[0] * vol;
+		nvol += ((nu[0] * av[0] * av[0]) + (nu[1] * av[1] * av[1]) + (nu[2] * av[2] * av[2])
+		      + (2 * nu[3] * av[0] * av[1]) + (2 * nu[4] * av[1] * av[2])
+		      + (2 * nu[5] * av[2] * av[0])) * vol;
+
+		const int32_t *nd = &Tet[e * 4];
+		double ee = 0;
+		for (int p = 0; p < 3; p++) {
+			const int p1 = (p + 1) % 3, p2 = (p + 2) % 3;
+			double s = 0, s2 = 0;
+			for (int a = 0; a < 4; a++) {
+				const double r1 = (p1 == 0) ? Xp[nd[a]] : ((p1 == 1) ? Yp[nd[a]] : Zp[nd[a]]);
+				const double r2 = (p2 == 0) ? Xp[nd[a]] : ((p2 == 1) ? Yp[nd[a]] : Zp[nd[a]]);
+				const double ea = ((av[p1] * r2) - (av[p2] * r1)) / 2;	// E_p at node a
+				s += ea;
+				s2 += ea * ea;
+			}
+			ee += ((s * s) + s2) / 20;
+		}
+		mvol += Material[m].sigma * ee * vol;
 		vtot += vol;
 	}
-	fprintf(fp_log, "  volume = %.6e [m^3], sum(sigma V) = %.6e, sum(nu V) = %.6e\n",
+	fprintf(fp_log, "  volume = %.6e [m^3], sum(sigma V) = %.6e, sum(a^T nu a V) = %.6e\n",
 		vtot, svol, nvol);
 
 	const int ne = NEdge;
@@ -476,15 +512,19 @@ int solve_edge_test(FILE *fp_log)
 		if (rel2 > 1e-10) ierr = 1;
 	}
 
-	// (c) 回転場 E = (1/2)(z × r) -> curl E = z
+	// (c) 回転場 E = (1/2)(av × r) -> curl E = av
+	// (c2) 同じ場の質量。空間変化する場なので質量行列の階数落ちも検出できる
 	{
 		for (int i = 0; i < ne; i++) {
 			const int32_t a = elo[i], b = EdgeTo[i];
 			const double xm = (Xp[a] + Xp[b]) / 2;
 			const double ym = (Yp[a] + Yp[b]) / 2;
-			// E = (1/2)(-y, x, 0)、直線辺上で E は 1 次なので中点則で厳密
-			const double ex = -ym / 2, ey = xm / 2;
-			u[i] = (ex * (Xp[b] - Xp[a])) + (ey * (Yp[b] - Yp[a]));
+			const double zm = (Zp[a] + Zp[b]) / 2;
+			// 直線辺上で E は 1 次なので中点則で厳密
+			const double ex = ((av[1] * zm) - (av[2] * ym)) / 2;
+			const double ey = ((av[2] * xm) - (av[0] * zm)) / 2;
+			const double ez = ((av[0] * ym) - (av[1] * xm)) / 2;
+			u[i] = (ex * (Xp[b] - Xp[a])) + (ey * (Yp[b] - Yp[a])) + (ez * (Zp[b] - Zp[a]));
 		}
 		crs_spmv(&S, u, y, NULL);
 		double q = 0;
@@ -496,27 +536,40 @@ int solve_edge_test(FILE *fp_log)
 			fprintf(fp_log, "*** the curl-curl matrix is wrong\n");
 			ierr = 1;
 		}
+
+		crs_spmv(&T, u, y, NULL);
+		double q2 = 0;
+		for (int i = 0; i < ne; i++) q2 += u[i] * y[i];
+		const double rel2 = fabs(q2 - mvol) / ((mvol != 0) ? fabs(mvol) : 1);
+		fprintf(fp_log, "  (c2) rotational mass    : u^T T u = %.10e, exact = %.10e, err = %.3e\n",
+			q2, mvol, rel2);
+		if (rel2 > 1e-10) {
+			fprintf(fp_log, "*** the edge mass matrix is wrong (non-uniform field)\n");
+			ierr = 1;
+		}
 	}
 
 	// (d) 対称性
 	{
-		double amax = 0, sdif = 0, tdif = 0;
+		double amax = 0, tmax = 0, sdif = 0, tdif = 0;
 		for (int i = 0; i < ne; i++) {
 			for (int64_t p = S.rowptr[i]; p < S.rowptr[i + 1]; p++) {
 				const int32_t j = S.col[p];
 				const int64_t pj = crs_find_edge(&S, j, (int32_t)i);
 				if (pj < 0) continue;
 				if (fabs(S.val[p]) > amax) amax = fabs(S.val[p]);
+				if (fabs(T.val[p]) > tmax) tmax = fabs(T.val[p]);
 				const double d = fabs(S.val[p] - S.val[pj]);
 				if (d > sdif) sdif = d;
 				const double dt = fabs(T.val[p] - T.val[pj]);
 				if (dt > tdif) tdif = dt;
 			}
 		}
-		const double rel = ((amax > 0) ? (sdif / amax) : 0);
-		fprintf(fp_log, "  (d) symmetry            : max|S-S^T|/max|S| = %.3e\n", rel);
-		if (rel > 1e-12) ierr = 1;
-		(void)tdif;
+		const double rel  = ((amax > 0) ? (sdif / amax) : 0);
+		const double relt = ((tmax > 0) ? (tdif / tmax) : 0);
+		fprintf(fp_log, "  (d) symmetry            : max|S-S^T|/max|S| = %.3e   "
+			"max|T-T^T|/max|T| = %.3e\n", rel, relt);
+		if ((rel > 1e-12) || (relt > 1e-12)) ierr = 1;
 	}
 
 	// (e) ゲージ固定 (tree-cotree)

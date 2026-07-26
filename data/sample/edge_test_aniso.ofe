@@ -1,0 +1,25 @@
+OpenFEM 1 0
+title = Nedelec edge element self test (anisotropic nu)
+#
+# edge_test.ofe と同じ自己検証を、非対角成分まで詰まった異方性 μ で行う。
+# 等方性材料だと ν の非対角成分 (nu[3..5]) が恒等的に 0 なので、
+# 要素行列の異方性項は一度も実行されない (死んだコードになる)。
+# こちらは 6 成分すべてが非零なので
+#   ・成分順序 (xx, yy, zz, xy, yz, zx) の取り違え
+#   ・非対角項の係数 2 の欠落
+#   ・k <-> l の非対称な転記
+# がすべて (c) または (d) で落ちる。
+#
+# μ_r = [4.0 0.5 1.1 ; 0.5 3.0 0.7 ; 1.1 0.7 2.0]
+# 主小行列式 4, 11.75, 18.68 > 0 なので正定値 (ν = (μ0 μ_r)^-1 も正定値)
+#
+mesh = box_tet.msh
+material = 1.0 1e6
+anisomur = 2 4.0 3.0 2.0 0.5 0.7 1.1
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = E
+solver = 50000 2000 1e-13
+end

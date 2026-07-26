@@ -26,6 +26,8 @@
 #   coax_tet       : 円形境界に適合した四面体格子の同軸 C', L' (許容 1%)
 #   edge_test      : Whitney 辺要素 (1 次 Nedelec) の自己検証 (機械精度)
 #                    + ゲージ固定 (tree-cotree) と Hiptmair 前処理の検証
+#   edge_test_aniso : 同じ自己検証を非対角成分まで詰まった異方性 ν で行う
+#                    (等方性だけだと異方性項が一度も実行されない)
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -186,32 +188,46 @@ compare "C [F/m]" "$(value_of C)" 1.063417e-10 0.01
 compare "L [H/m]" "$(value_of L)" 2.1972246e-07 0.01
 
 # 辺要素 (Nedelec) の自己検証。3 次元渦電流 (A-φ) の基盤
-# 勾配の零空間・一様場の質量・回転場の回転回転・対称性を閉形式と比較する
+# 勾配の零空間・一様場の質量・回転場の回転回転と質量・対称性を閉形式と比較する
+edge_selftest() {
+	run_case "$1"
+	grad=$(awk  '/gradient null space/ { print $NF }' "$WORK/ofe.log")
+	mass=$(awk  '/uniform field mass/  { print $NF }' "$WORK/ofe.log")
+	curl0=$(awk '/uniform field curl/  { print $NF }' "$WORK/ofe.log")
+	rot=$(awk   '/rotational field/    { print $NF }' "$WORK/ofe.log")
+	rotm=$(awk  '/rotational mass/     { print $NF }' "$WORK/ofe.log")
+	# (d) の行は S と T の 2 値を持つ ($6 が S、$NF が T)
+	syms=$(awk '/symmetry  / { print $6  }' "$WORK/ofe.log")
+	symt=$(awk '/symmetry  / { print $NF }' "$WORK/ofe.log")
+	for pair in "gradient-null:$grad" "mass:$mass" "uniform-curl:$curl0" \
+	            "rotational-curl:$rot" "rotational-mass:$rotm" \
+	            "symmetry-S:$syms" "symmetry-T:$symt"; do
+		nm=${pair%%:*}
+		vv=${pair#*:}
+		res=$(awk -v v="$vv" 'BEGIN{ if (v == "") { print "NG (no value)"; exit }
+		                             printf "%s", (v < 1e-10) ? "OK" : "NG" }')
+		echo "  $nm : $vv -> $res"
+		case "$res" in NG*) status=1 ;; esac
+	done
+	if ! grep -q "edge element self test passed" "$WORK/ofe.log"; then
+		echo "  *** edge element self test failed" >&2
+		status=1
+	fi
+}
+
 echo "[edge_test] Nedelec edge element self test"
-run_case edge_test
-grad=$(awk '/gradient null space/ { print $NF }' "$WORK/ofe.log")
-mass=$(awk '/uniform field mass/  { print $NF }' "$WORK/ofe.log")
-curl0=$(awk '/uniform field curl/ { print $NF }' "$WORK/ofe.log")
-rot=$(awk '/rotational field/     { print $NF }' "$WORK/ofe.log")
-sym=$(awk '/symmetry  / { print $NF }' "$WORK/ofe.log")
-for pair in "gradient-null:$grad" "mass:$mass" "uniform-curl:$curl0" "rotational:$rot" "symmetry:$sym"; do
-	nm=${pair%%:*}
-	vv=${pair#*:}
-	res=$(awk -v v="$vv" 'BEGIN{ if (v == "") { print "NG (no value)"; exit }
-	                             printf "%s", (v < 1e-10) ? "OK" : "NG" }')
-	echo "  $nm : $vv -> $res"
-	case "$res" in NG*) status=1 ;; esac
-done
+edge_selftest edge_test
 # ゲージ固定と前処理の要約を表示する (合否は自己検証の総合判定で見る)
 awk '/\(e\) spanning tree/ { print "  " $0 }
      /gradient energy/       { print "  " $0 }
      /Jacobi   :/            { print "  " $0 }
      /Hiptmair :/            { print "  " $0 }
      /-> .*fewer iterations/ { print "  " $0 }' "$WORK/ofe.log"
-if ! grep -q "edge element self test passed" "$WORK/ofe.log"; then
-	echo "  *** edge element self test failed" >&2
-	status=1
-fi
+
+# 等方性材料では ν の非対角成分が恒等的に 0 で異方性項が実行されないため、
+# 6 成分すべてが非零な μ でもう一度回して成分順序と対称性を検証する
+echo "[edge_test_aniso] the same self test with a fully anisotropic nu"
+edge_selftest edge_test_aniso
 
 # ヒステリシス (Jiles-Atherton) : H = I/W が Ampere の法則で厳密に決まるので、
 # FEM の結果はスカラー J-A モデルを H 掃引で積分した ODE 解と一致しなければならない
