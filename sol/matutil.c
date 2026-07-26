@@ -151,3 +151,32 @@ int mat_inverse_c(const double *ar, const double *ai, double *br, double *bi, in
 
 	return 0;
 }
+
+
+// 対称 3x3 テンソル (成分順 xx, yy, zz, xy, yz, zx) の逆行列
+// 透磁率テンソル μ から磁気抵抗率テンソル ν = μ^-1 を作るのに使う
+// 戻り値 : 0 = 正常、1 = 特異
+int tensor6_inverse(const double a[6], double b[6])
+{
+	const double xx = a[0], yy = a[1], zz = a[2];
+	const double xy = a[3], yz = a[4], zx = a[5];
+
+	const double c00 = (yy * zz) - (yz * yz);
+	const double c11 = (xx * zz) - (zx * zx);
+	const double c22 = (xx * yy) - (xy * xy);
+	const double c01 = (yz * zx) - (xy * zz);
+	const double c12 = (xy * zx) - (xx * yz);
+	const double c02 = (xy * yz) - (yy * zx);
+
+	const double det = (xx * c00) + (xy * c01) + (zx * c02);
+	if (fabs(det) <= 0) return 1;
+
+	b[0] = c00 / det;
+	b[1] = c11 / det;
+	b[2] = c22 / det;
+	b[3] = c01 / det;
+	b[4] = c12 / det;
+	b[5] = c02 / det;
+
+	return 0;
+}

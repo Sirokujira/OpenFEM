@@ -33,11 +33,12 @@ void crs_diag(const crs_t *, double *);
 double crs_row_dot(const crs_t *, int64_t, const double *);
 
 // assemble.c
-void element_matrix(double, double, double, const double [3], double [8][8]);
+void element_matrix(double, double, double, const double [6], double [8][8]);
+int tensor6_inverse(const double [6], double [6]);
 void assemble(crs_t *, int);
 void assemble_nu(crs_t *, const double *);
 void assemble_mass(crs_t *);
-double bh_nu(const material_t *, double);
+double bh_nu(const material_t *, int, double);
 void assemble_newton(crs_t *, const double *, double *);
 
 // solver_cg.c

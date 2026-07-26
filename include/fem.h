@@ -78,11 +78,14 @@ typedef struct {
 	int    npole;				// 分散極の数 (0 : 分散なし)
 	double einf;				// ε∞
 	pole_t pole[MAXPOLE];
-	double epsr3[3];			// 異方性の比誘電率 (既定は epsr と同じ)
-	double mur3[3];				// 異方性の比透磁率 (既定は mur と同じ)
-	int    nbh;					// B-H 曲線の点数 (0 : 線形、mur を使う)
-	double bh_h[MAXBH];			// H [A/m]
-	double bh_b[MAXBH];			// B [T] (狭義単調増加、B > 0)
+	// 異方性テンソル (対称、成分順 xx, yy, zz, xy, yz, zx)。既定は等方性
+	double eps6[6];				// 比誘電率テンソル
+	double mu6[6];				// 比透磁率テンソル
+	// B-H 曲線 (軸毎)。bhaniso = 0 なら軸 0 の曲線を |B| に対して等方的に使う
+	int    bhaniso;				// 1 : 軸毎に別の曲線 (直交異方性)
+	int    nbh[3];				// 各軸の点数 (0 : 線形、mu6 を使う)
+	double bh_h[3][MAXBH];		// H [A/m]
+	double bh_b[3][MAXBH];		// B [T] (狭義単調増加、B > 0)
 } material_t;
 
 // 形状 (shape/g は OpenFDTD の geometry と共通)

@@ -142,12 +142,12 @@ static int solve_magnetostatic(FILE *fp_log)
 	const int64_t ncell = (int64_t)Nx * Ny * Nz;
 	int nonlinear = 0;
 	for (int m = 0; m < NMaterial; m++) {
-		if (Material[m].nbh > 0) nonlinear = 1;
+		if (Material[m].nbh[0] > 0) nonlinear = 1;
 	}
 	double *nucell = (double *)malloc((size_t)ncell * sizeof(double));
 	for (int64_t c = 0; c < ncell; c++) {
 		const material_t *mt = &Material[CellMaterial[c]];
-		nucell[c] = ((mt->nbh > 0) ? bh_nu(mt, 0) : (1 / (MU0 * mt->mur)));
+		nucell[c] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0) : (1 / (MU0 * mt->mu6[0])));
 	}
 	assemble_nu(&A, nucell);
 

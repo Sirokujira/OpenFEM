@@ -1,0 +1,30 @@
+OpenFEM 1 0
+title = parallel plate with a rotated anisotropic tensor (off-diagonal)
+#
+# aniso_plate.ofe と同じ形状・同じ主値 (10, 5, 2) の異方性誘電体を、
+# z 軸まわりに 30 度回転させた非対角テンソルで与える:
+#
+#   C = Rz(30) diag(10,5,2) Rz(30)^T
+#     -> exx = 8.75, eyy = 6.25, ezz = 2.0, exy = 2.165063509, eyz = ezx = 0
+#
+# z 軸まわりの回転は z 成分を混ぜないので、電極が z 面なら容量は変わらない:
+#
+#   C = eps0 * 2.0 * 1e-6 / 0.2e-3 = 8.854188e-14 [F]  (aniso_plate と同値)
+#
+# 非対角成分 exy を無視したり添字を取り違えると値がずれるので、
+# 対称テンソルの組み立ての検査になる。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 4 1e-3
+zmesh = 0 8 0.2e-3
+
+material = 1.0 0
+anisoeps = 2 8.75 6.25 2.0 2.165063509 0 0
+geometry = 2 1 0 1e-3 0 1e-3 0 0.2e-3
+
+conductor = 0 1 0 1e-3 0 1e-3 0      0
+conductor = 1 1 0 1e-3 0 1e-3 0.2e-3 0.2e-3
+
+analysis = C
+solver = 20000 500 1e-12
+end

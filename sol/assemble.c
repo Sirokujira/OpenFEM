@@ -21,9 +21,9 @@ assemble.c
 #define LK(l) ((l) & 1)
 
 
-// 直方体要素 (dx x dy x dz) の ∫ (cx ∂Ni/∂x ∂Nj/∂x + cy ... + cz ...) dV
-// 等方性材料では c[0]=c[1]=c[2] とする
-void element_matrix(double dx, double dy, double dz, const double c[3], double ke[8][8])
+// 直方体要素 (dx x dy x dz) の ∫ (∇Ni)^T C (∇Nj) dV
+// C は対称テンソル (成分順 xx, yy, zz, xy, yz, zx)。等方性なら対角のみ
+void element_matrix(double dx, double dy, double dz, const double c[6], double ke[8][8])
 {
 	const double gp = 1 / sqrt(3.0);		// 2 点 Gauss 積分点
 	const double detj = (dx * dy * dz) / 8;
@@ -56,7 +56,10 @@ void element_matrix(double dx, double dy, double dz, const double c[3], double k
 			for (int m = 0; m < 8; m++) {
 				ke[l][m] += ((c[0] * dn[l][0] * dn[m][0])
 				          +  (c[1] * dn[l][1] * dn[m][1])
-				          +  (c[2] * dn[l][2] * dn[m][2])) * detj;
+				          +  (c[2] * dn[l][2] * dn[m][2])
+				          +  (c[3] * ((dn[l][0] * dn[m][1]) + (dn[l][1] * dn[m][0])))
+				          +  (c[4] * ((dn[l][1] * dn[m][2]) + (dn[l][2] * dn[m][1])))
+				          +  (c[5] * ((dn[l][2] * dn[m][0]) + (dn[l][0] * dn[m][2])))) * detj;
 			}
 		}
 	}
@@ -68,25 +71,37 @@ void element_matrix(double dx, double dy, double dz, const double c[3], double k
 //        = 1 : ε0              真空静電界 (TEM インダクタンス)
 //        = 2 : σ + ω ε0 εr tanδ  定常電流界 (導電損 + 誘電損)
 //        = 3 : 1 / (μ0 μr)     静磁場 (DC インダクタンス)
-static void material_coef(int m, int mode, double c[3])
+static void material_coef(int m, int mode, double c[6])
 {
 	const material_t *mt = &Material[m];
 
-	for (int d = 0; d < 3; d++) {
-		if      (mode == 0) {
-			c[d] = EPS0 * mt->epsr3[d];
+	for (int d = 0; d < 6; d++) c[d] = 0;
+
+	if      (mode == 0) {
+		for (int d = 0; d < 6; d++) c[d] = EPS0 * mt->eps6[d];
+	}
+	else if (mode == 1) {
+		c[0] = c[1] = c[2] = EPS0;			// 真空 (等方性)
+	}
+	else if (mode == 2) {
+		// 誘電損は等価導電率 σ_d = ω ε0 εr tanδ として扱う (frequency 未指定なら 0)
+		const double omega = 2 * PI * Freq;
+		for (int d = 0; d < 6; d++) {
+			c[d] = omega * EPS0 * mt->eps6[d] * mt->tand;
 		}
-		else if (mode == 1) {
-			c[d] = EPS0;
+		c[0] += mt->sigma;					// 導電率は等方性
+		c[1] += mt->sigma;
+		c[2] += mt->sigma;
+	}
+	else {
+		// 磁気抵抗率テンソル ν = (μ0 μ~)^-1
+		double mu[6], nu[6];
+		for (int d = 0; d < 6; d++) mu[d] = MU0 * mt->mu6[d];
+		if (tensor6_inverse(mu, nu)) {
+			nu[0] = nu[1] = nu[2] = 1 / MU0;
+			nu[3] = nu[4] = nu[5] = 0;
 		}
-		else if (mode == 2) {
-			// 誘電損は等価導電率 σ_d = ω ε0 εr tanδ として扱う (frequency 未指定なら 0)
-			const double omega = 2 * PI * Freq;
-			c[d] = mt->sigma + (omega * EPS0 * mt->epsr3[d] * mt->tand);
-		}
-		else {
-			c[d] = 1 / (MU0 * mt->mur3[d]);
-		}
+		for (int d = 0; d < 6; d++) c[d] = nu[d];
 	}
 }
 
@@ -167,28 +182,42 @@ void assemble_mass(crs_t *A)
 //   B < B[0]      : 初期磁気抵抗率 H[0]/B[0] (原点と第 1 点を結ぶ直線)
 //   B[i]..B[i+1]  : H を線形補間
 //   B > B[last]   : 最終区間の傾きで外挿 (飽和後も解が発散しないようにする)
-double bh_nu(const material_t *mt, double b)
+// 軸 ax の曲線で H(|b|) と dH/dB を求める (|b| < B[0] は初期透磁率の直線)
+static void bh_h_dh(const material_t *mt, int ax, double b, double *h, double *dh)
 {
-	const int n = mt->nbh;
-	const double nu0 = mt->bh_h[0] / mt->bh_b[0];
+	const int n = mt->nbh[ax];
+	const double *hh = mt->bh_h[ax];
+	const double *bb = mt->bh_b[ax];
+	const double nu0 = hh[0] / bb[0];
 
-	if (b <= mt->bh_b[0]) {
-		return nu0;					// b -> 0 でも有限 (初期透磁率)
+	if (b <= bb[0]) {
+		*h = nu0 * b;
+		*dh = nu0;
+		return;
 	}
 
-	double h;
-	if (b >= mt->bh_b[n - 1]) {
+	if (b >= bb[n - 1]) {
 		const double slope = (n >= 2)
-			? ((mt->bh_h[n - 1] - mt->bh_h[n - 2]) / (mt->bh_b[n - 1] - mt->bh_b[n - 2]))
-			: nu0;
-		h = mt->bh_h[n - 1] + (slope * (b - mt->bh_b[n - 1]));
+			? ((hh[n - 1] - hh[n - 2]) / (bb[n - 1] - bb[n - 2])) : nu0;
+		*h = hh[n - 1] + (slope * (b - bb[n - 1]));
+		*dh = slope;
 	}
 	else {
 		int i = 0;
-		while ((i < n - 2) && (b > mt->bh_b[i + 1])) i++;
-		const double t = (b - mt->bh_b[i]) / (mt->bh_b[i + 1] - mt->bh_b[i]);
-		h = mt->bh_h[i] + (t * (mt->bh_h[i + 1] - mt->bh_h[i]));
+		while ((i < n - 2) && (b > bb[i + 1])) i++;
+		const double slope = (hh[i + 1] - hh[i]) / (bb[i + 1] - bb[i]);
+		*h = hh[i] + (slope * (b - bb[i]));
+		*dh = slope;
 	}
+}
+
+
+double bh_nu(const material_t *mt, int ax, double b)
+{
+	if (b <= 0) return mt->bh_h[ax][0] / mt->bh_b[ax][0];
+
+	double h, dh;
+	bh_h_dh(mt, ax, b, &h, &dh);
 
 	return h / b;
 }
@@ -199,34 +228,19 @@ double bh_nu(const material_t *mt, double b)
 // H(B) が単調増加なら ν + 2 B^2 dν/d(B^2) = dH/dB > 0 なのでヤコビアンは正定値になる
 static void bh_nu_dnu(const material_t *mt, double b, double *nu, double *dnudb2)
 {
-	if (mt->nbh <= 0) {
-		*nu = 1 / (MU0 * mt->mur);
+	if (mt->nbh[0] <= 0) {
+		*nu = 1 / (MU0 * mt->mu6[0]);
 		*dnudb2 = 0;
 		return;
 	}
-
-	const int n = mt->nbh;
-	const double nu0 = mt->bh_h[0] / mt->bh_b[0];
-
-	if (b <= mt->bh_b[0]) {
-		*nu = nu0;					// 原点と第 1 点を結ぶ直線 (初期透磁率)
+	if (b <= mt->bh_b[0][0]) {
+		*nu = mt->bh_h[0][0] / mt->bh_b[0][0];	// 初期透磁率
 		*dnudb2 = 0;
 		return;
 	}
 
 	double h, hp;
-	if (b >= mt->bh_b[n - 1]) {
-		hp = (n >= 2)
-			? ((mt->bh_h[n - 1] - mt->bh_h[n - 2]) / (mt->bh_b[n - 1] - mt->bh_b[n - 2]))
-			: nu0;
-		h = mt->bh_h[n - 1] + (hp * (b - mt->bh_b[n - 1]));
-	}
-	else {
-		int i = 0;
-		while ((i < n - 2) && (b > mt->bh_b[i + 1])) i++;
-		hp = (mt->bh_h[i + 1] - mt->bh_h[i]) / (mt->bh_b[i + 1] - mt->bh_b[i]);
-		h = mt->bh_h[i] + (hp * (b - mt->bh_b[i]));
-	}
+	bh_h_dh(mt, 0, b, &h, &hp);
 
 	*nu = h / b;
 	*dnudb2 = ((hp * b) - h) / (2 * b * b * b);
@@ -273,6 +287,13 @@ void assemble_newton(crs_t *J, const double *az, double *res)
 			for (int m = 0; m < 8; m++) je[l][m] = 0;
 		}
 
+		// 直交異方性 (軸毎の B-H) : 伝送線路軸 t に対し B_p = ∂A/∂q, B_q = -∂A/∂p
+		// (p, q は t の次の 2 軸を巡回順に取る)
+		const int aniso = (mt->bhaniso && (mt->nbh[0] > 0));
+		const int it = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
+		const int ip = (it + 1) % 3;
+		const int iq = (it + 2) % 3;
+
 		for (int g = 0; g < 8; g++) {
 			const double xi  = (LI(g) ? +gp : -gp);
 			const double eta = (LJ(g) ? +gp : -gp);
@@ -294,11 +315,36 @@ void assemble_newton(crs_t *J, const double *az, double *res)
 				gr[1] += a[l] * dn[l][1];
 				gr[2] += a[l] * dn[l][2];
 			}
+
+			if (aniso) {
+				// エネルギーが軸毎に分離するので rank-1 項は出ない
+				//   R_i  = ∫ [ H_p(B_p) ∂N_i/∂q - H_q(B_q) ∂N_i/∂p ] dV
+				//   J_ij = ∫ [ (dH_p/dB) ∂N_i/∂q ∂N_j/∂q
+				//            + (dH_q/dB) ∂N_i/∂p ∂N_j/∂p ] dV
+				const double bp = gr[iq];
+				const double bq = -gr[ip];
+				double hp, dhp, hq, dhq;
+				bh_h_dh(mt, ip, fabs(bp), &hp, &dhp);
+				bh_h_dh(mt, iq, fabs(bq), &hq, &dhq);
+				if (bp < 0) hp = -hp;
+				if (bq < 0) hq = -hq;
+
+				for (int l = 0; l < 8; l++) {
+					re[l] += ((hp * dn[l][iq]) - (hq * dn[l][ip])) * detj;
+				}
+				for (int l = 0; l < 8; l++) {
+					for (int m = 0; m < 8; m++) {
+						je[l][m] += ((dhp * dn[l][iq] * dn[m][iq])
+						          +  (dhq * dn[l][ip] * dn[m][ip])) * detj;
+					}
+				}
+				continue;
+			}
+
 			const double bmag = sqrt((gr[0] * gr[0]) + (gr[1] * gr[1]) + (gr[2] * gr[2]));
 
 			double nu, dnudb2;
 			bh_nu_dnu(mt, bmag, &nu, &dnudb2);
-			if (mt->nbh <= 0) nu = 1 / (MU0 * mt->mur3[0]);		// 線形セル (異方性は非対応)
 
 			double u[8];
 			for (int l = 0; l < 8; l++) {
@@ -342,8 +388,9 @@ static void assemble_core(crs_t *A, int mode, const double *coefcell)
 	for (int k = 0; k < Nz; k++) {
 		const int64_t cid = ((int64_t)i * Ny + j) * Nz + k;
 		const int m = CellMaterial[cid];
-		double coef[3];
+		double coef[6];
 		if (coefcell != NULL) {
+			for (int d = 0; d < 6; d++) coef[d] = 0;
 			coef[0] = coef[1] = coef[2] = coefcell[cid];
 		}
 		else {

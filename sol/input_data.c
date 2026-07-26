@@ -80,10 +80,11 @@ int input_data(FILE *fp)
 		Material[m].tand  = 0;
 		Material[m].npole = 0;
 		Material[m].einf  = 1;
-		Material[m].nbh   = 0;
-		for (int d = 0; d < 3; d++) {
-			Material[m].epsr3[d] = 0;	// 0 : anisoeps 未指定 (最後に epsr で埋める)
-			Material[m].mur3[d]  = 0;
+		Material[m].bhaniso = 0;
+		for (int d = 0; d < 3; d++) Material[m].nbh[d] = 0;
+		for (int d = 0; d < 6; d++) {
+			Material[m].eps6[d] = 0;	// 0 : anisoeps 未指定 (最後に epsr で埋める)
+			Material[m].mu6[d]  = 0;
 		}
 	}
 
@@ -220,10 +221,11 @@ int input_data(FILE *fp)
 			Material[NMaterial].tand  = 0;
 			Material[NMaterial].npole = 0;
 			Material[NMaterial].einf  = 1;
-			Material[NMaterial].nbh   = 0;
-			for (int d = 0; d < 3; d++) {
-				Material[NMaterial].epsr3[d] = 0;
-				Material[NMaterial].mur3[d]  = 0;
+			Material[NMaterial].bhaniso = 0;
+			for (int d = 0; d < 3; d++) Material[NMaterial].nbh[d] = 0;
+			for (int d = 0; d < 6; d++) {
+				Material[NMaterial].eps6[d] = 0;
+				Material[NMaterial].mu6[d]  = 0;
 			}
 			NMaterial++;
 		}
@@ -337,9 +339,11 @@ int input_data(FILE *fp)
 			}
 		}
 		else if (!strcmp(strkey, "anisoeps") || !strcmp(strkey, "anisomur")) {
-			// anisoeps = <material_id> <ex> <ey> <ez>  : 異方性の比誘電率 (対角テンソル)
-			// anisomur = <material_id> <mx> <my> <mz>  : 異方性の比透磁率
-			if (nval < 4) {
+			// anisoeps = <material_id> <exx> <eyy> <ezz> [<exy> <eyz> <ezx>]
+			// anisomur = <material_id> <mxx> <myy> <mzz> [<mxy> <myz> <mzx>]
+			//   3 値なら対角テンソル、6 値なら非対角を含む対称テンソル
+			//   (主軸が格子軸と一致しない材料は回転させた 6 成分を与える)
+			if ((nval != 4) && (nval != 7)) {
 				printf(errfmt2, strkey);
 				return 1;
 			}
@@ -348,19 +352,26 @@ int input_data(FILE *fp)
 				printf(errfmt2, strkey);
 				return 1;
 			}
-			double v[3];
-			for (int d = 0; d < 3; d++) {
+			double v[6] = {0, 0, 0, 0, 0, 0};
+			for (int d = 0; d < nval - 1; d++) {
 				v[d] = atof(token[3 + d]);
-				if (v[d] <= 0) {
-					printf(errfmt2, strkey);
-					return 1;
-				}
 			}
-			double *dst = ((strkey[5] == 'e') ? Material[mid].epsr3 : Material[mid].mur3);
-			for (int d = 0; d < 3; d++) dst[d] = v[d];
+			// 対角成分は正、テンソルは正定値であること
+			if ((v[0] <= 0) || (v[1] <= 0) || (v[2] <= 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			double chk[6];
+			if (tensor6_inverse(v, chk)) {
+				printf("*** %s : the tensor is singular\n", strkey);
+				return 1;
+			}
+			double *dst = ((strkey[5] == 'e') ? Material[mid].eps6 : Material[mid].mu6);
+			for (int d = 0; d < 6; d++) dst[d] = v[d];
 		}
 		else if (!strcmp(strkey, "bh")) {
-			// bh = <material_id> <H [A/m]> <B [T]>  (複数行で曲線を与える)
+			// bh = <material_id> <H [A/m]> <B [T]>            等方性 (|B| に対する曲線)
+			// bh = <material_id> <X|Y|Z> <H [A/m]> <B [T]>    軸毎 (直交異方性)
 			// B は狭義単調増加、B > 0。原点は書かない (B < B1 は初期透磁率で扱う)
 			if (nval < 3) {
 				printf(errfmt2, strkey);
@@ -372,23 +383,40 @@ int input_data(FILE *fp)
 				return 1;
 			}
 			material_t *mt = &Material[mid];
-			if (mt->nbh >= MAXBH) {
-				printf(errfmt1, strkey);
-				return 1;
+
+			// 軸指定の有無を判定する (数字で始まらないトークンなら軸)
+			int ax0 = 0, ax1 = 2, iv = 3;
+			const int c0 = toupper((int)token[3][0]);
+			if ((c0 == 'X') || (c0 == 'Y') || (c0 == 'Z')) {
+				if (nval < 4) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+				ax0 = ax1 = ((c0 == 'X') ? 0 : (c0 == 'Y') ? 1 : 2);
+				iv = 4;
+				mt->bhaniso = 1;
 			}
-			const double hh = atof(token[3]);
-			const double bb = atof(token[4]);
+
+			const double hh = atof(token[iv]);
+			const double bb = atof(token[iv + 1]);
 			if ((hh <= 0) || (bb <= 0)) {
 				printf("*** bh : H and B must be positive (origin is implicit)\n");
 				return 1;
 			}
-			if ((mt->nbh > 0) && ((bb <= mt->bh_b[mt->nbh - 1]) || (hh <= mt->bh_h[mt->nbh - 1]))) {
-				printf("*** bh : H and B must increase monotonically (material %d)\n", mid);
-				return 1;
+			for (int ax = ax0; ax <= ax1; ax++) {
+				const int nb = mt->nbh[ax];
+				if (nb >= MAXBH) {
+					printf(errfmt1, strkey);
+					return 1;
+				}
+				if ((nb > 0) && ((bb <= mt->bh_b[ax][nb - 1]) || (hh <= mt->bh_h[ax][nb - 1]))) {
+					printf("*** bh : H and B must increase monotonically (material %d)\n", mid);
+					return 1;
+				}
+				mt->bh_h[ax][nb] = hh;
+				mt->bh_b[ax][nb] = bb;
+				mt->nbh[ax]++;
 			}
-			mt->bh_h[mt->nbh] = hh;
-			mt->bh_b[mt->nbh] = bb;
-			mt->nbh++;
 		}
 		else if (!strcmp(strkey, "nlsolver")) {
 			// nlsolver = <maxiter> <tol> <relax>  : 非線形 (B-H) 反復の設定
@@ -536,9 +564,13 @@ int input_data(FILE *fp)
 	// 異方性が指定されていない材料は等方性 (epsr / mur) で埋める
 
 	for (int m = 0; m < NMaterial; m++) {
-		for (int d = 0; d < 3; d++) {
-			if (Material[m].epsr3[d] <= 0) Material[m].epsr3[d] = Material[m].epsr;
-			if (Material[m].mur3[d]  <= 0) Material[m].mur3[d]  = Material[m].mur;
+		if (Material[m].eps6[0] <= 0) {
+			Material[m].eps6[0] = Material[m].eps6[1] = Material[m].eps6[2] = Material[m].epsr;
+			Material[m].eps6[3] = Material[m].eps6[4] = Material[m].eps6[5] = 0;
+		}
+		if (Material[m].mu6[0] <= 0) {
+			Material[m].mu6[0] = Material[m].mu6[1] = Material[m].mu6[2] = Material[m].mur;
+			Material[m].mu6[3] = Material[m].mu6[4] = Material[m].mu6[5] = 0;
 		}
 	}
 
@@ -610,7 +642,17 @@ int input_data(FILE *fp)
 	// 非線形磁性体 (B-H) は重ね合わせが成り立たないので単一ポートに限る
 	int nonlinear = 0;
 	for (int m = 0; m < NMaterial; m++) {
-		if (Material[m].nbh > 0) nonlinear = 1;
+		if (Material[m].nbh[0] > 0) nonlinear = 1;
+		// 軸毎に与えるときは 3 軸とも必要
+		if (Material[m].bhaniso) {
+			for (int d = 0; d < 3; d++) {
+				if (Material[m].nbh[d] <= 0) {
+					printf("*** bh : material %d needs a curve for all three axes "
+						"when axes are specified\n", m);
+					return 1;
+				}
+			}
+		}
 	}
 	if (nonlinear) {
 		if (!(Analysis & ANALYSIS_M)) {

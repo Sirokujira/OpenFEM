@@ -1,0 +1,43 @@
+OpenFEM 1 0
+title = plate line with an orthotropic nonlinear core (per-axis B-H)
+#
+# plate_line_bh.ofe と同じ形状・同じ X 軸曲線に、Y/Z 軸だけ 10 倍硬い曲線を
+# 与えた直交異方性の非線形磁性体。
+#
+# この構造では磁束密度は x 方向のみ (B = (∂Az/∂y, -∂Az/∂x, 0) で Az は y に
+# だけ依存する) なので、Y/Z の曲線は結果に効いてはならない。したがって
+# 期待値は plate_line_bh.ofe と厳密に同じ:
+#
+#   L = B_x(I/W) * d / I + 2 * mu0 * t / (3W)
+#   I = 0.5 A -> 2.889308e-04,  I = 1.0 A -> 2.000419e-04
+#   I = 2.0 A -> 1.022641e-04,  I = 5.0 A -> 4.359744e-05
+#
+# 軸の対応を取り違えると硬い Y 曲線が効いて値が大きくずれるので、
+# 直交異方性の軸分離の検査になる。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 20 0.05e-3 20 0.25e-3 20 0.30e-3
+zmesh = 0 1 1e-4
+
+# material id 2 : 直交異方性の非線形磁性体 (軸を指定すると 3 軸とも必要)
+material = 1.0 0
+bh = 2 X 100    0.5
+bh = 2 X 1000   1.0
+bh = 2 X 10000  1.2
+bh = 2 Y 2000   0.1
+bh = 2 Y 20000  0.2
+bh = 2 Y 200000 0.24
+bh = 2 Z 2000   0.1
+bh = 2 Z 20000  0.2
+bh = 2 Z 200000 0.24
+geometry = 2 1 0 1e-3 0.05e-3 0.25e-3 0 1e-4
+
+conductor = 0 1 0 1e-3 0      0.05e-3 0 1e-4
+conductor = 1 1 0 1e-3 0.25e-3 0.30e-3 0 1e-4
+
+analysis = M
+tline = Z
+current = 1.0
+nlsolver = 50 1e-8 1.0
+solver = 50000 5000 1e-13
+end

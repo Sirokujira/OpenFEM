@@ -18,6 +18,8 @@
 #   plate_line_bh  : 非線形磁性体 L(I) を 1 次元厳密解と比較 (4 電流、許容 1%)
 #   dispersive_plate : 多極分散 (Debye+Lorentz) の C, G  (厳密、許容 0.1%)
 #   aniso_plate    : 異方性誘電体の C = eps0 εz A/d      (厳密、許容 0.1%)
+#   aniso_rot      : 非対角テンソル (z 軸 30 度回転) でも同値 (厳密、許容 0.1%)
+#   plate_line_bh_aniso : 軸毎 B-H。B は x のみなので X 曲線だけが効くこと
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -129,6 +131,10 @@ echo "[aniso_plate] anisotropic eps (10, 5, 2), field along z"
 run_case aniso_plate
 compare "C [F]" "$(value_of C)" 8.854188e-14 0.001
 
+echo "[aniso_rot] same tensor rotated 30 deg about z (off-diagonal exy)"
+run_case aniso_rot
+compare "C [F]" "$(value_of C)" 8.854188e-14 0.001
+
 # 非線形磁性体 (B-H) : 平行平板線路の 1 次元厳密解と比較する
 #   H = I/W が Ampere の法則から厳密に決まるので L = B(I/W)*d/I + 2*mu0*t/(3W)
 echo "[plate_line_bh] nonlinear B-H (1-D exact, secant inductance)"
@@ -144,6 +150,18 @@ for pair in "0.5 2.889308e-04" "1.0 2.000419e-04" "2.0 1.022641e-04" "5.0 4.3597
 		echo "  *** B-H iteration did not converge (I=$cur)" >&2
 		status=1
 	fi
+done
+
+# 直交異方性の非線形磁性体 : B は x 方向のみなので X 軸の曲線だけが効く
+# (Y/Z には 10 倍硬い曲線を与えてあるので、軸を取り違えると大きくずれる)
+echo "[plate_line_bh_aniso] per-axis B-H (only the X curve must matter)"
+for pair in "0.5 2.889308e-04" "1.0 2.000419e-04" "2.0 1.022641e-04" "5.0 4.359744e-05"; do
+	set -- $pair
+	cur=$1
+	lexp=$2
+	sed "s/^current = .*/current = $cur/" "$SRC/plate_line_bh_aniso.ofe" > "$WORK/bh_aniso_run.ofe"
+	(cd "$WORK" && "$OFE" -n 2 bh_aniso_run.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "L(I=${cur}A) [H/m]" "$(value_of Ldc)" "$lexp" 0.01
 done
 
 if [ "$status" -ne 0 ]; then
