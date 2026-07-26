@@ -16,6 +16,8 @@
 #                    G' = omega C' tand             (均質誘電体では厳密、許容 0.1%)
 #   plate_line_ac  : R(f), L(f) を 1 次元厳密解と比較 (1kHz / 10MHz、許容 2%)
 #   plate_line_bh  : 非線形磁性体 L(I) を 1 次元厳密解と比較 (4 電流、許容 1%)
+#   dispersive_plate : 多極分散 (Debye+Lorentz) の C, G  (厳密、許容 0.1%)
+#   aniso_plate    : 異方性誘電体の C = eps0 εz A/d      (厳密、許容 0.1%)
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -117,6 +119,15 @@ for pair in "1e3 6.896552e-01 2.932153e-07" "1e7 1.624296e+00 2.780550e-07"; do
 	compare "R(f=$freq) [ohm/m]" "$(value_of Rf)" "$rexp" 0.02
 	compare "L(f=$freq) [H/m]" "$(value_of Lf)" "$lexp" 0.02
 done
+
+echo "[dispersive_plate] Debye + Lorentz multi-pole at 1 GHz"
+run_case dispersive_plate
+compare "C [F]" "$(value_of C)" 2.123808563e-13 0.001
+compare "G [S]" "$(value_of G)" 4.773870170e-04 0.001
+
+echo "[aniso_plate] anisotropic eps (10, 5, 2), field along z"
+run_case aniso_plate
+compare "C [F]" "$(value_of C)" 8.854188e-14 0.001
 
 # 非線形磁性体 (B-H) : 平行平板線路の 1 次元厳密解と比較する
 #   H = I/W が Ampere の法則から厳密に決まるので L = B(I/W)*d/I + 2*mu0*t/(3W)

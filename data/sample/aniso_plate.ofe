@@ -1,0 +1,25 @@
+OpenFEM 1 0
+title = parallel plate with an anisotropic dielectric (diagonal tensor)
+#
+# 異方性誘電体 (εx=10, εy=5, εz=2) を挟んだ平行平板。電極は z 面なので
+# 電界は z 方向のみ、容量は εz だけで決まる (εx, εy に依存しない):
+#
+#   C = eps0 * εz * A / d = eps0 * 2.0 * 1e-6 / 0.2e-3 = 8.854188e-14 [F]
+#
+# 軸の対応を間違えると 5 倍 (εx) または 2.5 倍 (εy) ずれるので、
+# テンソルが方向毎に正しく効いているかの検査になる。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 4 1e-3
+zmesh = 0 8 0.2e-3
+
+material = 1.0 0
+anisoeps = 2 10.0 5.0 2.0
+geometry = 2 1 0 1e-3 0 1e-3 0 0.2e-3
+
+conductor = 0 1 0 1e-3 0 1e-3 0      0
+conductor = 1 1 0 1e-3 0 1e-3 0.2e-3 0.2e-3
+
+analysis = C
+solver = 20000 500 1e-12
+end

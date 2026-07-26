@@ -21,8 +21,9 @@ assemble.c
 #define LK(l) ((l) & 1)
 
 
-// 直方体要素 (dx x dy x dz) の ∫∇Ni・∇Nj dV
-void element_matrix(double dx, double dy, double dz, double ke[8][8])
+// 直方体要素 (dx x dy x dz) の ∫ (cx ∂Ni/∂x ∂Nj/∂x + cy ... + cz ...) dV
+// 等方性材料では c[0]=c[1]=c[2] とする
+void element_matrix(double dx, double dy, double dz, const double c[3], double ke[8][8])
 {
 	const double gp = 1 / sqrt(3.0);		// 2 点 Gauss 積分点
 	const double detj = (dx * dy * dz) / 8;
@@ -53,9 +54,9 @@ void element_matrix(double dx, double dy, double dz, double ke[8][8])
 
 		for (int l = 0; l < 8; l++) {
 			for (int m = 0; m < 8; m++) {
-				ke[l][m] += ((dn[l][0] * dn[m][0])
-				          +  (dn[l][1] * dn[m][1])
-				          +  (dn[l][2] * dn[m][2])) * detj;
+				ke[l][m] += ((c[0] * dn[l][0] * dn[m][0])
+				          +  (c[1] * dn[l][1] * dn[m][1])
+				          +  (c[2] * dn[l][2] * dn[m][2])) * detj;
 			}
 		}
 	}
@@ -67,21 +68,25 @@ void element_matrix(double dx, double dy, double dz, double ke[8][8])
 //        = 1 : ε0              真空静電界 (TEM インダクタンス)
 //        = 2 : σ + ω ε0 εr tanδ  定常電流界 (導電損 + 誘電損)
 //        = 3 : 1 / (μ0 μr)     静磁場 (DC インダクタンス)
-static double material_coef(int m, int mode)
+static void material_coef(int m, int mode, double c[3])
 {
-	if      (mode == 0) {
-		return EPS0 * Material[m].epsr;
-	}
-	else if (mode == 1) {
-		return EPS0;
-	}
-	else if (mode == 2) {
-		// 誘電損は等価導電率 σ_d = ω ε0 εr tanδ として扱う (frequency 未指定なら 0)
-		const double omega = 2 * PI * Freq;
-		return Material[m].sigma + (omega * EPS0 * Material[m].epsr * Material[m].tand);
-	}
-	else {
-		return 1 / (MU0 * Material[m].mur);
+	const material_t *mt = &Material[m];
+
+	for (int d = 0; d < 3; d++) {
+		if      (mode == 0) {
+			c[d] = EPS0 * mt->epsr3[d];
+		}
+		else if (mode == 1) {
+			c[d] = EPS0;
+		}
+		else if (mode == 2) {
+			// 誘電損は等価導電率 σ_d = ω ε0 εr tanδ として扱う (frequency 未指定なら 0)
+			const double omega = 2 * PI * Freq;
+			c[d] = mt->sigma + (omega * EPS0 * mt->epsr3[d] * mt->tand);
+		}
+		else {
+			c[d] = 1 / (MU0 * mt->mur3[d]);
+		}
 	}
 }
 
@@ -293,6 +298,7 @@ void assemble_newton(crs_t *J, const double *az, double *res)
 
 			double nu, dnudb2;
 			bh_nu_dnu(mt, bmag, &nu, &dnudb2);
+			if (mt->nbh <= 0) nu = 1 / (MU0 * mt->mur3[0]);		// 線形セル (異方性は非対応)
 
 			double u[8];
 			for (int l = 0; l < 8; l++) {
@@ -334,13 +340,19 @@ static void assemble_core(crs_t *A, int mode, const double *coefcell)
 	for (int i = 0; i < Nx; i++) {
 	for (int j = 0; j < Ny; j++) {
 	for (int k = 0; k < Nz; k++) {
-		const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
-		const int m = CellMaterial[c];
-		const double coef = ((coefcell != NULL) ? coefcell[c] : material_coef(m, mode));
-		if (coef <= 0) continue;
+		const int64_t cid = ((int64_t)i * Ny + j) * Nz + k;
+		const int m = CellMaterial[cid];
+		double coef[3];
+		if (coefcell != NULL) {
+			coef[0] = coef[1] = coef[2] = coefcell[cid];
+		}
+		else {
+			material_coef(m, mode, coef);
+		}
+		if ((coef[0] <= 0) && (coef[1] <= 0) && (coef[2] <= 0)) continue;
 
 		double ke[8][8];
-		element_matrix(Xn[i + 1] - Xn[i], Yn[j + 1] - Yn[j], Zn[k + 1] - Zn[k], ke);
+		element_matrix(Xn[i + 1] - Xn[i], Yn[j + 1] - Yn[j], Zn[k + 1] - Zn[k], coef, ke);
 
 		for (int l = 0; l < 8; l++) {
 			const int li = LI(l), lj = LJ(l), lk = LK(l);
@@ -351,7 +363,7 @@ static void assemble_core(crs_t *A, int mode, const double *coefcell)
 				const int dj = LJ(mm) - lj;
 				const int dk = LK(mm) - lk;
 				const int64_t p = crs_offset(rowstart, i + li, j + lj, k + lk, di, dj, dk);
-				A->val[p] += coef * ke[l][mm];
+				A->val[p] += ke[l][mm];
 			}
 		}
 	}

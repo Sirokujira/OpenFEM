@@ -1,0 +1,33 @@
+OpenFEM 1 0
+title = parallel plate with a multi-pole dispersive dielectric (Debye + Lorentz)
+#
+# 平行平板 (1mm x 1mm、間隔 0.2mm) に多極分散材料を詰め、frequency の値で
+# 展開した εr(ω) から C と G を求める。
+#
+#   εr(ω) = eps_inf + Δε_D/(1+jωτ) + Δε_L ω0^2/(ω0^2-ω^2+jωδ)
+#
+# eps_inf = 2.0
+#   Debye   : Δε = 3.0, τ = 1.591549431e-10 s  (1GHz で ωτ = 1)
+#   Lorentz : Δε = 1.0, f0 = 2 GHz, δ = 0.5 GHz
+#
+# f = 1 GHz での値:
+#   εr' = 4.797297297,  εr'' = 1.716216216  (tanδ = 0.357746)
+#   C = eps0 * εr' * A/d = 2.123808563e-13 [F]
+#   G = ω * eps0 * εr'' * A/d = 4.773870170e-04 [S]
+#
+xmesh = 0 4 1e-3
+ymesh = 0 4 1e-3
+zmesh = 0 8 0.2e-3
+
+material = 1.0 0
+debye   = 2 2.0 3.0 1.591549431e-10
+lorentz = 2 2.0 1.0 2e9 5e8
+geometry = 2 1 0 1e-3 0 1e-3 0 0.2e-3
+
+conductor = 0 1 0 1e-3 0 1e-3 0      0
+conductor = 1 1 0 1e-3 0 1e-3 0.2e-3 0.2e-3
+
+analysis = C R
+frequency = 1e9
+solver = 20000 500 1e-12
+end

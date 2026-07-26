@@ -21,7 +21,8 @@ OpenMP、`mesh`/`material`/`geometry` の入力書式、`ofd.log` 相当のロ�
 ```
 
 を、構造格子上の 8 節点 3 次補間 (trilinear) 6 面体要素で離散化します
-(2x2x2 Gauss 積分。直方体要素なので厳密積分)。
+(2x2x2 Gauss 積分。直方体要素なので厳密積分)。係数 c は方向毎に持てるので
+対角テンソルの異方性材料 (`anisoeps` / `anisomur`) を扱えます。
 
 | 解析 | 方程式 / 係数 | 得られる量 |
 |---|---|---|
@@ -150,7 +151,10 @@ end
 | `bh` | `<material_id> <H> <B>` | なし | B-H 曲線の点 (複数行)。H, B とも正で単調増加、原点は書かない。与えると `M` が非線形解析になる |
 | `nlsolver` | `<maxiter> <tol> <damping>` | `50 1e-5 1.0` | 非線形 (B-H) Newton 反復の設定 |
 | `tand` | `<material_id> <tand>` | 0 | 誘電正接。`frequency` と併用して誘電損 G を求める |
-| `debye` | `<material_id> <eps_inf> <deps> <tau>` | なし | Debye 分散材料 εr(ω) = eps_inf + deps/(1+jωτ)。`frequency` の値で εr と tanδ に展開する |
+| `debye` | `<material_id> <eps_inf> (<deps> <tau>)...` | なし | Debye 分散材料 (多極可)。`frequency` の値で εr と tanδ に展開する |
+| `lorentz` | `<material_id> <eps_inf> (<deps> <f0> <delta>)...` | なし | Lorentz 分散材料 (多極可)。`debye` と混在させると極が足し合わされる |
+| `anisoeps` | `<material_id> <ex> <ey> <ez>` | 等方性 | 異方性の比誘電率 (対角テンソル) |
+| `anisomur` | `<material_id> <mx> <my> <mz>` | 等方性 | 異方性の比透磁率 (対角テンソル) |
 | `conductorsigma` | `<conductor_id> <sigma>` | なし | 導体の導電率。DC 直列抵抗 Rs の計算に使う |
 | `frequency` | 実数 [Hz] | 0 | 誘電損 (tanδ)・分散材料・渦電流 (`F`) を評価する周波数。0 なら tanδ は無視 |
 | `current` | 実数 [A] | 1 | 静磁場解析の励振電流 |
@@ -179,6 +183,8 @@ end
 | `coax_loss.ofe` | 損失同軸 (C/L/G/L_dc/Rs) | L'dc 誤差 0.22%、Rs' 誤差 0.53%、G' = ωC'tanδ を厳密に再現 |
 | `plate_line_ac.ofe` | 平行平板線路の渦電流 | 1 次元厳密解 Z = 2γcoth(γt)/(σW) + jωμ0d/W と比較 (1kHz: R 誤差 0.00% / 10MHz: R 誤差 0.12%) |
 | `plate_line_bh.ofe` | 非線形磁性体を挟んだ平行平板線路 | L(I) = B(I/W)d/I + 2μ0t/(3W) と 4 電流で比較 (いずれも誤差 0.00%、Newton 2〜3 回) |
+| `dispersive_plate.ofe` | 多極分散 (Debye + Lorentz) | 1GHz での C, G が展開式と厳密一致 (誤差 0.00%) |
+| `aniso_plate.ofe` | 異方性誘電体 (εx,εy,εz = 10,5,2) | C = ε0 εz A/d と厳密一致 (軸の対応の検査) |
 
 検証スクリプト:
 
@@ -197,7 +203,9 @@ sh data/sample/rlc_check.sh bin/ofe bin/ofe_post /tmp/rlc-check
 - 表皮効果は `F` (渦電流) で扱う。`Rs` と `M` の L は DC 値 (電流一様) なので、
   高周波では `F` を使うこと。格子が表皮深さを刻めていないと R(f) を
   過小評価するため、その場合は警告を出す。
-- 分散材料は Debye 1 極 (`debye`) のみ。Lorentz・多極 Debye は未対応。
+- 分散材料は Debye / Lorentz の多極 (最大 8 極)。Drude・Cole-Cole は未対応。
+- 異方性は**対角テンソル**のみ (主軸が格子軸に一致する場合)。非対角成分
+  (任意方向の主軸) と、異方性 + 非線形 (B-H) の併用は未対応。
 - 非線形磁性体は**単調な B-H 曲線のみ**。ヒステリシス (履歴・残留磁束)、
   異方性、非線形と渦電流 (`F`) の同時解析は未対応。
 - `M` / `F` は 2 次元断面 (伝送線路) 専用。3 次元の渦電流 (A-φ 定式化)、

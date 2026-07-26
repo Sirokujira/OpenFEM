@@ -59,6 +59,15 @@ extern "C" {
 
 #define MAXPORT (16)			// 導体 (基準導体 + ポート) の最大数
 #define MAXBH   (64)			// B-H 曲線の点数の最大数
+#define MAXPOLE (8)				// 分散材料の極の最大数
+
+// 分散材料の極
+//   type 1 (Debye)   : Δε / (1 + jωτ)                     a=Δε, b=τ [s]
+//   type 2 (Lorentz) : Δε ω0^2 / (ω0^2 - ω^2 + jωδ)       a=Δε, b=f0 [Hz], c=δ [Hz]
+typedef struct {
+	int    type;
+	double a, b, c;
+} pole_t;
 
 // 材料 (id=0 : 真空, id=1 : PEC 予約, id>=2 : ユーザー定義)
 typedef struct {
@@ -66,8 +75,11 @@ typedef struct {
 	double sigma;				// 導電率 [S/m]
 	double mur;					// 比透磁率 (静磁場解析で使う、既定 1)
 	double tand;				// 誘電正接 tanδ (frequency 指定時に G へ寄与、既定 0)
-	int    debye;				// 1 : Debye 分散モデル (einf, deps, tau を使う)
-	double einf, deps, tau;		// εr(ω) = einf + deps / (1 + jωτ)
+	int    npole;				// 分散極の数 (0 : 分散なし)
+	double einf;				// ε∞
+	pole_t pole[MAXPOLE];
+	double epsr3[3];			// 異方性の比誘電率 (既定は epsr と同じ)
+	double mur3[3];				// 異方性の比透磁率 (既定は mur と同じ)
 	int    nbh;					// B-H 曲線の点数 (0 : 線形、mur を使う)
 	double bh_h[MAXBH];			// H [A/m]
 	double bh_b[MAXBH];			// B [T] (狭義単調増加、B > 0)

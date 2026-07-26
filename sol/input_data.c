@@ -78,11 +78,13 @@ int input_data(FILE *fp)
 		Material[m].sigma = 0;
 		Material[m].mur   = 1;
 		Material[m].tand  = 0;
-		Material[m].debye = 0;
+		Material[m].npole = 0;
 		Material[m].einf  = 1;
-		Material[m].deps  = 0;
-		Material[m].tau   = 0;
 		Material[m].nbh   = 0;
+		for (int d = 0; d < 3; d++) {
+			Material[m].epsr3[d] = 0;	// 0 : anisoeps 未指定 (最後に epsr で埋める)
+			Material[m].mur3[d]  = 0;
+		}
 	}
 
 	NGeometry = 0;
@@ -216,11 +218,13 @@ int input_data(FILE *fp)
 			Material[NMaterial].sigma = sigma;
 			Material[NMaterial].mur   = 1;
 			Material[NMaterial].tand  = 0;
-			Material[NMaterial].debye = 0;
+			Material[NMaterial].npole = 0;
 			Material[NMaterial].einf  = 1;
-			Material[NMaterial].deps  = 0;
-			Material[NMaterial].tau   = 0;
 			Material[NMaterial].nbh   = 0;
+			for (int d = 0; d < 3; d++) {
+				Material[NMaterial].epsr3[d] = 0;
+				Material[NMaterial].mur3[d]  = 0;
+			}
 			NMaterial++;
 		}
 		else if (!strcmp(strkey, "geometry")) {
@@ -288,11 +292,16 @@ int input_data(FILE *fp)
 				Material[mid].tand = val;
 			}
 		}
-		else if (!strcmp(strkey, "debye")) {
-			// debye = <material_id> <eps_inf> <delta_eps> <tau [s]>
-			// εr(ω) = eps_inf + delta_eps / (1 + jωτ)。frequency 指定時に
-			// epsr (実部) と tand (= εr''/εr') に展開する
-			if (nval < 4) {
+		else if (!strcmp(strkey, "debye") || !strcmp(strkey, "lorentz")) {
+			// debye   = <material_id> <eps_inf> (<deps> <tau>)...
+			// lorentz = <material_id> <eps_inf> (<deps> <f0> <delta>)...
+			//   εr(ω) = eps_inf + Σ Debye Δε/(1+jωτ)
+			//                   + Σ Lorentz Δε ω0^2/(ω0^2-ω^2+jωδ)
+			// frequency の値で epsr (実部) と tand (= εr''/εr') に展開する。
+			// 同じ材料に複数行書くと極が追加される (eps_inf は最後の指定が効く)。
+			const int lor = !strcmp(strkey, "lorentz");
+			const int nper = (lor ? 3 : 2);
+			if ((nval < 2 + nper) || (((nval - 2) % nper) != 0)) {
 				printf(errfmt2, strkey);
 				return 1;
 			}
@@ -301,17 +310,54 @@ int input_data(FILE *fp)
 				printf(errfmt2, strkey);
 				return 1;
 			}
+			material_t *mt = &Material[mid];
 			const double einf = atof(token[3]);
-			const double deps = atof(token[4]);
-			const double tau  = atof(token[5]);
-			if ((einf <= 0) || (deps < 0) || (tau < 0)) {
+			if (einf <= 0) {
 				printf(errfmt2, strkey);
 				return 1;
 			}
-			Material[mid].debye = 1;
-			Material[mid].einf  = einf;
-			Material[mid].deps  = deps;
-			Material[mid].tau   = tau;
+			mt->einf = einf;
+			const int npair = (nval - 2) / nper;
+			for (int q = 0; q < npair; q++) {
+				if (mt->npole >= MAXPOLE) {
+					printf(errfmt1, strkey);
+					return 1;
+				}
+				const char **tk = (const char **)&token[4 + (q * nper)];
+				pole_t *pl = &mt->pole[mt->npole];
+				pl->type = (lor ? 2 : 1);
+				pl->a = atof(tk[0]);
+				pl->b = atof(tk[1]);
+				pl->c = (lor ? atof(tk[2]) : 0);
+				if ((pl->a < 0) || (pl->b <= 0) || (lor && (pl->c < 0))) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+				mt->npole++;
+			}
+		}
+		else if (!strcmp(strkey, "anisoeps") || !strcmp(strkey, "anisomur")) {
+			// anisoeps = <material_id> <ex> <ey> <ez>  : 異方性の比誘電率 (対角テンソル)
+			// anisomur = <material_id> <mx> <my> <mz>  : 異方性の比透磁率
+			if (nval < 4) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			if ((mid < 0) || (mid >= NMaterial)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			double v[3];
+			for (int d = 0; d < 3; d++) {
+				v[d] = atof(token[3 + d]);
+				if (v[d] <= 0) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+			}
+			double *dst = ((strkey[5] == 'e') ? Material[mid].epsr3 : Material[mid].mur3);
+			for (int d = 0; d < 3; d++) dst[d] = v[d];
 		}
 		else if (!strcmp(strkey, "bh")) {
 			// bh = <material_id> <H [A/m]> <B [T]>  (複数行で曲線を与える)
@@ -450,17 +496,50 @@ int input_data(FILE *fp)
 		}
 	}
 
-	// Debye 分散材料 を frequency の値で展開する
-	// (frequency 未指定なら静的な εr(0) = einf + deps、損失なしとして扱う)
+	// 分散材料を frequency の値で展開する
+	// (frequency 未指定なら静的な εr(0) = ε∞ + ΣΔε、損失なしとして扱う)
+
+	const double omega_d = 2 * PI * Freq;
+	for (int m = 0; m < NMaterial; m++) {
+		material_t *mt = &Material[m];
+		if (mt->npole <= 0) continue;
+		double er = mt->einf, ei = 0;
+		for (int q = 0; q < mt->npole; q++) {
+			const pole_t *pl = &mt->pole[q];
+			if (pl->type == 1) {
+				// Debye : Δε / (1 + jωτ)
+				const double wt = omega_d * pl->b;
+				const double den = 1 + (wt * wt);
+				er += pl->a / den;
+				ei += pl->a * wt / den;
+			}
+			else {
+				// Lorentz : Δε ω0^2 / (ω0^2 - ω^2 + jωδ)
+				const double w0 = 2 * PI * pl->b;
+				const double dl = 2 * PI * pl->c;
+				const double d1 = (w0 * w0) - (omega_d * omega_d);
+				const double d2 = omega_d * dl;
+				const double den = (d1 * d1) + (d2 * d2);
+				if (den <= 0) continue;
+				er += pl->a * w0 * w0 * d1 / den;
+				ei += pl->a * w0 * w0 * d2 / den;
+			}
+		}
+		if (er <= 0) {
+			printf("*** dispersive material %d has a non-positive epsr at %.4e Hz\n", m, Freq);
+			return 1;
+		}
+		mt->epsr = er;
+		mt->tand = ei / er;
+	}
+
+	// 異方性が指定されていない材料は等方性 (epsr / mur) で埋める
 
 	for (int m = 0; m < NMaterial; m++) {
-		if (!Material[m].debye) continue;
-		const double wt = 2 * PI * Freq * Material[m].tau;
-		const double den = 1 + (wt * wt);
-		const double er = Material[m].einf + (Material[m].deps / den);
-		const double ei = Material[m].deps * wt / den;
-		Material[m].epsr = er;
-		Material[m].tand = ei / er;
+		for (int d = 0; d < 3; d++) {
+			if (Material[m].epsr3[d] <= 0) Material[m].epsr3[d] = Material[m].epsr;
+			if (Material[m].mur3[d]  <= 0) Material[m].mur3[d]  = Material[m].mur;
+		}
 	}
 
 	// 格子を展開する

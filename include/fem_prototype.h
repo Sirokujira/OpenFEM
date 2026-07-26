@@ -33,7 +33,7 @@ void crs_diag(const crs_t *, double *);
 double crs_row_dot(const crs_t *, int64_t, const double *);
 
 // assemble.c
-void element_matrix(double, double, double, double [8][8]);
+void element_matrix(double, double, double, const double [3], double [8][8]);
 void assemble(crs_t *, int);
 void assemble_nu(crs_t *, const double *);
 void assemble_mass(crs_t *);
