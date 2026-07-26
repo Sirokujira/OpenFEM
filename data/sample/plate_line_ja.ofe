@@ -1,0 +1,44 @@
+OpenFEM 1 0
+title = plate line with a hysteretic core (Jiles-Atherton)
+#
+# plate_line_bh.ofe と同じ形状の板間に、Jiles-Atherton ヒステリシスモデルの
+# 磁性体を詰め、電流掃引で履歴ループを描かせる。
+#
+# 磁界は 1 次元なので Ampere の法則から H = I/W が厳密に決まり、FEM の結果は
+# 「H を掃引したときのスカラー J-A モデルの ODE 解」と一致しなければならない。
+#
+#   dM/dH = [ (1-c) δ_M (M_an-M)/(δk - α(M_an-M)) + c dM_an/dHe ]
+#         / [ 1 - α c dM_an/dHe ],   M_an = Ms(coth(He/a) - a/He),  He = H + αM
+#   B = mu0 (H + M)
+#
+# W = 1mm なので I [A] = H [kA/m] * 1e-3。掃引は初磁化 -> +2A -> -2A -> +2A。
+#
+# 上の ODE を H = I/W に沿って細かく積分した参照解 (B [T]):
+#
+#   step  1..5  : +0.355138  +0.912045  +1.342832  +1.260954  +0.713845 (残留磁束)
+#   step  6..9  : -0.908562  -1.342754  -1.260921  -0.713844
+#   step 10..11 : +0.908562  +1.342754                 (ループが閉じている)
+#
+# FEM は B を駆動変数とする逆 J-A を Heun 法で積分するので経路が異なるが、
+# 同じ ODE の解なので一致しなければならない (実測 0.08% 以内)。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 20 0.05e-3 20 0.25e-3 20 0.30e-3
+zmesh = 0 1 1e-4
+
+# material id 2 : ヒステリシス磁性体 (Ms, a, alpha, k, c)
+material = 1.0 0
+ja = 2 1.6e6 1100 1.6e-3 400 0.2
+geometry = 2 1 0 1e-3 0.05e-3 0.25e-3 0 1e-4
+
+conductor = 0 1 0 1e-3 0      0.05e-3 0 1e-4
+conductor = 1 1 0 1e-3 0.25e-3 0.30e-3 0 1e-4
+
+analysis = M
+tline = Z
+current = 1.0
+currentsweep = 0.5 1.0 2.0 1.0 0.0 -1.0 -2.0 -1.0 0.0 1.0 2.0
+jasub = 40
+nlsolver = 200 1e-7 1.0
+solver = 50000 5000 1e-13
+end

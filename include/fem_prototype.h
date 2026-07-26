@@ -40,6 +40,8 @@ void assemble_nu(crs_t *, const double *);
 void assemble_mass(crs_t *);
 double bh_nu(const material_t *, int, double);
 void assemble_newton(crs_t *, const double *, double *);
+void assemble_ja(const double *, double *, double *);
+void ja_eval(const ja_t *, double, double, double, double, double *, double *, double *);
 
 // solver_cg.c
 int solver_cg(const crs_t *, const double *, double *, const unsigned char *,

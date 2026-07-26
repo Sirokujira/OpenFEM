@@ -247,6 +247,193 @@ static void bh_nu_dnu(const material_t *mt, double b, double *nu, double *dnudb2
 }
 
 
+// ---- Jiles-Atherton ヒステリシス ----
+
+// Langevin 関数 M_an = Ms(coth(x) - 1/x) と dM_an/dHe
+static void ja_langevin(const ja_t *ja, double he, double *man, double *dman)
+{
+	const double x = he / ja->a;
+	const double ax = fabs(x);
+
+	if (ax < 1e-4) {
+		// 級数展開 (x -> 0 で coth(x)-1/x -> x/3)
+		*man = ja->ms * x / 3;
+		*dman = ja->ms / (3 * ja->a);
+	}
+	else {
+		const double sh = sinh(x);
+		*man = ja->ms * ((cosh(x) / sh) - (1 / x));
+		*dman = (ja->ms / ja->a) * ((1 / (x * x)) - (1 / (sh * sh)));
+	}
+}
+
+
+// dM/dH (Jiles-Atherton)。delta = dH の符号
+static double ja_dmdh(const ja_t *ja, double h, double m, double delta)
+{
+	const double he = h + (ja->alpha * m);
+	double man, dman;
+	ja_langevin(ja, he, &man, &dman);
+
+	const double dm = man - m;
+	// δ_M : 非物理な負の帯磁率を防ぐ
+	double irr = 0;
+	if ((dm * delta) > 0) {
+		const double den = (delta * ja->k) - (ja->alpha * dm);
+		if (fabs(den) > 0) irr = (1 - ja->c) * dm / den;
+	}
+	const double num = irr + (ja->c * dman);
+	const double den2 = 1 - (ja->alpha * ja->c * dman);
+
+	double chi = ((fabs(den2) > 0) ? (num / den2) : num);
+	if (chi < 0) chi = 0;			// 単調性を保つ
+
+	return chi;
+}
+
+
+// 状態 (b0, h0, m0) から磁束密度 b まで積分し、H, M, 微分磁気抵抗率 dH/dB を返す
+//
+// FEM の未知数は A なので B が駆動変数になる (逆 J-A)。
+//   dB/dH = μ0 (1 + dM/dH)
+//   -> dH/dB = 1/(μ0(1+χ)),  dM/dB = χ/(μ0(1+χ)),  χ = dM/dH
+//
+// H は B/μ0 - M で代数的に求めると桁落ちする (高透磁率では B/μ0 と M が
+// ほぼ相殺するので、M の相対誤差 1e-3 が H の 100% 誤差になる)。
+// そのため H も B に沿って積分する。積分は Heun 法 (2 次)。
+void ja_eval(const ja_t *ja, double b0, double h0, double m0, double b,
+	double *hout, double *mout, double *dhdb)
+{
+	const int nsub = ((JaSub > 0) ? JaSub : 20);
+	const double db = (b - b0) / nsub;
+	const double delta = ((db >= 0) ? +1.0 : -1.0);
+
+	double h = h0, m = m0;
+	for (int s = 0; s < nsub; s++) {
+		const double chi1 = ja_dmdh(ja, h, m, delta);
+		const double f1h = 1 / (MU0 * (1 + chi1));
+		const double f1m = chi1 / (MU0 * (1 + chi1));
+		const double chi2 = ja_dmdh(ja, h + (f1h * db), m + (f1m * db), delta);
+		const double f2h = 1 / (MU0 * (1 + chi2));
+		const double f2m = chi2 / (MU0 * (1 + chi2));
+		h += (f1h + f2h) / 2 * db;
+		m += (f1m + f2m) / 2 * db;
+	}
+
+	const double chi = ja_dmdh(ja, h, m, delta);
+
+	*mout = m;
+	*hout = h;
+	*dhdb = 1 / (MU0 * (1 + chi));
+}
+
+
+// ヒステリシス材料の内力ベクトル res = ∫ ν_ja(|B|) ∇A・∇N_i dV と、
+// 固定点行列に使う微分磁気抵抗率 nucell (セル毎、正定値)。
+// ヒステリシスでは ν = H/B が負になり得る (第 2 象限) ため、行列には
+// 常に正の微分磁気抵抗率 dH/dB を使い、残差側だけで正確な H を扱う。
+// 反復中の状態は JaBn / JaMn に書き、収束後に JaB / JaM へ確定させる。
+void assemble_ja(const double *az, double *res, double *nucell)
+{
+	const double gp = 1 / sqrt(3.0);
+	const int64_t nnode = num_node();
+
+	memset(res, 0, (size_t)nnode * sizeof(double));
+
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+		const material_t *mt = &Material[CellMaterial[c]];
+
+		const double dx = Xn[i + 1] - Xn[i];
+		const double dy = Yn[j + 1] - Yn[j];
+		const double dz = Zn[k + 1] - Zn[k];
+		const double detj = (dx * dy * dz) / 8;
+		const double rx = 2 / dx, ry = 2 / dy, rz = 2 / dz;
+
+		int64_t nd[8];
+		double a[8];
+		for (int l = 0; l < 8; l++) {
+			nd[l] = node_index(i + LI(l), j + LJ(l), k + LK(l));
+			a[l] = az[nd[l]];
+		}
+
+		double re[8];
+		for (int l = 0; l < 8; l++) re[l] = 0;
+		double nusum = 0;
+
+		for (int g = 0; g < 8; g++) {
+			const double xi  = (LI(g) ? +gp : -gp);
+			const double eta = (LJ(g) ? +gp : -gp);
+			const double zta = (LK(g) ? +gp : -gp);
+
+			double dn[8][3];
+			for (int l = 0; l < 8; l++) {
+				const double si = (LI(l) ? +1.0 : -1.0);
+				const double sj = (LJ(l) ? +1.0 : -1.0);
+				const double sk = (LK(l) ? +1.0 : -1.0);
+				dn[l][0] = si * (1 + (sj * eta)) * (1 + (sk * zta)) / 8 * rx;
+				dn[l][1] = sj * (1 + (sk * zta)) * (1 + (si * xi )) / 8 * ry;
+				dn[l][2] = sk * (1 + (si * xi )) * (1 + (sj * eta)) / 8 * rz;
+			}
+
+			double gr[3] = {0, 0, 0};
+			for (int l = 0; l < 8; l++) {
+				gr[0] += a[l] * dn[l][0];
+				gr[1] += a[l] * dn[l][1];
+				gr[2] += a[l] * dn[l][2];
+			}
+			const double bmag = sqrt((gr[0] * gr[0]) + (gr[1] * gr[1]) + (gr[2] * gr[2]));
+
+			double nu, nud;
+			if (mt->ja.on) {
+				// ヒステリシスは符号を持つ (残留磁束・保磁力) ので、最初に磁化した
+				// 向きを基準ベクトルとして符号付きの B を取る。
+				// 場が回転しない問題ではこれが厳密な扱いになる。
+				const int64_t id = (c * 8) + g;
+				double *dir = &JaD[id * 3];
+				const int haved = ((dir[0] != 0) || (dir[1] != 0) || (dir[2] != 0));
+				double bs = bmag;
+				if (haved) {
+					bs = (gr[0] * dir[0]) + (gr[1] * dir[1]) + (gr[2] * dir[2]);
+				}
+				if (bmag > 1e-12) {
+					JaDn[(id * 3) + 0] = gr[0] / bmag;
+					JaDn[(id * 3) + 1] = gr[1] / bmag;
+					JaDn[(id * 3) + 2] = gr[2] / bmag;
+				}
+
+				double h, m, dhdb;
+				ja_eval(&mt->ja, JaB[id], JaH[id], JaM[id], bs, &h, &m, &dhdb);
+				JaBn[id] = bs;
+				JaHn[id] = h;
+				JaMn[id] = m;
+				// ν = H/B は第 2 象限で負になる (残差側だけで使う)
+				nu  = ((fabs(bs) > 1e-12) ? (h / bs) : dhdb);
+				nud = dhdb;
+			}
+			else {
+				nu = nud = 1 / (MU0 * mt->mu6[0]);
+			}
+			nusum += nud;
+
+			for (int l = 0; l < 8; l++) {
+				const double u = (dn[l][0] * gr[0]) + (dn[l][1] * gr[1]) + (dn[l][2] * gr[2]);
+				re[l] += nu * u * detj;
+			}
+		}
+
+		nucell[c] = nusum / 8;
+		for (int l = 0; l < 8; l++) {
+			res[nd[l]] += re[l];
+		}
+	}
+	}
+	}
+}
+
+
 // 非線形静磁場の Newton 反復 : ヤコビアン J と内力ベクトル res = K(ν(|∇A|)) A を作る
 //
 //   R_i = Σ_g w ν(B) (∇N_i・∇A) detJ

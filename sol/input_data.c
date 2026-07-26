@@ -81,6 +81,7 @@ int input_data(FILE *fp)
 		Material[m].npole = 0;
 		Material[m].einf  = 1;
 		Material[m].bhaniso = 0;
+		Material[m].ja.on = 0;
 		for (int d = 0; d < 3; d++) Material[m].nbh[d] = 0;
 		for (int d = 0; d < 6; d++) {
 			Material[m].eps6[d] = 0;	// 0 : anisoeps 未指定 (最後に epsr で埋める)
@@ -105,6 +106,9 @@ int input_data(FILE *fp)
 	for (int p = 0; p < MAXPORT; p++) {
 		CondSigma[p] = 0;
 	}
+
+	NSweep = 0;
+	JaSub = 20;
 
 	NlMaxiter = 50;
 	NlTol = 1e-5;
@@ -222,6 +226,7 @@ int input_data(FILE *fp)
 			Material[NMaterial].npole = 0;
 			Material[NMaterial].einf  = 1;
 			Material[NMaterial].bhaniso = 0;
+			Material[NMaterial].ja.on = 0;
 			for (int d = 0; d < 3; d++) Material[NMaterial].nbh[d] = 0;
 			for (int d = 0; d < 6; d++) {
 				Material[NMaterial].eps6[d] = 0;
@@ -417,6 +422,51 @@ int input_data(FILE *fp)
 				mt->bh_b[ax][nb] = bb;
 				mt->nbh[ax]++;
 			}
+		}
+		else if (!strcmp(strkey, "ja")) {
+			// ja = <material_id> <Ms> <a> <alpha> <k> <c>
+			//   Jiles-Atherton ヒステリシスモデル。currentsweep と併用する
+			if (nval < 6) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			if ((mid < 2) || (mid >= NMaterial)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ja_t *ja = &Material[mid].ja;
+			ja->ms    = atof(token[3]);
+			ja->a     = atof(token[4]);
+			ja->alpha = atof(token[5]);
+			ja->k     = atof(token[6]);
+			ja->c     = atof(token[7]);
+			if ((ja->ms <= 0) || (ja->a <= 0) || (ja->k <= 0)
+			 || (ja->alpha < 0) || (ja->c < 0) || (ja->c >= 1)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ja->on = 1;
+		}
+		else if (!strcmp(strkey, "currentsweep")) {
+			// currentsweep = <I1> <I2> ...  : 履歴に沿って順に解く
+			if (nval < 1) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			if (nval > MAXSWEEP) {
+				printf(errfmt1, strkey);
+				return 1;
+			}
+			NSweep = nval;
+			for (int q = 0; q < nval; q++) {
+				Sweep[q] = atof(token[2 + q]);
+			}
+		}
+		else if (!strcmp(strkey, "jasub")) {
+			// jasub = <n>  : 1 ステップあたりの J-A 部分積分数
+			JaSub = atoi(token[2]);
+			if (JaSub < 1) JaSub = 1;
 		}
 		else if (!strcmp(strkey, "nlsolver")) {
 			// nlsolver = <maxiter> <tol> <relax>  : 非線形 (B-H) 反復の設定
@@ -654,6 +704,39 @@ int input_data(FILE *fp)
 			}
 		}
 	}
+	// ヒステリシス (Jiles-Atherton)
+	int hysteresis = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].ja.on) hysteresis = 1;
+		if (Material[m].ja.on && (Material[m].nbh[0] > 0)) {
+			printf("*** material %d cannot have both bh and ja\n", m);
+			return 1;
+		}
+	}
+	if (hysteresis) {
+		if (!(Analysis & ANALYSIS_M)) {
+			printf("%s\n", "*** the ja key needs analysis M (magnetostatic)");
+			return 1;
+		}
+		if (Analysis & ANALYSIS_F) {
+			printf("%s\n", "*** the ja key cannot be combined with analysis F");
+			return 1;
+		}
+		if (NPort != 1) {
+			printf("%s\n", "*** a hysteretic (ja) model requires exactly one port");
+			return 1;
+		}
+		if (NSweep < 1) {
+			// 掃引が無いときは current の 1 点だけを処女曲線として解く
+			NSweep = 1;
+			Sweep[0] = Curr;
+		}
+	}
+	else if (NSweep > 0) {
+		printf("%s\n", "*** currentsweep needs a hysteretic (ja) material");
+		return 1;
+	}
+
 	if (nonlinear) {
 		if (!(Analysis & ANALYSIS_M)) {
 			printf("%s\n", "*** the bh key needs analysis M (magnetostatic)");

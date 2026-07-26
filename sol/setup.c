@@ -162,6 +162,33 @@ int setup(void)
 		}
 	}
 
+	// Jiles-Atherton の状態 (Gauss 点毎)
+
+	int hysteresis = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].ja.on) hysteresis = 1;
+	}
+	JaB = JaH = JaM = JaBn = JaHn = JaMn = JaD = JaDn = NULL;
+	if (hysteresis) {
+		const size_t njasz = (size_t)ncell * 8 * sizeof(double);
+		JaB  = (double *)malloc(njasz);
+		JaH  = (double *)malloc(njasz);
+		JaM  = (double *)malloc(njasz);
+		JaBn = (double *)malloc(njasz);
+		JaHn = (double *)malloc(njasz);
+		JaMn = (double *)malloc(njasz);
+		memset(JaB,  0, njasz);		// 初期状態 : 処女 (B = H = M = 0)
+		memset(JaH,  0, njasz);
+		memset(JaM,  0, njasz);
+		memset(JaBn, 0, njasz);
+		memset(JaHn, 0, njasz);
+		memset(JaMn, 0, njasz);
+		JaD  = (double *)malloc(njasz * 3);
+		JaDn = (double *)malloc(njasz * 3);
+		memset(JaD,  0, njasz * 3);		// 0 : 方向未確定 (未磁化)
+		memset(JaDn, 0, njasz * 3);
+	}
+
 	// 結果行列
 
 	const size_t msize = (size_t)NPort * NPort * sizeof(double);
@@ -220,4 +247,6 @@ void memfree(void)
 	free(NodeConductor);
 	free(Cmat); free(Lmat); free(Gmat); free(Rmat); free(Mmat); free(Smat);
 	free(Rfmat); free(Lfmat);
+	free(JaB); free(JaH); free(JaM); free(JaBn); free(JaHn); free(JaMn);
+	free(JaD); free(JaDn);
 }

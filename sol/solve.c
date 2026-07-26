@@ -184,6 +184,145 @@ static int solve_magnetostatic(FILE *fp_log)
 	double *az  = (double *)malloc(n * sizeof(double));
 	const double scale = 1 / TlineLength;
 
+	// ヒステリシス (Jiles-Atherton) : 電流掃引に沿って履歴を追う
+	//
+	// ν = H/B はヒステリシスでは第 2 象限で負になるため行列には使えない。
+	// 行列は常に正の微分磁気抵抗率 dH/dB で組み (SPD なので Jacobi-PCG が使える)、
+	// 残差側だけで正確な H(B) を扱う固定点反復にする。
+	// 各掃引点で収束したら J-A の状態を確定させ、次の点はそこから続ける。
+	{
+		int hysteresis = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.on) hysteresis = 1;
+		}
+		if (hysteresis) {
+			fprintf(fp_log, "  Jiles-Atherton hysteresis : %d sweep points, %d sub-steps\n",
+				NSweep, JaSub);
+			fprintf(fp_log, "  %5s %13s %13s %13s %13s %6s\n",
+				"step", "I [A]", "H [A/m]", "B [T]", "L [H/m]", "iter");
+			fflush(fp_log);
+
+			double *res  = (double *)malloc(n * sizeof(double));
+			double *del  = (double *)malloc(n * sizeof(double));
+			double *rhs2 = (double *)malloc(n * sizeof(double));
+			memset(az, 0, n * sizeof(double));
+
+			// 残差の正規化に使う基準 (掃引中の最大電流の右辺ノルム)
+			double amax = 0;
+			for (int q = 0; q < NSweep; q++) {
+				if (fabs(Sweep[q]) > amax) amax = fabs(Sweep[q]);
+			}
+			double bref = 0;
+			for (int i = 0; i < n; i++) {
+				if (!fix[i]) bref += b[0][i] * b[0][i];
+			}
+			bref = sqrt(bref) * ((amax > 0) ? (amax / fabs(Curr)) : 1);
+			if (bref <= 0) bref = 1;
+
+			for (int is = 0; is < NSweep; is++) {
+				const double cur = Sweep[is];
+				const double fac = cur / Curr;
+				for (int i = 0; i < n; i++) {
+					rhs[i] = (fix[i] ? 0 : (fac * b[0][i]));
+				}
+
+				int it;
+				double rnorm = 0;
+				int converged = 0;
+				for (it = 1; it <= NlMaxiter; it++) {
+					assemble_ja(az, res, nucell);
+					rnorm = 0;
+					for (int i = 0; i < n; i++) {
+						rhs2[i] = (fix[i] ? 0 : (rhs[i] - res[i]));
+						rnorm += rhs2[i] * rhs2[i];
+					}
+					rnorm = sqrt(rnorm) / bref;
+					if (rnorm < NlTol) {
+						converged = 1;
+						break;
+					}
+					assemble_nu(&A, nucell);
+					if (solver_cg(&A, rhs2, del, fix, Solver.maxiter, Solver.nout,
+							Solver.converg, NULL, "ja") < 0) {
+						fprintf(fp_log, "*** linear solver did not converge (sweep %d)\n", is + 1);
+						ierr = 1;
+						break;
+					}
+					for (int i = 0; i < n; i++) {
+						az[i] += NlRelax * del[i];
+					}
+				}
+				if (!converged) {
+					fprintf(fp_log, "*** warning : hysteresis iteration did not converge "
+						"(step %d, residual = %.3e)\n", is + 1, rnorm);
+				}
+
+				// 状態を確定させる
+				memcpy(JaB, JaBn, (size_t)ncell * 8 * sizeof(double));
+				memcpy(JaH, JaHn, (size_t)ncell * 8 * sizeof(double));
+				memcpy(JaM, JaMn, (size_t)ncell * 8 * sizeof(double));
+				// 方向は最初に磁化したときだけ決める (以降は固定)
+				for (int64_t id = 0; id < ncell * 8; id++) {
+					double *d = &JaD[id * 3];
+					if ((d[0] == 0) && (d[1] == 0) && (d[2] == 0)) {
+						d[0] = JaDn[(id * 3) + 0];
+						d[1] = JaDn[(id * 3) + 1];
+						d[2] = JaDn[(id * 3) + 2];
+					}
+				}
+
+				// ヒステリシス材料の体積平均 B, H
+				double bsum = 0, hsum = 0, vsum = 0;
+				for (int i = 0; i < Nx; i++) {
+				for (int j = 0; j < Ny; j++) {
+				for (int k = 0; k < Nz; k++) {
+					const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+					if (!Material[CellMaterial[c]].ja.on) continue;
+					const double w = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j])
+					               * (Zn[k + 1] - Zn[k]) / 8;
+					for (int g = 0; g < 8; g++) {
+						const int64_t id = (c * 8) + g;
+						bsum += JaB[id] * w;
+						hsum += JaH[id] * w;
+						vsum += w;
+					}
+				}
+				}
+				}
+				const double bmean = ((vsum > 0) ? (bsum / vsum) : 0);
+				const double hmean = ((vsum > 0) ? (hsum / vsum) : 0);
+
+				// 磁束鎖交インダクタンス (電流 0 の点では定義できない)
+				double lval = 0;
+				if (cur != 0) {
+					double w = 0;
+					for (int i = 0; i < n; i++) {
+						w += fac * b[0][i] * az[i];
+					}
+					lval = w / (cur * cur) * scale;
+					Mmat[0] = lval;
+					HaveM = 1;
+				}
+				fprintf(fp_log, "  %5d %13.6e %13.6e %13.6e %13.6e %6d\n",
+					is + 1, cur, hmean, bmean, lval, it);
+				fflush(fp_log);
+			}
+
+			free(res);
+			free(del);
+			free(rhs2);
+			free(b[0]);
+			free(b);
+			free(rhs);
+			free(az);
+			free(fix);
+			free(nucell);
+			crs_free(&A);
+
+			return ierr;
+		}
+	}
+
 	// 非線形 (B-H) 反復 (Newton-Raphson)
 	//
 	//   R(A) = K(ν(|∇A|)) A - b = 0

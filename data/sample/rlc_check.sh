@@ -20,6 +20,8 @@
 #   aniso_plate    : 異方性誘電体の C = eps0 εz A/d      (厳密、許容 0.1%)
 #   aniso_rot      : 非対角テンソル (z 軸 30 度回転) でも同値 (厳密、許容 0.1%)
 #   plate_line_bh_aniso : 軸毎 B-H。B は x のみなので X 曲線だけが効くこと
+#   plate_line_ja  : Jiles-Atherton の履歴ループを、H 掃引で独立に積分した
+#                    ODE 解と比較する (11 点、許容 0.5%)
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -163,6 +165,24 @@ for pair in "0.5 2.889308e-04" "1.0 2.000419e-04" "2.0 1.022641e-04" "5.0 4.3597
 	(cd "$WORK" && "$OFE" -n 2 bh_aniso_run.ofe > /dev/null && "$OFE_POST" > /dev/null)
 	compare "L(I=${cur}A) [H/m]" "$(value_of Ldc)" "$lexp" 0.01
 done
+
+# ヒステリシス (Jiles-Atherton) : H = I/W が Ampere の法則で厳密に決まるので、
+# FEM の結果はスカラー J-A モデルを H 掃引で積分した ODE 解と一致しなければならない
+# (期待値は data/sample/plate_line_ja.ofe のコメント参照)
+echo "[plate_line_ja] hysteresis loop vs independent ODE integration"
+run_case plate_line_ja
+n=0
+for bexp in 0.355138 0.912045 1.342832 1.260954 0.713845 \
+            -0.908562 -1.342754 -1.260921 -0.713844 0.908562 1.342754; do
+	n=$((n + 1))
+	bval=$(awk -v s="$n" '/Jiles-Atherton hysteresis/ { inb = 1; next }
+	                       inb && ($1 == s) && (NF == 6) { print $4; exit }' "$WORK/ofe.log")
+	compare "B(step $n) [T]" "$bval" "$bexp" 0.005
+done
+if grep -q "did not converge" "$WORK/ofe.log"; then
+	echo "  *** hysteresis iteration did not converge" >&2
+	status=1
+fi
 
 if [ "$status" -ne 0 ]; then
 	echo "*** RLC validation FAILED" >&2

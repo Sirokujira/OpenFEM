@@ -60,6 +60,20 @@ extern "C" {
 #define MAXPORT (16)			// 導体 (基準導体 + ポート) の最大数
 #define MAXBH   (64)			// B-H 曲線の点数の最大数
 #define MAXPOLE (8)				// 分散材料の極の最大数
+#define MAXSWEEP (64)			// 電流掃引の点数の最大数
+
+// Jiles-Atherton ヒステリシスモデルのパラメータ
+//   M_an(He) = Ms (coth(He/a) - a/He),  He = H + α M
+//   dM/dH = [ (1-c) δ_M (M_an-M)/(δk - α(M_an-M)) + c dM_an/dHe ]
+//         / [ 1 - α c dM_an/dHe ]
+typedef struct {
+	int    on;					// 1 : このモデルを使う
+	double ms;					// 飽和磁化 Ms [A/m]
+	double a;					// 形状パラメータ a [A/m]
+	double alpha;				// 磁区間結合 α
+	double k;					// ピン止め k [A/m]
+	double c;					// 可逆成分の割合 c
+} ja_t;
 
 // 分散材料の極
 //   type 1 (Debye)   : Δε / (1 + jωτ)                     a=Δε, b=τ [s]
@@ -86,6 +100,7 @@ typedef struct {
 	int    nbh[3];				// 各軸の点数 (0 : 線形、mu6 を使う)
 	double bh_h[3][MAXBH];		// H [A/m]
 	double bh_b[3][MAXBH];		// B [T] (狭義単調増加、B > 0)
+	ja_t   ja;					// ヒステリシス (Jiles-Atherton)
 } material_t;
 
 // 形状 (shape/g は OpenFDTD の geometry と共通)
@@ -148,6 +163,16 @@ EXTERN double Volt;				// 励振電圧 [V]
 EXTERN double Freq;				// 周波数 [Hz] (tanδ による誘電損の計算に使う、0 = 無効)
 EXTERN double Curr;				// 静磁場解析の励振電流 [A]
 EXTERN int NSection;			// SPICE 等価回路の梯子段数
+
+// 電流掃引 (ヒステリシス解析)。履歴に沿って順に解く
+EXTERN int NSweep;
+EXTERN double Sweep[MAXSWEEP];
+
+// Jiles-Atherton の状態 (Gauss 点毎、添字 = cell * 8 + g)
+EXTERN double *JaB, *JaH, *JaM;		// 収束済みの |B|, H, M
+EXTERN double *JaBn, *JaHn, *JaMn;	// 反復中の |B|, H, M
+EXTERN double *JaD, *JaDn;		// 磁化方向の基準ベクトル (符号付き B を取るため)
+EXTERN int JaSub;				// 1 ステップあたりの部分積分数
 
 // 非線形 (B-H) 反復の設定
 EXTERN int NlMaxiter;			// 最大反復回数
