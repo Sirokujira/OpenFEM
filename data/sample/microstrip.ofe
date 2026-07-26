@@ -1,0 +1,25 @@
+OpenFEM 1 0
+title = microstrip line (w = 0.75mm, h = 0.4mm, t = 35um, epsr = 4.4)
+#
+# 断面は x-y (y が高さ方向)、線路軸は z。
+# 側面・上面は自然境界条件 (磁気壁) なので、解析領域は線路寸法に対して
+# 十分広く取る (ここでは幅 ±4mm, 高さ 4mm)。
+# Hammerstad の式による目安 : eps_eff ~ 3.3, Z0 ~ 47 ohm
+#
+xmesh = -4e-3 30 -1e-3 80 1e-3 30 4e-3
+ymesh = 0 16 0.4e-3 2 0.435e-3 60 4e-3
+zmesh = 0 1 1e-4
+
+# material id 2 : 基板 (FR-4 相当)
+material = 4.4 0
+geometry = 2 1 -4e-3 4e-3 0 0.4e-3 0 1e-4
+
+# 地導体 (y = 0 の面) と信号線 (厚さ 35um)
+conductor = 0 1 -4e-3    4e-3    0      0        0 1e-4
+conductor = 1 1 -0.375e-3 0.375e-3 0.4e-3 0.435e-3 0 1e-4
+
+analysis = C L
+tline = Z
+voltage = 1
+solver = 50000 1000 1e-10
+end

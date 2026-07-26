@@ -1,0 +1,22 @@
+OpenFEM 1 0
+title = resistor bar (analytic R = d / (sigma * A))
+#
+# 1mm x 1mm 断面、長さ 0.2mm、導電率 1000 S/m の抵抗体。
+# 両端面を電極にすると電流分布は厳密に 1 次元となる:
+#   R = 0.2e-3 / (1e3 * 1e-6) = 0.2 [ohm]
+#
+xmesh = 0 10 1e-3
+ymesh = 0 10 1e-3
+zmesh = 0 10 0.2e-3
+
+# material id 2 : 抵抗体 (epsr = 1, sigma = 1000 S/m)
+material = 1.0 1e3
+geometry = 2 1 0 1e-3 0 1e-3 0 0.2e-3
+
+conductor = 0 1 0 1e-3 0 1e-3 0      0
+conductor = 1 1 0 1e-3 0 1e-3 0.2e-3 0.2e-3
+
+analysis = R
+voltage = 1
+solver = 20000 500 1e-10
+end

@@ -1,0 +1,29 @@
+OpenFEM 1 0
+title = coaxial line (a = 0.5mm, b = 1.5mm, epsr = 2.1)
+#
+# 同軸線路の単位長あたり C, L。解析解:
+#   C' = 2*pi*eps0*epsr / ln(b/a) = 1.063363e-10 [F/m]
+#   L' = mu0 / (2*pi) * ln(b/a)   = 2.197225e-07 [H/m]
+#   Z0 = sqrt(L'/C')              = 45.4595       [ohm]
+# 円形導体を直交格子で階段近似するため数 % の誤差が出る。
+#
+# 断面は x-y、線路軸は z (1 セル、tline = Z で単位長あたりに換算)
+xmesh = -2e-3 200 2e-3
+ymesh = -2e-3 200 2e-3
+zmesh = 0 1 1e-4
+
+# material id 2 : 誘電体 (PTFE 相当)
+material = 2.1 0
+geometry = 2 1 -2e-3 2e-3 -2e-3 2e-3 0 1e-4
+
+# 外部導体 : 全体を導体にしてから半径 b の円柱をくり抜く (id = -1 は取り消し)
+conductor =  0  1 -2e-3   2e-3   -2e-3   2e-3   0 1e-4
+conductor = -1 13 -1.5e-3 1.5e-3 -1.5e-3 1.5e-3 0 1e-4
+# 内部導体 : 半径 a の円柱
+conductor =  1 13 -0.5e-3 0.5e-3 -0.5e-3 0.5e-3 0 1e-4
+
+analysis = C L
+tline = Z
+voltage = 1
+solver = 50000 1000 1e-10
+end

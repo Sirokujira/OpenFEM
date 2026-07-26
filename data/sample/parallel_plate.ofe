@@ -1,0 +1,24 @@
+OpenFEM 1 0
+title = parallel plate capacitor (analytic C = eps0 * epsr * A / d)
+#
+# 1mm x 1mm の平行平板、間隔 0.2mm、比誘電率 4.0。
+# 側面は自然境界条件 (∂φ/∂n = 0) なので電界は厳密に 1 次元となり、
+# フリンジングの無い解析解と一致する:
+#   C = eps0 * 4.0 * (1e-3 * 1e-3) / 0.2e-3 = 1.770838e-13 [F]
+#
+xmesh = 0 10 1e-3
+ymesh = 0 10 1e-3
+zmesh = 0 10 0.2e-3
+
+# material id 2 : 誘電体 (epsr = 4.0, sigma = 0)
+material = 4.0 0
+geometry = 2 1 0 1e-3 0 1e-3 0 0.2e-3
+
+# 電極 (厚さ 0 の指定は面として扱われる)
+conductor = 0 1 0 1e-3 0 1e-3 0      0
+conductor = 1 1 0 1e-3 0 1e-3 0.2e-3 0.2e-3
+
+analysis = C
+voltage = 1
+solver = 20000 500 1e-10
+end

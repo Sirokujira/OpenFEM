@@ -1,0 +1,199 @@
+# OpenFEM CI — ソルバーのビルド + サンプル実行 + 解析解との比較検証。
+# 外部依存は無いので 3 OS とも素の CMake でビルドできる。
+name: CI
+
+on:
+  push:
+    branches: [ main, "claude/**" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write   # タグ push 時の Release 添付に使用
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build ofe / ofe_post
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Smoke test — solver + post
+        run: |
+          mkdir -p /tmp/smoke && cp data/sample/microstrip.ofe /tmp/smoke/
+          cd /tmp/smoke
+          "$GITHUB_WORKSPACE/bin/ofe" -n 2 microstrip.ofe
+          grep -q "normal end" ofe.log
+          test -s ofe.out
+          "$GITHUB_WORKSPACE/bin/ofe_post"
+          test -s rlc.csv
+          test -s ofe_circuit.sp
+
+      # 平行平板 / 抵抗 / 同軸 / マイクロストリップを解析解と比較する
+      - name: Validation test — R/L/C
+        run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check
+
+      - name: Upload binaries (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ofe-linux-x64
+          path: |
+            bin/ofe
+            bin/ofe_post
+
+      - name: Package for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: tar czf ofe-linux-x64.tar.gz -C bin ofe ofe_post
+
+      - name: Attach binaries to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ofe-linux-x64.tar.gz
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-linux
+          path: |
+            /tmp/smoke/*.log
+            /tmp/rlc-check/*.log
+            /tmp/rlc-check/*.csv
+          if-no-files-found: ignore
+
+  # macOS (Apple Silicon)。AppleClang は OpenMP を同梱しないため
+  # Homebrew の libomp を明示指定する。
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install libomp
+
+      - name: Configure
+        run: |
+          OMP="$(brew --prefix libomp)"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DOpenMP_C_FLAGS="-Xclang -fopenmp -I${OMP}/include" \
+            -DOpenMP_C_LIB_NAMES=omp \
+            -DOpenMP_omp_LIBRARY="${OMP}/lib/libomp.dylib"
+
+      - name: Build ofe / ofe_post
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Smoke test — solver + post
+        run: |
+          mkdir -p /tmp/smoke && cp data/sample/microstrip.ofe /tmp/smoke/
+          cd /tmp/smoke
+          "$GITHUB_WORKSPACE/bin/ofe" -n 2 microstrip.ofe
+          grep -q "normal end" ofe.log
+          test -s ofe.out
+          "$GITHUB_WORKSPACE/bin/ofe_post"
+
+      - name: Validation test — R/L/C
+        run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check
+
+      - name: Upload binaries (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ofe-macos-arm64
+          path: |
+            bin/ofe
+            bin/ofe_post
+
+      - name: Package for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: tar czf ofe-macos-arm64.tar.gz -C bin ofe ofe_post
+
+      - name: Attach binaries to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ofe-macos-arm64.tar.gz
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-macos
+          path: |
+            /tmp/smoke/*.log
+            /tmp/rlc-check/*.log
+          if-no-files-found: ignore
+
+  # Windows (MSVC + Ninja)。外部ライブラリを使わないので vcpkg は不要。
+  # 検証スクリプトは Git for Windows の bash (awk 同梱) で実行する。
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build ofe / ofe_post
+        run: cmake --build build
+
+      - name: Smoke test — solver + post
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force smoke | Out-Null
+          Copy-Item data/sample/microstrip.ofe smoke/
+          Set-Location smoke
+          & "$env:GITHUB_WORKSPACE\bin\ofe.exe" -n 2 microstrip.ofe
+          Write-Host ("ofe exit code: 0x{0:X8}" -f $LASTEXITCODE)
+          if (Test-Path ofe.log) { Get-Content ofe.log -Tail 20 }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Select-String -Path ofe.log -Pattern "normal end" -Quiet)) { Write-Error "no normal end"; exit 1 }
+          if ((Get-Item ofe.out).Length -eq 0) { Write-Error "empty ofe.out"; exit 1 }
+          & "$env:GITHUB_WORKSPACE\bin\ofe_post.exe"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Validation test — R/L/C
+        shell: bash
+        run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe.exe" "$GITHUB_WORKSPACE/bin/ofe_post.exe" /tmp/rlc-check
+
+      - name: Upload binaries (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ofe-windows-x64
+          path: |
+            bin/ofe.exe
+            bin/ofe_post.exe
+
+      - name: Package for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: Compress-Archive -Path bin/ofe.exe, bin/ofe_post.exe -DestinationPath ofe-windows-x64.zip
+
+      - name: Attach binaries to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ofe-windows-x64.zip
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-windows
+          path: |
+            smoke/*.log
+            /tmp/rlc-check/*.log
+          if-no-files-found: ignore

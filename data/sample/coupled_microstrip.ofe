@@ -1,0 +1,27 @@
+OpenFEM 1 0
+title = coupled microstrip lines (w = 0.4mm, s = 0.4mm, h = 0.4mm, epsr = 4.4)
+#
+# 2 本の結合マイクロストリップ線路。単位長あたりの C, L 行列を求め、
+# ofe_post で結合容量・結合係数を含む SPICE サブサーキットを生成する。
+#
+xmesh = -4e-3 30 -1.2e-3 96 1.2e-3 30 4e-3
+ymesh = 0 16 0.4e-3 2 0.435e-3 60 4e-3
+zmesh = 0 1 1e-4
+
+material = 4.4 0
+geometry = 2 1 -4e-3 4e-3 0 0.4e-3 0 1e-4
+
+# 地導体
+conductor = 0 1 -4e-3 4e-3 0 0 0 1e-4
+# 線路 1 : x = -0.6mm .. -0.2mm、線路 2 : x = +0.2mm .. +0.6mm (間隔 0.4mm)
+conductor = 1 1 -0.6e-3 -0.2e-3 0.4e-3 0.435e-3 0 1e-4
+conductor = 2 1  0.2e-3  0.6e-3 0.4e-3 0.435e-3 0 1e-4
+
+analysis = C L
+tline = Z
+# 等価回路 (ofe_post) は線路長 50mm を 4 段の梯子で表す
+linelength = 50e-3
+nsection = 4
+voltage = 1
+solver = 50000 1000 1e-10
+end
