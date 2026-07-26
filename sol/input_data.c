@@ -82,6 +82,7 @@ int input_data(FILE *fp)
 		Material[m].einf  = 1;
 		Material[m].deps  = 0;
 		Material[m].tau   = 0;
+		Material[m].nbh   = 0;
 	}
 
 	NGeometry = 0;
@@ -101,6 +102,10 @@ int input_data(FILE *fp)
 	for (int p = 0; p < MAXPORT; p++) {
 		CondSigma[p] = 0;
 	}
+
+	NlMaxiter = 50;
+	NlTol = 1e-5;
+	NlRelax = 1.0;
 
 	Solver.maxiter = 10000;
 	Solver.nout = 100;
@@ -215,6 +220,7 @@ int input_data(FILE *fp)
 			Material[NMaterial].einf  = 1;
 			Material[NMaterial].deps  = 0;
 			Material[NMaterial].tau   = 0;
+			Material[NMaterial].nbh   = 0;
 			NMaterial++;
 		}
 		else if (!strcmp(strkey, "geometry")) {
@@ -306,6 +312,50 @@ int input_data(FILE *fp)
 			Material[mid].einf  = einf;
 			Material[mid].deps  = deps;
 			Material[mid].tau   = tau;
+		}
+		else if (!strcmp(strkey, "bh")) {
+			// bh = <material_id> <H [A/m]> <B [T]>  (複数行で曲線を与える)
+			// B は狭義単調増加、B > 0。原点は書かない (B < B1 は初期透磁率で扱う)
+			if (nval < 3) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			if ((mid < 2) || (mid >= NMaterial)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			material_t *mt = &Material[mid];
+			if (mt->nbh >= MAXBH) {
+				printf(errfmt1, strkey);
+				return 1;
+			}
+			const double hh = atof(token[3]);
+			const double bb = atof(token[4]);
+			if ((hh <= 0) || (bb <= 0)) {
+				printf("*** bh : H and B must be positive (origin is implicit)\n");
+				return 1;
+			}
+			if ((mt->nbh > 0) && ((bb <= mt->bh_b[mt->nbh - 1]) || (hh <= mt->bh_h[mt->nbh - 1]))) {
+				printf("*** bh : H and B must increase monotonically (material %d)\n", mid);
+				return 1;
+			}
+			mt->bh_h[mt->nbh] = hh;
+			mt->bh_b[mt->nbh] = bb;
+			mt->nbh++;
+		}
+		else if (!strcmp(strkey, "nlsolver")) {
+			// nlsolver = <maxiter> <tol> <relax>  : 非線形 (B-H) 反復の設定
+			if (nval < 3) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			NlMaxiter = atoi(token[2]);
+			NlTol     = atof(token[3]);
+			NlRelax   = atof(token[4]);
+			if (NlMaxiter < 1) NlMaxiter = 1;
+			if (NlTol <= 0) NlTol = 1e-5;
+			if ((NlRelax <= 0) || (NlRelax > 1)) NlRelax = 1.0;
 		}
 		else if (!strcmp(strkey, "conductorsigma")) {
 			// conductorsigma = <conductor_id> <sigma>  : 導体の DC 直列抵抗の計算に使う
@@ -477,6 +527,27 @@ int input_data(FILE *fp)
 	if ((Analysis & ANALYSIS_M) && !Tline) {
 		printf("%s\n", "*** analysis M requires the tline key (2D magnetostatic)");
 		return 1;
+	}
+	// 非線形磁性体 (B-H) は重ね合わせが成り立たないので単一ポートに限る
+	int nonlinear = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh > 0) nonlinear = 1;
+	}
+	if (nonlinear) {
+		if (!(Analysis & ANALYSIS_M)) {
+			printf("%s\n", "*** the bh key needs analysis M (magnetostatic)");
+			return 1;
+		}
+		if (Analysis & ANALYSIS_F) {
+			printf("%s\n", "*** the bh key cannot be combined with analysis F "
+				"(time-harmonic eddy current assumes a linear material)");
+			return 1;
+		}
+		if (NPort != 1) {
+			printf("%s\n", "*** a nonlinear (bh) model requires exactly one port "
+				"(superposition does not hold)");
+			return 1;
+		}
 	}
 	// F 解析 (渦電流) も断面 2 次元。周波数と導体の導電率が要る
 	if (Analysis & ANALYSIS_F) {

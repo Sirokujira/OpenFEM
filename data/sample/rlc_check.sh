@@ -15,6 +15,7 @@
 #                    Rs' (導体 DC 抵抗)             (階段近似、許容 3%)
 #                    G' = omega C' tand             (均質誘電体では厳密、許容 0.1%)
 #   plate_line_ac  : R(f), L(f) を 1 次元厳密解と比較 (1kHz / 10MHz、許容 2%)
+#   plate_line_bh  : 非線形磁性体 L(I) を 1 次元厳密解と比較 (4 電流、許容 1%)
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -115,6 +116,23 @@ for pair in "1e3 6.896552e-01 2.932153e-07" "1e7 1.624296e+00 2.780550e-07"; do
 	(cd "$WORK" && "$OFE" -n 2 plate_line_ac_run.ofe > /dev/null && "$OFE_POST" > /dev/null)
 	compare "R(f=$freq) [ohm/m]" "$(value_of Rf)" "$rexp" 0.02
 	compare "L(f=$freq) [H/m]" "$(value_of Lf)" "$lexp" 0.02
+done
+
+# 非線形磁性体 (B-H) : 平行平板線路の 1 次元厳密解と比較する
+#   H = I/W が Ampere の法則から厳密に決まるので L = B(I/W)*d/I + 2*mu0*t/(3W)
+echo "[plate_line_bh] nonlinear B-H (1-D exact, secant inductance)"
+for pair in "0.5 2.889308e-04" "1.0 2.000419e-04" "2.0 1.022641e-04" "5.0 4.359744e-05"; do
+	set -- $pair
+	cur=$1
+	lexp=$2
+	sed "s/^current = .*/current = $cur/" "$SRC/plate_line_bh.ofe" > "$WORK/plate_line_bh_run.ofe"
+	(cd "$WORK" && "$OFE" -n 2 plate_line_bh_run.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "L(I=${cur}A) [H/m]" "$(value_of Ldc)" "$lexp" 0.01
+	# 収束しなかった場合はログに警告が出る
+	if grep -q "did not converge" "$WORK/ofe.log"; then
+		echo "  *** B-H iteration did not converge (I=$cur)" >&2
+		status=1
+	fi
 done
 
 if [ "$status" -ne 0 ]; then

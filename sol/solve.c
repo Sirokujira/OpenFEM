@@ -107,6 +107,8 @@ static void symmetrize(double *m, int np, FILE *fp_log, const char *name)
 // 相互エネルギー ∫J^(j)・A^(k) dV = L_kj I_k I_j は定数分に依らない
 // (∫J dV = 0) ので、そのまま L 行列が得られる。
 // 導体内部の電流分布を含むため内部インダクタンスが自動的に入り、μr にも対応する。
+// 材料に B-H 曲線 (bh キー) があるときは ν = H(|B|)/|B| を反復更新する非線形解析に
+// なる (単一ポートのみ)。得られる L は与えた電流での磁束鎖交 (割線) インダクタンス。
 static int solve_magnetostatic(FILE *fp_log)
 {
 	const int n = (int)num_node();
@@ -135,7 +137,19 @@ static int solve_magnetostatic(FILE *fp_log)
 
 	crs_t A;
 	crs_alloc(&A);
-	assemble(&A, 3);
+
+	// セル毎の磁気抵抗率 ν。非線形材料 (B-H) があると反復で更新する
+	const int64_t ncell = (int64_t)Nx * Ny * Nz;
+	int nonlinear = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh > 0) nonlinear = 1;
+	}
+	double *nucell = (double *)malloc((size_t)ncell * sizeof(double));
+	for (int64_t c = 0; c < ncell; c++) {
+		const material_t *mt = &Material[CellMaterial[c]];
+		nucell[c] = ((mt->nbh > 0) ? bh_nu(mt, 0) : (1 / (MU0 * mt->mur)));
+	}
+	assemble_nu(&A, nucell);
 
 	// 定数分の不定性を除くために 1 節点だけ固定する
 	unsigned char *fix = (unsigned char *)malloc(n * sizeof(unsigned char));
@@ -169,6 +183,97 @@ static int solve_magnetostatic(FILE *fp_log)
 	double *rhs = (double *)malloc(n * sizeof(double));
 	double *az  = (double *)malloc(n * sizeof(double));
 	const double scale = 1 / TlineLength;
+
+	// 非線形 (B-H) 反復 (Newton-Raphson)
+	//
+	//   R(A) = K(ν(|∇A|)) A - b = 0
+	//   J δ = -R,  A += w δ
+	//
+	// ν を Gauss 点毎に評価したヤコビアンを使うので 2 次収束する。
+	// H(B) が単調なら J は正定値なので Jacobi-PCG で解ける。
+	// ν の逐次代入 (successive substitution) は飽和領域で振動するため使わない。
+	// 電流駆動なので右辺 b は ν に依らない。重ね合わせが成り立たないので単一ポート。
+	if (nonlinear) {
+		fprintf(fp_log, "  nonlinear (B-H) Newton iteration : maxiter=%d, tol=%.1e, damping=%.2f\n",
+			NlMaxiter, NlTol, NlRelax);
+
+		// 初期値 : 初期透磁率での線形解
+		memcpy(rhs, b[0], n * sizeof(double));
+		rhs[0] = 0;
+		if (solver_cg(&A, rhs, az, fix, Solver.maxiter, Solver.nout,
+				Solver.converg, NULL, "bh0") < 0) {
+			fprintf(fp_log, "*** linear solver did not converge (B-H initial guess)\n");
+			ierr = 1;
+		}
+
+		crs_t J;
+		crs_alloc(&J);
+		double *res = (double *)malloc(n * sizeof(double));
+		double *del = (double *)malloc(n * sizeof(double));
+
+		double bnorm = 0;
+		for (int i = 0; i < n; i++) {
+			if (!fix[i]) bnorm += b[0][i] * b[0][i];
+		}
+		bnorm = sqrt(bnorm);
+
+		int nlit;
+		double rnorm = 0;
+		int converged = 0;
+		for (nlit = 1; nlit <= NlMaxiter; nlit++) {
+			assemble_newton(&J, az, res);
+
+			// R = K(ν)A - b (固定節点は 0)
+			rnorm = 0;
+			for (int i = 0; i < n; i++) {
+				res[i] = (fix[i] ? 0 : (b[0][i] - res[i]));	// -R (右辺)
+				rnorm += res[i] * res[i];
+			}
+			rnorm = sqrt(rnorm) / ((bnorm > 0) ? bnorm : 1);
+			fprintf(fp_log, "  %-10s %8d %13.5e\n", "B-H", nlit, rnorm);
+			fflush(fp_log);
+			if (rnorm < NlTol) {
+				converged = 1;
+				break;
+			}
+
+			if (solver_cg(&J, res, del, fix, Solver.maxiter, Solver.nout,
+					Solver.converg, NULL, "bh") < 0) {
+				fprintf(fp_log, "*** Newton step did not converge (B-H iteration %d)\n", nlit);
+				ierr = 1;
+				break;
+			}
+			for (int i = 0; i < n; i++) {
+				az[i] += NlRelax * del[i];
+			}
+		}
+		if (!converged) {
+			fprintf(fp_log, "*** warning : B-H Newton iteration did not converge "
+				"(%d iterations, residual = %.3e)\n", nlit - 1, rnorm);
+		}
+
+		// 収束した A から L を求める (ポートループは通さない)
+		double w = 0;
+		for (int i = 0; i < n; i++) {
+			w += b[0][i] * az[i];
+		}
+		Mmat[0] = w / (Curr * Curr) * scale;
+		HaveM = 1;
+
+		crs_free(&J);
+		free(res);
+		free(del);
+
+		free(b[0]);
+		free(b);
+		free(rhs);
+		free(az);
+		free(fix);
+		free(nucell);
+		crs_free(&A);
+
+		return ierr;
+	}
 
 	for (int k = 1; k <= np; k++) {
 		// 固定節点の右辺は 0 にする (行を恒等行として扱うため)
@@ -204,6 +309,7 @@ static int solve_magnetostatic(FILE *fp_log)
 	free(rhs);
 	free(az);
 	free(fix);
+	free(nucell);
 	crs_free(&A);
 
 	return ierr;

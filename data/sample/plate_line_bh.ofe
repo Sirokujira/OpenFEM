@@ -1,0 +1,41 @@
+OpenFEM 1 0
+title = wide parallel plate line with a nonlinear magnetic core (B-H)
+#
+# plate_line_dc.ofe と同じ形状 (W=1mm, d=0.2mm, t=0.05mm) の板間に、
+# B-H 曲線を持つ磁性体を詰めた非線形静磁場解析。
+#
+# 磁界は 1 次元なので Ampere の法則から H = I/W が厳密に決まり、
+# 磁性体中の B は B-H 曲線から一意に決まる。板 (透磁率 mu0) の中では
+# H(u) = I u/(tW) なので、磁束鎖交インダクタンスの解析解は
+#
+#   L = B(I/W) * d / I + 2 * mu0 * t / (3W)
+#       (磁性体の磁束)     (板の内部インダクタンス、線形)
+#
+# B-H 曲線 (原点は書かない。B < 0.5T は初期透磁率 mu_r = 3979 で扱われる):
+#   (H, B) = (100, 0.5), (1000, 1.0), (10000, 1.2)
+#
+#   I = 1.0 A -> H = 1000 A/m -> B = 1.000000 T -> L = 2.000419e-04 [H/m]
+#   I = 0.5 A -> H =  500 A/m -> B = 0.722222 T -> L = 2.889308e-04 [H/m]
+#
+# 電流を上げると B が飽和して L が下がる (非線形インダクタの挙動)。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 20 0.05e-3 20 0.25e-3 20 0.30e-3
+zmesh = 0 1 1e-4
+
+# material id 2 : 非線形磁性体 (板の間だけに詰める)
+material = 1.0 0
+bh = 2 100   0.5
+bh = 2 1000  1.0
+bh = 2 10000 1.2
+geometry = 2 1 0 1e-3 0.05e-3 0.25e-3 0 1e-4
+
+conductor = 0 1 0 1e-3 0      0.05e-3 0 1e-4
+conductor = 1 1 0 1e-3 0.25e-3 0.30e-3 0 1e-4
+
+analysis = M
+tline = Z
+current = 1.0
+nlsolver = 50 1e-8 1.0
+solver = 50000 5000 1e-13
+end

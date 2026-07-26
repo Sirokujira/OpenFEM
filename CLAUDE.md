@@ -52,6 +52,8 @@ sh data/sample/rlc_check.sh bin/ofe bin/ofe_post /tmp/rlc-check
   Z_loop が壊れる**。基準導体は V'=0 に固定し、ポートのみ励振して
   Y (np x np) を作り、Z_loop = inv(Y) とする。
 - 複素数は実部・虚部の配列を別に持つ (C99 complex は MSVC 互換性の都合で使わない)。
+- 非線形磁性体 (`bh`) は Newton-Raphson。ν の逐次代入は飽和領域で発散するので
+  使わない。残差とヤコビアンで ν の評価点 (Gauss 点) を揃えること。
 - 収束判定は相対残差。`solver` キーの既定は `10000 100 1e-9`。
 
 ## 機能追加の規則

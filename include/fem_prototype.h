@@ -35,7 +35,10 @@ double crs_row_dot(const crs_t *, int64_t, const double *);
 // assemble.c
 void element_matrix(double, double, double, double [8][8]);
 void assemble(crs_t *, int);
+void assemble_nu(crs_t *, const double *);
 void assemble_mass(crs_t *);
+double bh_nu(const material_t *, double);
+void assemble_newton(crs_t *, const double *, double *);
 
 // solver_cg.c
 int solver_cg(const crs_t *, const double *, double *, const unsigned char *,

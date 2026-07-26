@@ -58,6 +58,7 @@ extern "C" {
 #define ANALYSIS_F (1 << 4)		// 時間調和渦電流 -> 表皮効果を含む R(f), L(f)
 
 #define MAXPORT (16)			// 導体 (基準導体 + ポート) の最大数
+#define MAXBH   (64)			// B-H 曲線の点数の最大数
 
 // 材料 (id=0 : 真空, id=1 : PEC 予約, id>=2 : ユーザー定義)
 typedef struct {
@@ -67,6 +68,9 @@ typedef struct {
 	double tand;				// 誘電正接 tanδ (frequency 指定時に G へ寄与、既定 0)
 	int    debye;				// 1 : Debye 分散モデル (einf, deps, tau を使う)
 	double einf, deps, tau;		// εr(ω) = einf + deps / (1 + jωτ)
+	int    nbh;					// B-H 曲線の点数 (0 : 線形、mur を使う)
+	double bh_h[MAXBH];			// H [A/m]
+	double bh_b[MAXBH];			// B [T] (狭義単調増加、B > 0)
 } material_t;
 
 // 形状 (shape/g は OpenFDTD の geometry と共通)
@@ -129,6 +133,11 @@ EXTERN double Volt;				// 励振電圧 [V]
 EXTERN double Freq;				// 周波数 [Hz] (tanδ による誘電損の計算に使う、0 = 無効)
 EXTERN double Curr;				// 静磁場解析の励振電流 [A]
 EXTERN int NSection;			// SPICE 等価回路の梯子段数
+
+// 非線形 (B-H) 反復の設定
+EXTERN int NlMaxiter;			// 最大反復回数
+EXTERN double NlTol;			// 収束判定 (ν の最大相対変化)
+EXTERN double NlRelax;			// 緩和係数 (0 < w <= 1)
 
 // セル毎の材料番号
 EXTERN unsigned char *CellMaterial;

@@ -156,16 +156,187 @@ void assemble_mass(crs_t *A)
 }
 
 
+// B-H 曲線から磁気抵抗率 ν = H(B)/B を求める
+//
+// 表は (H, B) の狭義単調増加な点列 (原点は含まない)。
+//   B < B[0]      : 初期磁気抵抗率 H[0]/B[0] (原点と第 1 点を結ぶ直線)
+//   B[i]..B[i+1]  : H を線形補間
+//   B > B[last]   : 最終区間の傾きで外挿 (飽和後も解が発散しないようにする)
+double bh_nu(const material_t *mt, double b)
+{
+	const int n = mt->nbh;
+	const double nu0 = mt->bh_h[0] / mt->bh_b[0];
+
+	if (b <= mt->bh_b[0]) {
+		return nu0;					// b -> 0 でも有限 (初期透磁率)
+	}
+
+	double h;
+	if (b >= mt->bh_b[n - 1]) {
+		const double slope = (n >= 2)
+			? ((mt->bh_h[n - 1] - mt->bh_h[n - 2]) / (mt->bh_b[n - 1] - mt->bh_b[n - 2]))
+			: nu0;
+		h = mt->bh_h[n - 1] + (slope * (b - mt->bh_b[n - 1]));
+	}
+	else {
+		int i = 0;
+		while ((i < n - 2) && (b > mt->bh_b[i + 1])) i++;
+		const double t = (b - mt->bh_b[i]) / (mt->bh_b[i + 1] - mt->bh_b[i]);
+		h = mt->bh_h[i] + (t * (mt->bh_h[i + 1] - mt->bh_h[i]));
+	}
+
+	return h / b;
+}
+
+
+// B-H 曲線から ν と dν/d(B^2) を求める (Newton 反復用)
+//   ν(B) = H(B)/B,  dν/dB = (H'B - H)/B^2,  dν/d(B^2) = dν/dB / (2B)
+// H(B) が単調増加なら ν + 2 B^2 dν/d(B^2) = dH/dB > 0 なのでヤコビアンは正定値になる
+static void bh_nu_dnu(const material_t *mt, double b, double *nu, double *dnudb2)
+{
+	if (mt->nbh <= 0) {
+		*nu = 1 / (MU0 * mt->mur);
+		*dnudb2 = 0;
+		return;
+	}
+
+	const int n = mt->nbh;
+	const double nu0 = mt->bh_h[0] / mt->bh_b[0];
+
+	if (b <= mt->bh_b[0]) {
+		*nu = nu0;					// 原点と第 1 点を結ぶ直線 (初期透磁率)
+		*dnudb2 = 0;
+		return;
+	}
+
+	double h, hp;
+	if (b >= mt->bh_b[n - 1]) {
+		hp = (n >= 2)
+			? ((mt->bh_h[n - 1] - mt->bh_h[n - 2]) / (mt->bh_b[n - 1] - mt->bh_b[n - 2]))
+			: nu0;
+		h = mt->bh_h[n - 1] + (hp * (b - mt->bh_b[n - 1]));
+	}
+	else {
+		int i = 0;
+		while ((i < n - 2) && (b > mt->bh_b[i + 1])) i++;
+		hp = (mt->bh_h[i + 1] - mt->bh_h[i]) / (mt->bh_b[i + 1] - mt->bh_b[i]);
+		h = mt->bh_h[i] + (hp * (b - mt->bh_b[i]));
+	}
+
+	*nu = h / b;
+	*dnudb2 = ((hp * b) - h) / (2 * b * b * b);
+}
+
+
+// 非線形静磁場の Newton 反復 : ヤコビアン J と内力ベクトル res = K(ν(|∇A|)) A を作る
+//
+//   R_i = Σ_g w ν(B) (∇N_i・∇A) detJ
+//   J_ij = Σ_g w [ ν (∇N_i・∇N_j) + 2 (dν/dB^2) (∇N_i・∇A)(∇N_j・∇A) ] detJ
+//
+// ν を Gauss 点毎に評価するので R と J が整合し、2 次収束する。
+// 線形材料では dν/dB^2 = 0 なので J = K(ν)、R = K(ν)A に退化する。
+void assemble_newton(crs_t *J, const double *az, double *res)
+{
+	const double gp = 1 / sqrt(3.0);
+	const int64_t nnode = num_node();
+
+	crs_zero(J);
+	memset(res, 0, (size_t)nnode * sizeof(double));
+
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+		const material_t *mt = &Material[CellMaterial[c]];
+
+		const double dx = Xn[i + 1] - Xn[i];
+		const double dy = Yn[j + 1] - Yn[j];
+		const double dz = Zn[k + 1] - Zn[k];
+		const double detj = (dx * dy * dz) / 8;
+		const double rx = 2 / dx, ry = 2 / dy, rz = 2 / dz;
+
+		int64_t nd[8];
+		double a[8];
+		for (int l = 0; l < 8; l++) {
+			nd[l] = node_index(i + LI(l), j + LJ(l), k + LK(l));
+			a[l] = az[nd[l]];
+		}
+
+		double je[8][8], re[8];
+		for (int l = 0; l < 8; l++) {
+			re[l] = 0;
+			for (int m = 0; m < 8; m++) je[l][m] = 0;
+		}
+
+		for (int g = 0; g < 8; g++) {
+			const double xi  = (LI(g) ? +gp : -gp);
+			const double eta = (LJ(g) ? +gp : -gp);
+			const double zta = (LK(g) ? +gp : -gp);
+
+			double dn[8][3];
+			for (int l = 0; l < 8; l++) {
+				const double si = (LI(l) ? +1.0 : -1.0);
+				const double sj = (LJ(l) ? +1.0 : -1.0);
+				const double sk = (LK(l) ? +1.0 : -1.0);
+				dn[l][0] = si * (1 + (sj * eta)) * (1 + (sk * zta)) / 8 * rx;
+				dn[l][1] = sj * (1 + (sk * zta)) * (1 + (si * xi )) / 8 * ry;
+				dn[l][2] = sk * (1 + (si * xi )) * (1 + (sj * eta)) / 8 * rz;
+			}
+
+			double gr[3] = {0, 0, 0};
+			for (int l = 0; l < 8; l++) {
+				gr[0] += a[l] * dn[l][0];
+				gr[1] += a[l] * dn[l][1];
+				gr[2] += a[l] * dn[l][2];
+			}
+			const double bmag = sqrt((gr[0] * gr[0]) + (gr[1] * gr[1]) + (gr[2] * gr[2]));
+
+			double nu, dnudb2;
+			bh_nu_dnu(mt, bmag, &nu, &dnudb2);
+
+			double u[8];
+			for (int l = 0; l < 8; l++) {
+				u[l] = (dn[l][0] * gr[0]) + (dn[l][1] * gr[1]) + (dn[l][2] * gr[2]);
+				re[l] += nu * u[l] * detj;
+			}
+			for (int l = 0; l < 8; l++) {
+				for (int m = 0; m < 8; m++) {
+					const double kk = (dn[l][0] * dn[m][0])
+					                + (dn[l][1] * dn[m][1])
+					                + (dn[l][2] * dn[m][2]);
+					je[l][m] += ((nu * kk) + (2 * dnudb2 * u[l] * u[m])) * detj;
+				}
+			}
+		}
+
+		for (int l = 0; l < 8; l++) {
+			const int li = LI(l), lj = LJ(l), lk = LK(l);
+			res[nd[l]] += re[l];
+			const int64_t rowstart = J->rowptr[nd[l]];
+			for (int m = 0; m < 8; m++) {
+				const int64_t p = crs_offset(rowstart, i + li, j + lj, k + lk,
+					LI(m) - li, LJ(m) - lj, LK(m) - lk);
+				J->val[p] += je[l][m];
+			}
+		}
+	}
+	}
+	}
+}
+
+
 // 全体行列の作成
-void assemble(crs_t *A, int mode)
+//   coefcell != NULL のときはセル毎の係数で上書きする (非線形 B-H 反復で使う)
+static void assemble_core(crs_t *A, int mode, const double *coefcell)
 {
 	crs_zero(A);
 
 	for (int i = 0; i < Nx; i++) {
 	for (int j = 0; j < Ny; j++) {
 	for (int k = 0; k < Nz; k++) {
-		const int m = CellMaterial[((int64_t)i * Ny + j) * Nz + k];
-		const double coef = material_coef(m, mode);
+		const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+		const int m = CellMaterial[c];
+		const double coef = ((coefcell != NULL) ? coefcell[c] : material_coef(m, mode));
 		if (coef <= 0) continue;
 
 		double ke[8][8];
@@ -186,4 +357,17 @@ void assemble(crs_t *A, int mode)
 	}
 	}
 	}
+}
+
+
+void assemble(crs_t *A, int mode)
+{
+	assemble_core(A, mode, NULL);
+}
+
+
+// 静磁場の行列をセル毎の ν で作る (非線形 B-H 反復)
+void assemble_nu(crs_t *A, const double *nucell)
+{
+	assemble_core(A, 3, nucell);
 }
