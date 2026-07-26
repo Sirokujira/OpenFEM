@@ -136,6 +136,26 @@ typedef struct {
 
 EXTERN char Title[BUFSIZ];
 
+// 格子の種類 (0 : 構造格子, 1 : 非構造格子 (四面体))
+EXTERN int MeshMode;
+
+// 非構造格子 (Gmsh ASCII 2.2 を読む)
+EXTERN char MeshFile[BUFSIZ];
+EXTERN int NNode;				// 節点数
+EXTERN double *Xp, *Yp, *Zp;	// 節点座標
+EXTERN int NTet;				// 四面体数
+EXTERN int32_t *Tet;			// [4*NTet] 節点番号
+EXTERN int *TetTag;				// [NTet] 物理タグ
+EXTERN unsigned char *TetMat;	// [NTet] 材料番号
+EXTERN int NTri;				// 三角形数 (電極面の指定に使う)
+EXTERN int32_t *Tri;			// [3*NTri]
+EXTERN int *TriTag;				// [NTri] 物理タグ
+
+// 物理タグ -> 材料 / 導体の対応
+#define MAXTAGMAP (64)
+EXTERN int NRegion, RegionTag[MAXTAGMAP], RegionMat[MAXTAGMAP];
+EXTERN int NElectrode, ElecTag[MAXTAGMAP], ElecCond[MAXTAGMAP];
+
 // 格子 (節点座標)。セル数 Nx x Ny x Nz、節点数 (Nx+1) x (Ny+1) x (Nz+1)
 EXTERN int Nx, Ny, Nz;
 EXTERN double *Xn, *Yn, *Zn;

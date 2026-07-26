@@ -19,12 +19,99 @@ int64_t node_index(int i, int j, int k)
 
 int64_t num_node(void)
 {
-	return (int64_t)(Nx + 1) * (Ny + 1) * (Nz + 1);
+	return (MeshMode ? (int64_t)NNode : ((int64_t)(Nx + 1) * (Ny + 1) * (Nz + 1)));
+}
+
+
+// 結果行列の確保 (格子の種類に依らない)
+static void alloc_matrices(void)
+{
+	const size_t msize = (size_t)NPort * NPort * sizeof(double);
+
+	Cmat = (double *)malloc(msize);
+	Lmat = (double *)malloc(msize);
+	Gmat = (double *)malloc(msize);
+	Rmat = (double *)malloc(msize);
+	Mmat = (double *)malloc(msize);
+	Smat = (double *)malloc(msize);
+	Rfmat = (double *)malloc(msize);
+	Lfmat = (double *)malloc(msize);
+	memset(Cmat, 0, msize);
+	memset(Lmat, 0, msize);
+	memset(Gmat, 0, msize);
+	memset(Rmat, 0, msize);
+	memset(Mmat, 0, msize);
+	memset(Smat, 0, msize);
+	memset(Rfmat, 0, msize);
+	memset(Lfmat, 0, msize);
+	HaveC = HaveL = HaveR = HaveM = HaveS = HaveF = 0;
+}
+
+
+// 非構造格子のセットアップ
+static int setup_unstruct(void)
+{
+	if (mesh_read(MeshFile)) return 1;
+
+	// 物理タグ -> 材料番号
+	TetMat = (unsigned char *)malloc((size_t)NTet * sizeof(unsigned char));
+	for (int e = 0; e < NTet; e++) {
+		int m = 0;
+		for (int q = 0; q < NRegion; q++) {
+			if (TetTag[e] == RegionTag[q]) m = RegionMat[q];
+		}
+		TetMat[e] = (unsigned char)m;
+	}
+
+	// 物理タグ -> 電極 (三角形の節点を Dirichlet にする)
+	NodeConductor = (signed char *)malloc((size_t)NNode * sizeof(signed char));
+	memset(NodeConductor, -1, (size_t)NNode * sizeof(signed char));
+	for (int t = 0; t < NTri; t++) {
+		for (int q = 0; q < NElectrode; q++) {
+			if (TriTag[t] != ElecTag[q]) continue;
+			for (int l = 0; l < 3; l++) {
+				NodeConductor[Tri[(t * 3) + l]] = (signed char)ElecCond[q];
+			}
+		}
+	}
+
+	int64_t count[MAXPORT];
+	for (int p = 0; p < MAXPORT; p++) count[p] = 0;
+	for (int i = 0; i < NNode; i++) {
+		const int id = NodeConductor[i];
+		if (id >= 0) count[id]++;
+	}
+	for (int p = 0; p <= NPort; p++) {
+		if (count[p] == 0) {
+			printf("*** electrode %d has no node (check the physical tags)\n", p);
+			return 1;
+		}
+	}
+
+	// 伝送線路長 (節点の外接直方体から取る)
+	TlineLength = 0;
+	if (Tline) {
+		const double *c = ((Tline == 'X') ? Xp : (Tline == 'Y') ? Yp : Zp);
+		double lo = c[0], hi = c[0];
+		for (int i = 1; i < NNode; i++) {
+			if (c[i] < lo) lo = c[i];
+			if (c[i] > hi) hi = c[i];
+		}
+		TlineLength = hi - lo;
+	}
+	if (LineLength <= 0) LineLength = TlineLength;
+
+	for (int p = 0; p < MAXPORT; p++) CondArea[p] = 0;
+	alloc_matrices();
+
+	return 0;
 }
 
 
 int setup(void)
 {
+	if (MeshMode) return setup_unstruct();
+
 	// 節点番号は int32 で扱う (CRS の列番号・OpenMP のループ変数)
 	if (num_node() >= INT_MAX) {
 		printf("*** too many nodes (%lld); reduce the mesh division\n", (long long)num_node());
@@ -191,24 +278,7 @@ int setup(void)
 
 	// 結果行列
 
-	const size_t msize = (size_t)NPort * NPort * sizeof(double);
-	Cmat = (double *)malloc(msize);
-	Lmat = (double *)malloc(msize);
-	Gmat = (double *)malloc(msize);
-	Rmat = (double *)malloc(msize);
-	Mmat = (double *)malloc(msize);
-	Smat = (double *)malloc(msize);
-	Rfmat = (double *)malloc(msize);
-	Lfmat = (double *)malloc(msize);
-	memset(Cmat, 0, msize);
-	memset(Lmat, 0, msize);
-	memset(Gmat, 0, msize);
-	memset(Rmat, 0, msize);
-	memset(Mmat, 0, msize);
-	memset(Smat, 0, msize);
-	memset(Rfmat, 0, msize);
-	memset(Lfmat, 0, msize);
-	HaveC = HaveL = HaveR = HaveM = HaveS = HaveF = 0;
+	alloc_matrices();
 
 	// 導体の DC 直列抵抗 [ohm/m] (conductorsigma 指定時)
 	// 帰路を基準導体が共有するので Smat[k][j] = R0 + (k==j ? Rk : 0) とする
@@ -242,6 +312,9 @@ void memfree(void)
 	free(Material);
 	free(Geometry);
 	free(Conductor);
+	free(Xp); free(Yp); free(Zp);
+	free(Tet); free(TetTag); free(TetMat);
+	free(Tri); free(TriTag);
 	free(CellMaterial);
 	free(CellConductor);
 	free(NodeConductor);

@@ -39,6 +39,11 @@ int64_t crs_offset(int64_t rowstart, int i, int j, int k, int di, int dj, int dk
 
 void crs_alloc(crs_t *A)
 {
+	if (MeshMode) {
+		crs_alloc_tet(A);
+		return;
+	}
+
 	const int64_t n = num_node();
 
 	A->n = n;

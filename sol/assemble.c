@@ -71,7 +71,7 @@ void element_matrix(double dx, double dy, double dz, const double c[6], double k
 //        = 1 : ε0              真空静電界 (TEM インダクタンス)
 //        = 2 : σ + ω ε0 εr tanδ  定常電流界 (導電損 + 誘電損)
 //        = 3 : 1 / (μ0 μr)     静磁場 (DC インダクタンス)
-static void material_coef(int m, int mode, double c[6])
+void material_coef_pub(int m, int mode, double c[6])
 {
 	const material_t *mt = &Material[m];
 
@@ -581,7 +581,7 @@ static void assemble_core(crs_t *A, int mode, const double *coefcell)
 			coef[0] = coef[1] = coef[2] = coefcell[cid];
 		}
 		else {
-			material_coef(m, mode, coef);
+			material_coef_pub(m, mode, coef);
 		}
 		if ((coef[0] <= 0) && (coef[1] <= 0) && (coef[2] <= 0)) continue;
 
@@ -608,6 +608,10 @@ static void assemble_core(crs_t *A, int mode, const double *coefcell)
 
 void assemble(crs_t *A, int mode)
 {
+	if (MeshMode) {
+		assemble_tet(A, mode);
+		return;
+	}
 	assemble_core(A, mode, NULL);
 }
 

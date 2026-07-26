@@ -1,0 +1,25 @@
+OpenFEM 1 0
+title = coaxial line on a conforming tetrahedral mesh
+#
+# 非構造格子の効き目を見る検証。coax_tet.msh は円環を極座標で切った
+# メッシュ (半径方向 16 分割の対数等分、周方向 48 分割、1 層押し出し) で、
+# 円形境界に**適合**するので階段近似の誤差が出ない。
+#
+#   C' = 2*pi*eps0*epsr / ln(b/a) = 1.063417e-10 [F/m]   (a=0.5mm, b=1.5mm, epsr=2.1)
+#   L' = mu0/(2*pi) * ln(b/a)     = 2.197225e-07 [H/m]
+#
+# 構造格子版 (coax.ofe) は階段近似で -2.11% ずれるが、この適合メッシュでは
+# 節点数が 1/50 でも +0.18% に収まる。
+#
+# 物理タグ : 1 = 体積、10 = 外側 r=b (基準電極)、11 = 内側 r=a (ポート 1)
+#
+mesh = coax_tet.msh
+material = 2.1 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = C L
+tline = Z
+solver = 50000 2000 1e-13
+end

@@ -23,6 +23,14 @@ int64_t num_node(void);
 // ingeometry.c
 int ingeometry(double, double, double, int, const double *, double);
 
+// unstruct.c
+int mesh_read(const char *);
+void crs_alloc_tet(crs_t *);
+void assemble_tet(crs_t *, int);
+
+// assemble.c (公開した材料係数)
+void material_coef_pub(int, int, double [6]);
+
 // crs.c
 void crs_alloc(crs_t *);
 void crs_free(crs_t *);

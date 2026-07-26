@@ -107,6 +107,11 @@ int input_data(FILE *fp)
 		CondSigma[p] = 0;
 	}
 
+	MeshMode = 0;
+	strcpy(MeshFile, "");
+	NRegion = 0;
+	NElectrode = 0;
+
 	NSweep = 0;
 	JaSub = 20;
 
@@ -423,6 +428,37 @@ int input_data(FILE *fp)
 				mt->nbh[ax]++;
 			}
 		}
+		else if (!strcmp(strkey, "mesh")) {
+			// mesh = <file.msh>  : 非構造格子 (Gmsh ASCII 2.2) を読む
+			strcpy(MeshFile, token[2]);
+			MeshMode = 1;
+		}
+		else if (!strcmp(strkey, "region")) {
+			// region = <physical_tag> <material_id>  : 体積の物理タグ -> 材料
+			if ((nval < 2) || (NRegion >= MAXTAGMAP)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			RegionTag[NRegion] = atoi(token[2]);
+			RegionMat[NRegion] = atoi(token[3]);
+			NRegion++;
+		}
+		else if (!strcmp(strkey, "electrode")) {
+			// electrode = <physical_tag> <conductor_id>  : 面の物理タグ -> 電極
+			if ((nval < 2) || (NElectrode >= MAXTAGMAP)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int cid = atoi(token[3]);
+			if ((cid < 0) || (cid >= MAXPORT)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ElecTag[NElectrode] = atoi(token[2]);
+			ElecCond[NElectrode] = cid;
+			if (cid > NPort) NPort = cid;
+			NElectrode++;
+		}
 		else if (!strcmp(strkey, "ja")) {
 			// ja = <material_id> <Ms> <a> <alpha> <k> <c>
 			//   Jiles-Atherton ヒステリシスモデル。currentsweep と併用する
@@ -622,6 +658,38 @@ int input_data(FILE *fp)
 			Material[m].mu6[0] = Material[m].mu6[1] = Material[m].mu6[2] = Material[m].mur;
 			Material[m].mu6[3] = Material[m].mu6[4] = Material[m].mu6[5] = 0;
 		}
+	}
+
+	// 非構造格子のときは xmesh 等も conductor も要らない
+
+	if (MeshMode) {
+		if (NElectrode < 1) {
+			printf("%s\n", "*** the mesh key needs electrode keys");
+			return 1;
+		}
+		int have_ref0 = 0;
+		for (int q = 0; q < NElectrode; q++) {
+			if (ElecCond[q] == 0) have_ref0 = 1;
+		}
+		if (!have_ref0) {
+			printf("%s\n", "*** no reference electrode (conductor id = 0)");
+			return 1;
+		}
+		if (NPort < 1) {
+			printf("%s\n", "*** no port electrode (conductor id >= 1)");
+			return 1;
+		}
+		for (int q = 0; q < NRegion; q++) {
+			if ((RegionMat[q] < 0) || (RegionMat[q] >= NMaterial)) {
+				printf("*** invalid region material id (tag %d)\n", RegionTag[q]);
+				return 1;
+			}
+		}
+		if (Analysis & (ANALYSIS_M | ANALYSIS_F)) {
+			printf("%s\n", "*** analysis M / F are available only on a structured mesh");
+			return 1;
+		}
+		return 0;
 	}
 
 	// 格子を展開する

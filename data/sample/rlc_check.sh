@@ -22,6 +22,8 @@
 #   plate_line_bh_aniso : 軸毎 B-H。B は x のみなので X 曲線だけが効くこと
 #   plate_line_ja  : Jiles-Atherton の履歴ループを、H 掃引で独立に積分した
 #                    ODE 解と比較する (11 点、許容 0.5%)
+#   box_tet        : 非構造格子 (四面体) の平行平板 C     (厳密、許容 0.1%)
+#   coax_tet       : 円形境界に適合した四面体格子の同軸 C', L' (許容 1%)
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -55,6 +57,10 @@ scalar_of() {
 
 run_case() {
 	cp "$SRC/$1.ofe" "$WORK/"
+	# 非構造格子のケースはメッシュファイルも要る
+	for m in "$SRC"/*.msh; do
+		[ -f "$m" ] && cp "$m" "$WORK/"
+	done
 	(cd "$WORK" && "$OFE" -n 2 "$1.ofe" > /dev/null && "$OFE_POST" > /dev/null)
 }
 
@@ -165,6 +171,17 @@ for pair in "0.5 2.889308e-04" "1.0 2.000419e-04" "2.0 1.022641e-04" "5.0 4.3597
 	(cd "$WORK" && "$OFE" -n 2 bh_aniso_run.ofe > /dev/null && "$OFE_POST" > /dev/null)
 	compare "L(I=${cur}A) [H/m]" "$(value_of Ldc)" "$lexp" 0.01
 done
+
+# 非構造格子 (四面体)。1 次四面体は 1 次元電界を厳密に表せるので構造格子と同値
+echo "[box_tet] parallel plate on a tetrahedral mesh"
+run_case box_tet
+compare "C [F]" "$(value_of C)" 1.7708376e-13 0.001
+
+# 円形境界に適合するので階段近似の誤差 (構造格子で -2.11%) が消える
+echo "[coax_tet] coax on a conforming tetrahedral mesh"
+run_case coax_tet
+compare "C [F/m]" "$(value_of C)" 1.063417e-10 0.01
+compare "L [H/m]" "$(value_of L)" 2.1972246e-07 0.01
 
 # ヒステリシス (Jiles-Atherton) : H = I/W が Ampere の法則で厳密に決まるので、
 # FEM の結果はスカラー J-A モデルを H 掃引で積分した ODE 解と一致しなければならない

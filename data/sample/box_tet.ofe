@@ -1,0 +1,21 @@
+OpenFEM 1 0
+title = parallel plate capacitor on a tetrahedral mesh
+#
+# 非構造格子 (四面体) の検証。box_tet.msh は data/sample/mkmesh.py が生成した
+# 直方体メッシュ (六面体を 6 四面体に分割、1mm x 1mm x 0.2mm)。
+#
+# 電界は 1 次元なので 1 次四面体で厳密に表現でき、構造格子版と同じ値になる:
+#
+#   C = eps0 * 4.0 * (1e-3 * 1e-3) / 0.2e-3 = 1.770838e-13 [F]
+#
+# 物理タグ : 1 = 体積、10 = z 下面 (基準電極)、11 = z 上面 (ポート 1)
+#
+mesh = box_tet.msh
+material = 4.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = C
+solver = 50000 2000 1e-13
+end

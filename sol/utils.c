@@ -38,7 +38,7 @@ void monitor2(FILE *fp, int nthread)
 	time(&now);
 
 	const int64_t nnode = num_node();
-	const int64_t ncell = (int64_t)Nx * Ny * Nz;
+	const int64_t ncell = (MeshMode ? (int64_t)NTet : ((int64_t)Nx * Ny * Nz));
 
 	// CRS 行列 1 個分のおおよそのメモリ (27 点ステンシル)
 	const double mem = ((nnode * 27.0 * (sizeof(double) + sizeof(int32_t)))
@@ -47,11 +47,19 @@ void monitor2(FILE *fp, int nthread)
 	fprintf(fp, "%s", ctime(&now));
 	fprintf(fp, "Title = %s\n", Title);
 	fprintf(fp, "Threads = %d\n", nthread);
-	fprintf(fp, "Cells = %d x %d x %d = %lld\n", Nx, Ny, Nz, (long long)ncell);
-	fprintf(fp, "Nodes = %d x %d x %d = %lld\n", Nx + 1, Ny + 1, Nz + 1, (long long)nnode);
+	if (MeshMode) {
+		fprintf(fp, "Mesh = %s (unstructured, tetrahedra)\n", MeshFile);
+		fprintf(fp, "Nodes = %lld, Tetrahedra = %d, Triangles = %d\n",
+			(long long)nnode, NTet, NTri);
+	}
+	else {
+		fprintf(fp, "Cells = %d x %d x %d = %lld\n", Nx, Ny, Nz, (long long)ncell);
+		fprintf(fp, "Nodes = %d x %d x %d = %lld\n", Nx + 1, Ny + 1, Nz + 1, (long long)nnode);
+	}
 	fprintf(fp, "No. of Materials  = %d\n", NMaterial);
 	fprintf(fp, "No. of Geometries = %d\n", NGeometry);
-	fprintf(fp, "No. of Conductors = %d (ports = %d)\n", NConductor, NPort);
+	fprintf(fp, "No. of Conductors = %d (ports = %d)\n",
+		(MeshMode ? NElectrode : NConductor), NPort);
 	fprintf(fp, "Analysis =%s%s%s%s%s\n",
 		((Analysis & ANALYSIS_C) ? " C" : ""),
 		((Analysis & ANALYSIS_L) ? " L" : ""),
