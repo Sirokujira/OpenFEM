@@ -64,6 +64,13 @@ sh data/sample/rlc_check.sh bin/ofe bin/ofe_post /tmp/rlc-check
   (フォーマットを変えたら先頭のマジック `OFEOUT01` も上げる)。
 - CPU 実装にだけ追加した機能は README に対応状況を明記する。
 
+## 設定ファイル (.claude/)
+
+詳細な規則は `.claude/rules/` に分けてあり、該当ファイルを編集するときだけ
+自動で読み込まれます (`portability.md` / `numerics.md` / `validation.md`)。
+`/build` `/verify` `/add-analysis` のスラッシュコマンドと、MSVC で落ちる書き方を
+編集直後に検出するフックも入っています。詳しくは `.claude/README.md`。
+
 ## CI
 
 `.github/workflows/ci.yml`: Linux / macOS (libomp) / Windows (MSVC + Ninja)。
