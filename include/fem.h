@@ -55,6 +55,7 @@ extern "C" {
 #define ANALYSIS_L (1 << 1)		// 真空静電界 -> インダクタンス行列 L (TEM 近似)
 #define ANALYSIS_R (1 << 2)		// 定常電流界 -> 抵抗/コンダクタンス行列 R, G
 #define ANALYSIS_M (1 << 3)		// 静磁場 -> DC インダクタンス行列 (内部インダクタンス込み)
+#define ANALYSIS_F (1 << 4)		// 時間調和渦電流 -> 表皮効果を含む R(f), L(f)
 
 #define MAXPORT (16)			// 導体 (基準導体 + ポート) の最大数
 
@@ -64,6 +65,8 @@ typedef struct {
 	double sigma;				// 導電率 [S/m]
 	double mur;					// 比透磁率 (静磁場解析で使う、既定 1)
 	double tand;				// 誘電正接 tanδ (frequency 指定時に G へ寄与、既定 0)
+	int    debye;				// 1 : Debye 分散モデル (einf, deps, tau を使う)
+	double einf, deps, tau;		// εr(ω) = einf + deps / (1 + jωτ)
 } material_t;
 
 // 形状 (shape/g は OpenFDTD の geometry と共通)
@@ -147,7 +150,9 @@ EXTERN double *Gmat;			// コンダクタンス行列
 EXTERN double *Rmat;			// 並列抵抗行列 (= inv(G))
 EXTERN double *Mmat;			// DC インダクタンス行列 (静磁場、内部インダクタンス込み)
 EXTERN double *Smat;			// 直列抵抗行列 (導体の DC 抵抗) [ohm/m]
-EXTERN int HaveC, HaveL, HaveR, HaveM, HaveS;	// 各行列が計算済みか
+EXTERN double *Rfmat;			// 直列抵抗行列 R(f) (渦電流、表皮効果込み) [ohm/m]
+EXTERN double *Lfmat;			// 直列インダクタンス行列 L(f) (渦電流) [H/m]
+EXTERN int HaveC, HaveL, HaveR, HaveM, HaveS, HaveF;	// 各行列が計算済みか
 EXTERN double TlineLength;		// 伝送線路長 [m] (Tline 指定時)
 
 #ifdef __cplusplus

@@ -210,6 +210,189 @@ static int solve_magnetostatic(FILE *fp_log)
 }
 
 
+// 時間調和渦電流解析 (断面 2 次元、複素 Az 定式化)
+//
+//   ∇・(ν ∇Az) - jωσ Az + σ V' = 0     (導体内)
+//   ∇・(ν ∇Az) = 0                      (それ以外)
+//
+// V' = -dV/dz は導体毎の軸方向電界 (一定)。基準導体を V'=0 に固定し、
+// ポート j だけを V'=1 [V/m] で励振して解き、各ポートの電流
+//   I_k = ∫_k σ (V'_k - jω Az) dS
+// から単位長あたりのアドミタンス行列 Y[k][j] = I_k を作る。
+// Z_loop = inv(Y) が基準導体を帰路とするループインピーダンスで、
+//   R(f) = Re Z_loop,  L(f) = Im Z_loop / ω
+// 導体内部の電流分布を解くので表皮効果・近接効果が入る。
+//
+// 境界条件は自然境界条件 (磁気壁 : 接線方向 B = 0)。これは領域を貫く
+// 正味電流を 0 にする条件、すなわち「帰路電流はモデル内の導体を流れる」
+// という伝送線路の前提そのものなので、基準導体が自動的に帰路になる。
+// K + jωM は K が特異でも σ>0 の質量項があるため正則になる。
+static int solve_eddy(FILE *fp_log)
+{
+	const int n = (int)num_node();
+	const int np = NPort;
+	const int nc = np + 1;			// 基準導体を含む導体数
+	int ierr = 0;
+
+	if (np < 1) return 1;
+
+	fprintf(fp_log, "\n=== eddy current (time-harmonic) analysis ===\n");
+
+	if (Freq <= 0) {
+		fprintf(fp_log, "*** analysis F requires the frequency key\n");
+		return 1;
+	}
+	for (int p = 0; p < nc; p++) {
+		if (CondSigma[p] <= 0) {
+			fprintf(fp_log, "*** analysis F requires conductorsigma for conductor %d\n", p);
+			return 1;
+		}
+	}
+
+	const double omega = 2 * PI * Freq;
+	const double delta = sqrt(2 / (omega * MU0 * CondSigma[1]));
+	fprintf(fp_log, "  frequency = %.6e [Hz], skin depth (conductor 1) = %.4e [m]\n",
+		Freq, delta);
+
+	// 表皮深さを格子で刻めているか確認する (刻めていないと R(f) を過小評価する)
+	double hmax = 0;
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		if (CellConductor[((int64_t)i * Ny + j) * Nz + k] < 0) continue;
+		if ((Tline != 'X') && ((Xn[i + 1] - Xn[i]) > hmax)) hmax = Xn[i + 1] - Xn[i];
+		if ((Tline != 'Y') && ((Yn[j + 1] - Yn[j]) > hmax)) hmax = Yn[j + 1] - Yn[j];
+		if ((Tline != 'Z') && ((Zn[k + 1] - Zn[k]) > hmax)) hmax = Zn[k + 1] - Zn[k];
+	}
+	}
+	}
+	if (hmax > (delta / 2)) {
+		fprintf(fp_log, "*** warning : conductor cell size %.4e [m] is coarser than "
+			"half the skin depth; R(f) will be underestimated\n", hmax);
+		printf("*** warning : conductor mesh does not resolve the skin depth "
+			"(cell %.3e > delta/2 = %.3e)\n", hmax, delta / 2);
+	}
+
+	fprintf(fp_log, "  %-10s %8s %13s\n", "excite", "iter", "residual");
+	fflush(fp_log);
+
+	crs_t K, M;
+	crs_alloc(&K);
+	assemble(&K, 3);				// ν = 1/(μ0 μr)
+	crs_alloc(&M);
+	assemble_mass(&M);				// σ
+
+	// 自然境界条件 (磁気壁) なので固定節点は無い
+	unsigned char *fix = (unsigned char *)malloc(n * sizeof(unsigned char));
+	memset(fix, 0, n * sizeof(unsigned char));
+
+	// 導体毎の ∫σ dV
+	double *svol = (double *)calloc((size_t)nc, sizeof(double));
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const int id = CellConductor[((int64_t)i * Ny + j) * Nz + k];
+		if (id < 0) continue;
+		svol[id] += CondSigma[id]
+			* (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]);
+	}
+	}
+	}
+
+	double *br = (double *)malloc(n * sizeof(double));
+	double *bi = (double *)malloc(n * sizeof(double));
+	double *ar = (double *)malloc(n * sizeof(double));
+	double *ai = (double *)malloc(n * sizeof(double));
+	double *yr = (double *)calloc((size_t)np * np, sizeof(double));
+	double *yi = (double *)calloc((size_t)np * np, sizeof(double));
+	const double tlen = TlineLength;
+
+	// 基準導体は V'=0。ポート 1..np を順に V'=1 [V/m] で励振する
+	for (int jc = 1; jc <= np; jc++) {
+		// b_i = ∫ σ N_i V' dV  (V' = 1 [V/m] を導体 jc にのみ与える)
+		memset(br, 0, n * sizeof(double));
+		memset(bi, 0, n * sizeof(double));
+		for (int i = 0; i < Nx; i++) {
+		for (int j = 0; j < Ny; j++) {
+		for (int k = 0; k < Nz; k++) {
+			if (CellConductor[((int64_t)i * Ny + j) * Nz + k] != jc) continue;
+			const double vol = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]);
+			const double w = CondSigma[jc] * vol / 8;
+			for (int l = 0; l < 8; l++) {
+				br[node_index(i + ((l >> 2) & 1), j + ((l >> 1) & 1), k + (l & 1))] += w;
+			}
+		}
+		}
+		}
+		for (int i = 0; i < n; i++) {
+			if (fix[i]) br[i] = 0;
+		}
+
+		char label[BUFSIZ];
+		sprintf(label, "cond%d", jc);
+		const int iter = solver_cocg(&K, &M, omega, br, bi, ar, ai, fix,
+			Solver.maxiter, Solver.nout, Solver.converg, fp_log, label);
+		if (iter < 0) {
+			fprintf(fp_log, "*** solver did not converge (conductor %d)\n", jc);
+			ierr = 1;
+		}
+
+		// I_k = (1/t) [ V'_k ∫_k σ dV - jω ∫_k σ Az dV ]
+		double *qr = (double *)calloc((size_t)nc, sizeof(double));
+		double *qi = (double *)calloc((size_t)nc, sizeof(double));
+		for (int i = 0; i < Nx; i++) {
+		for (int j = 0; j < Ny; j++) {
+		for (int k = 0; k < Nz; k++) {
+			const int id = CellConductor[((int64_t)i * Ny + j) * Nz + k];
+			if (id < 0) continue;
+			const double vol = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]);
+			const double w = CondSigma[id] * vol / 8;
+			for (int l = 0; l < 8; l++) {
+				const int64_t nd = node_index(i + ((l >> 2) & 1), j + ((l >> 1) & 1), k + (l & 1));
+				qr[id] += w * ar[nd];
+				qi[id] += w * ai[nd];
+			}
+		}
+		}
+		}
+		for (int kc = 1; kc <= np; kc++) {
+			// I = (V' ∫σdV - jω ∫σAz dV) / t、 -jω(qr + j qi) = ω qi - jω qr
+			yr[((kc - 1) * np) + (jc - 1)] = (((kc == jc) ? svol[kc] : 0) + (omega * qi[kc])) / tlen;
+			yi[((kc - 1) * np) + (jc - 1)] = (-omega * qr[kc]) / tlen;
+		}
+		free(qr);
+		free(qi);
+	}
+
+	// Z_loop = inv(Y)
+	double *zr = (double *)malloc((size_t)np * np * sizeof(double));
+	double *zi = (double *)malloc((size_t)np * np * sizeof(double));
+	if (mat_inverse_c(yr, yi, zr, zi, np)) {
+		fprintf(fp_log, "*** admittance matrix is singular; R(f)/L(f) is not available\n");
+		ierr = 1;
+	}
+	else {
+		for (int i = 0; i < np * np; i++) {
+			Rfmat[i] = zr[i];
+			Lfmat[i] = zi[i] / omega;
+		}
+		symmetrize(Rfmat, np, fp_log, "R(f)");
+		symmetrize(Lfmat, np, fp_log, "L(f)");
+		HaveF = 1;
+	}
+
+	free(zr); free(zi);
+	free(yr); free(yi);
+	free(br); free(bi); free(ar); free(ai);
+	free(svol);
+	free(fix);
+	crs_free(&K);
+	crs_free(&M);
+
+	return ierr;
+}
+
+
 int solve(FILE *fp_log)
 {
 	const int n = (int)num_node();
@@ -335,6 +518,11 @@ int solve(FILE *fp_log)
 	// 静磁場解析 (DC インダクタンス)。行列を作り直すので静電界の後始末をしてから呼ぶ
 	if (!ierr && (Analysis & ANALYSIS_M)) {
 		ierr |= solve_magnetostatic(fp_log);
+	}
+
+	// 時間調和渦電流解析 (表皮効果を含む R(f), L(f))
+	if (!ierr && (Analysis & ANALYSIS_F)) {
+		ierr |= solve_eddy(fp_log);
 	}
 
 	return ierr;

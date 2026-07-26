@@ -78,6 +78,10 @@ int input_data(FILE *fp)
 		Material[m].sigma = 0;
 		Material[m].mur   = 1;
 		Material[m].tand  = 0;
+		Material[m].debye = 0;
+		Material[m].einf  = 1;
+		Material[m].deps  = 0;
+		Material[m].tau   = 0;
 	}
 
 	NGeometry = 0;
@@ -207,6 +211,10 @@ int input_data(FILE *fp)
 			Material[NMaterial].sigma = sigma;
 			Material[NMaterial].mur   = 1;
 			Material[NMaterial].tand  = 0;
+			Material[NMaterial].debye = 0;
+			Material[NMaterial].einf  = 1;
+			Material[NMaterial].deps  = 0;
+			Material[NMaterial].tau   = 0;
 			NMaterial++;
 		}
 		else if (!strcmp(strkey, "geometry")) {
@@ -274,6 +282,31 @@ int input_data(FILE *fp)
 				Material[mid].tand = val;
 			}
 		}
+		else if (!strcmp(strkey, "debye")) {
+			// debye = <material_id> <eps_inf> <delta_eps> <tau [s]>
+			// εr(ω) = eps_inf + delta_eps / (1 + jωτ)。frequency 指定時に
+			// epsr (実部) と tand (= εr''/εr') に展開する
+			if (nval < 4) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			if ((mid < 2) || (mid >= NMaterial)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const double einf = atof(token[3]);
+			const double deps = atof(token[4]);
+			const double tau  = atof(token[5]);
+			if ((einf <= 0) || (deps < 0) || (tau < 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			Material[mid].debye = 1;
+			Material[mid].einf  = einf;
+			Material[mid].deps  = deps;
+			Material[mid].tau   = tau;
+		}
 		else if (!strcmp(strkey, "conductorsigma")) {
 			// conductorsigma = <conductor_id> <sigma>  : 導体の DC 直列抵抗の計算に使う
 			if (nval < 2) {
@@ -313,6 +346,7 @@ int input_data(FILE *fp)
 				else if (c == 'L') Analysis |= ANALYSIS_L;
 				else if (c == 'R') Analysis |= ANALYSIS_R;
 				else if (c == 'M') Analysis |= ANALYSIS_M;
+				else if (c == 'F') Analysis |= ANALYSIS_F;
 				else {
 					printf(errfmt2, strkey);
 					return 1;
@@ -364,6 +398,19 @@ int input_data(FILE *fp)
 			// 未知のキーは無視する (ポスト処理用キーの共存を許す)
 			;
 		}
+	}
+
+	// Debye 分散材料 を frequency の値で展開する
+	// (frequency 未指定なら静的な εr(0) = einf + deps、損失なしとして扱う)
+
+	for (int m = 0; m < NMaterial; m++) {
+		if (!Material[m].debye) continue;
+		const double wt = 2 * PI * Freq * Material[m].tau;
+		const double den = 1 + (wt * wt);
+		const double er = Material[m].einf + (Material[m].deps / den);
+		const double ei = Material[m].deps * wt / den;
+		Material[m].epsr = er;
+		Material[m].tand = ei / er;
 	}
 
 	// 格子を展開する
@@ -430,6 +477,17 @@ int input_data(FILE *fp)
 	if ((Analysis & ANALYSIS_M) && !Tline) {
 		printf("%s\n", "*** analysis M requires the tline key (2D magnetostatic)");
 		return 1;
+	}
+	// F 解析 (渦電流) も断面 2 次元。周波数と導体の導電率が要る
+	if (Analysis & ANALYSIS_F) {
+		if (!Tline) {
+			printf("%s\n", "*** analysis F requires the tline key (2D eddy current)");
+			return 1;
+		}
+		if (Freq <= 0) {
+			printf("%s\n", "*** analysis F requires the frequency key");
+			return 1;
+		}
 	}
 
 	return 0;

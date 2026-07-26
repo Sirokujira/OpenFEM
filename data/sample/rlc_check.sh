@@ -14,6 +14,7 @@
 #   coax_loss      : L'dc (内部インダクタンス込み)  (階段近似、許容 5%)
 #                    Rs' (導体 DC 抵抗)             (階段近似、許容 3%)
 #                    G' = omega C' tand             (均質誘電体では厳密、許容 0.1%)
+#   plate_line_ac  : R(f), L(f) を 1 次元厳密解と比較 (1kHz / 10MHz、許容 2%)
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -101,6 +102,20 @@ compare "Rs [ohm/m]" "$(value_of Rs)" 2.598776e-02 0.03
 gexp=$(awk -v c="$(value_of C)" -v f=1e9 -v td=0.001 \
 	'BEGIN{ printf "%.8e", 2 * 3.14159265358979324 * f * c * td }')
 compare "G [S/m]" "$(value_of G)" "$gexp" 0.001
+
+# 渦電流 (表皮効果) : 平行平板線路の 1 次元厳密解と比較する
+#   Z = 2*gamma/(sigma W) coth(gamma t) + j omega mu0 d/W,  gamma = sqrt(j omega mu0 sigma)
+echo "[plate_line_ac] skin effect (1-D exact internal impedance)"
+for pair in "1e3 6.896552e-01 2.932153e-07" "1e7 1.624296e+00 2.780550e-07"; do
+	set -- $pair
+	freq=$1
+	rexp=$2
+	lexp=$3
+	sed "s/^frequency = .*/frequency = $freq/" "$SRC/plate_line_ac.ofe" > "$WORK/plate_line_ac_run.ofe"
+	(cd "$WORK" && "$OFE" -n 2 plate_line_ac_run.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "R(f=$freq) [ohm/m]" "$(value_of Rf)" "$rexp" 0.02
+	compare "L(f=$freq) [H/m]" "$(value_of Lf)" "$lexp" 0.02
+done
 
 if [ "$status" -ne 0 ]; then
 	echo "*** RLC validation FAILED" >&2

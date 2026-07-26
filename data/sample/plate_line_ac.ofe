@@ -1,0 +1,32 @@
+OpenFEM 1 0
+title = wide parallel plate line (eddy current, skin effect)
+#
+# plate_line_dc.ofe と同じ形状 (W=1mm, d=0.2mm, t=0.05mm, sigma=5.8e7) で、
+# 時間調和渦電流解析により表皮効果を含む R(f), L(f) を求める。
+# 磁界が 1 次元になるので、板 1 枚あたりの内部インピーダンスに厳密解がある:
+#
+#   Z_int = gamma / (sigma*W) * coth(gamma*t),  gamma = sqrt(j*omega*mu0*sigma)
+#   Z_loop = 2*Z_int + j*omega*mu0*d/W
+#
+# 低周波極限で R -> 1/(sigma*W*t)*2、L -> mu0*(d + 2t/3)/W に一致する。
+#
+#   f = 1 kHz  (delta = 2090um >> t) : R = 6.896552e-01, L = 2.932153e-07
+#   f = 10 MHz (delta = 20.9um  < t) : R = 1.624296e+00, L = 2.780550e-07
+#
+# 板厚 50um を 20 分割 (2.5um) しているので 10MHz でも表皮深さを 8 点で刻める。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 20 0.05e-3 20 0.25e-3 20 0.30e-3
+zmesh = 0 1 1e-4
+
+conductor = 0 1 0 1e-3 0      0.05e-3 0 1e-4
+conductor = 1 1 0 1e-3 0.25e-3 0.30e-3 0 1e-4
+
+conductorsigma = 0 5.8e7
+conductorsigma = 1 5.8e7
+
+analysis = F
+tline = Z
+frequency = 1e3
+solver = 200000 5000 1e-11
+end

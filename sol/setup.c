@@ -171,13 +171,17 @@ int setup(void)
 	Rmat = (double *)malloc(msize);
 	Mmat = (double *)malloc(msize);
 	Smat = (double *)malloc(msize);
+	Rfmat = (double *)malloc(msize);
+	Lfmat = (double *)malloc(msize);
 	memset(Cmat, 0, msize);
 	memset(Lmat, 0, msize);
 	memset(Gmat, 0, msize);
 	memset(Rmat, 0, msize);
 	memset(Mmat, 0, msize);
 	memset(Smat, 0, msize);
-	HaveC = HaveL = HaveR = HaveM = HaveS = 0;
+	memset(Rfmat, 0, msize);
+	memset(Lfmat, 0, msize);
+	HaveC = HaveL = HaveR = HaveM = HaveS = HaveF = 0;
 
 	// 導体の DC 直列抵抗 [ohm/m] (conductorsigma 指定時)
 	// 帰路を基準導体が共有するので Smat[k][j] = R0 + (k==j ? Rk : 0) とする
@@ -215,4 +219,5 @@ void memfree(void)
 	free(CellConductor);
 	free(NodeConductor);
 	free(Cmat); free(Lmat); free(Gmat); free(Rmat); free(Mmat); free(Smat);
+	free(Rfmat); free(Lfmat);
 }

@@ -52,10 +52,15 @@ void monitor2(FILE *fp, int nthread)
 	fprintf(fp, "No. of Materials  = %d\n", NMaterial);
 	fprintf(fp, "No. of Geometries = %d\n", NGeometry);
 	fprintf(fp, "No. of Conductors = %d (ports = %d)\n", NConductor, NPort);
-	fprintf(fp, "Analysis =%s%s%s\n",
+	fprintf(fp, "Analysis =%s%s%s%s%s\n",
 		((Analysis & ANALYSIS_C) ? " C" : ""),
 		((Analysis & ANALYSIS_L) ? " L" : ""),
-		((Analysis & ANALYSIS_R) ? " R" : ""));
+		((Analysis & ANALYSIS_R) ? " R" : ""),
+		((Analysis & ANALYSIS_M) ? " M" : ""),
+		((Analysis & ANALYSIS_F) ? " F" : ""));
+	if (Freq > 0) {
+		fprintf(fp, "Frequency = %.6e [Hz]\n", Freq);
+	}
 	if (Tline) {
 		fprintf(fp, "Transmission line axis = %c (length = %.6e [m])\n", Tline, TlineLength);
 	}

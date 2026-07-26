@@ -7,7 +7,7 @@ outputRLC.c
 #include "fem.h"
 #include "fem_prototype.h"
 
-#define OUT_MAGIC "OFEOUT02"
+#define OUT_MAGIC "OFEOUT03"
 
 static void print_matrix(FILE *fp, const char *name, const char *unit, const double *m, int np)
 {
@@ -76,6 +76,16 @@ void outputRLC(FILE *fp)
 		print_matrix(fp, "Series resistance matrix Rs (DC, conductor loss)", "ohm/m", Smat, np);
 	}
 
+	if (HaveF) {
+		fprintf(fp, "\n(eddy current solution at %.6e [Hz]; includes skin and "
+			"proximity effect)\n", Freq);
+		print_matrix(fp, "Series resistance matrix R(f)", "ohm/m", Rfmat, np);
+		print_matrix(fp, "Series inductance matrix L(f)", "H/m", Lfmat, np);
+		if (HaveS && (np >= 1) && (Smat[0] > 0)) {
+			fprintf(fp, "  R(f)/R(dc) = %.4f (port 1)\n", Rfmat[0] / Smat[0]);
+		}
+	}
+
 	// 単一ポートの伝送線路定数
 	// Z0 は高周波量なので、外部インダクタンス (TEM) があればそちらを使う
 	// (静磁場の L_dc は表皮効果の無い低周波モデルの値)
@@ -108,13 +118,13 @@ void writeout(FILE *fp)
 	const size_t tlen = strlen(Title);
 	memcpy(title, Title, ((tlen < sizeof(title) - 1) ? tlen : sizeof(title) - 1));
 
-	const int32_t flag[6] = {HaveC, HaveL, HaveR, NSection, HaveM, HaveS};
+	const int32_t flag[7] = {HaveC, HaveL, HaveR, NSection, HaveM, HaveS, HaveF};
 	const int32_t tline = (int32_t)Tline;
 	const double dval[3] = {LineLength, Volt, Freq};
 
 	fwrite(OUT_MAGIC, 1, 8, fp);
 	fwrite(&np, sizeof(int32_t), 1, fp);
-	fwrite(flag, sizeof(int32_t), 6, fp);
+	fwrite(flag, sizeof(int32_t), 7, fp);
 	fwrite(&tline, sizeof(int32_t), 1, fp);
 	fwrite(dval, sizeof(double), 3, fp);
 	fwrite(title, 1, sizeof(title), fp);
@@ -126,4 +136,6 @@ void writeout(FILE *fp)
 	fwrite(Rmat, sizeof(double), nn, fp);
 	fwrite(Mmat, sizeof(double), nn, fp);
 	fwrite(Smat, sizeof(double), nn, fp);
+	fwrite(Rfmat, sizeof(double), nn, fp);
+	fwrite(Lfmat, sizeof(double), nn, fp);
 }

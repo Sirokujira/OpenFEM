@@ -35,6 +35,7 @@ double crs_row_dot(const crs_t *, int64_t, const double *);
 // assemble.c
 void element_matrix(double, double, double, double [8][8]);
 void assemble(crs_t *, int);
+void assemble_mass(crs_t *);
 
 // solver_cg.c
 int solver_cg(const crs_t *, const double *, double *, const unsigned char *,
@@ -43,8 +44,14 @@ int solver_cg(const crs_t *, const double *, double *, const unsigned char *,
 // solve.c
 int solve(FILE *);
 
+// solver_cocg.c
+int solver_cocg(const crs_t *, const crs_t *, double,
+	const double *, const double *, double *, double *, const unsigned char *,
+	int, int, double, FILE *, const char *);
+
 // matutil.c
 int mat_inverse(const double *, double *, int);
+int mat_inverse_c(const double *, const double *, double *, double *, int);
 
 // outputRLC.c
 void outputRLC(FILE *);

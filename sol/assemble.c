@@ -86,6 +86,76 @@ static double material_coef(int m, int mode)
 }
 
 
+// 直方体要素 (dx x dy x dz) の ∫Ni Nj dV
+// (Ni Nj は各方向 2 次なので 2 点 Gauss で厳密)
+static void element_mass(double dx, double dy, double dz, double me[8][8])
+{
+	const double gp = 1 / sqrt(3.0);
+	const double detj = (dx * dy * dz) / 8;
+
+	for (int l = 0; l < 8; l++) {
+		for (int m = 0; m < 8; m++) {
+			me[l][m] = 0;
+		}
+	}
+
+	for (int g = 0; g < 8; g++) {
+		const double xi  = (LI(g) ? +gp : -gp);
+		const double eta = (LJ(g) ? +gp : -gp);
+		const double zta = (LK(g) ? +gp : -gp);
+
+		double nn[8];
+		for (int l = 0; l < 8; l++) {
+			const double si = (LI(l) ? +1.0 : -1.0);
+			const double sj = (LJ(l) ? +1.0 : -1.0);
+			const double sk = (LK(l) ? +1.0 : -1.0);
+			nn[l] = (1 + (si * xi)) * (1 + (sj * eta)) * (1 + (sk * zta)) / 8;
+		}
+
+		for (int l = 0; l < 8; l++) {
+			for (int m = 0; m < 8; m++) {
+				me[l][m] += nn[l] * nn[m] * detj;
+			}
+		}
+	}
+}
+
+
+// 渦電流項の質量行列 ∫σ N_i N_j dV
+// σ は導体セルの導電率 (conductorsigma)。誘電体側の渦電流は無視する
+void assemble_mass(crs_t *A)
+{
+	crs_zero(A);
+
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const int id = CellConductor[((int64_t)i * Ny + j) * Nz + k];
+		if (id < 0) continue;
+		const double coef = CondSigma[id];
+		if (coef <= 0) continue;
+
+		double me[8][8];
+		element_mass(Xn[i + 1] - Xn[i], Yn[j + 1] - Yn[j], Zn[k + 1] - Zn[k], me);
+
+		for (int l = 0; l < 8; l++) {
+			const int li = LI(l), lj = LJ(l), lk = LK(l);
+			const int64_t row = node_index(i + li, j + lj, k + lk);
+			const int64_t rowstart = A->rowptr[row];
+			for (int mm = 0; mm < 8; mm++) {
+				const int di = LI(mm) - li;
+				const int dj = LJ(mm) - lj;
+				const int dk = LK(mm) - lk;
+				const int64_t p = crs_offset(rowstart, i + li, j + lj, k + lk, di, dj, dk);
+				A->val[p] += coef * me[l][mm];
+			}
+		}
+	}
+	}
+	}
+}
+
+
 // 全体行列の作成
 void assemble(crs_t *A, int mode)
 {
