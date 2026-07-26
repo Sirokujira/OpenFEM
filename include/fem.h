@@ -56,6 +56,7 @@ extern "C" {
 #define ANALYSIS_R (1 << 2)		// 定常電流界 -> 抵抗/コンダクタンス行列 R, G
 #define ANALYSIS_M (1 << 3)		// 静磁場 -> DC インダクタンス行列 (内部インダクタンス込み)
 #define ANALYSIS_F (1 << 4)		// 時間調和渦電流 -> 表皮効果を含む R(f), L(f)
+#define ANALYSIS_E (1 << 5)		// 辺要素 (Nedelec) の自己検証 (3 次元渦電流の基盤)
 
 #define MAXPORT (16)			// 導体 (基準導体 + ポート) の最大数
 #define MAXBH   (64)			// B-H 曲線の点数の最大数
@@ -147,6 +148,13 @@ EXTERN int NTet;				// 四面体数
 EXTERN int32_t *Tet;			// [4*NTet] 節点番号
 EXTERN int *TetTag;				// [NTet] 物理タグ
 EXTERN unsigned char *TetMat;	// [NTet] 材料番号
+// 辺 (3 次元渦電流の辺要素で使う)。辺は節点番号の小さい方から大きい方へ向ける
+EXTERN int NEdge;
+EXTERN int64_t *EdgePtr;		// [NNode+1] 節点 i を始点とする辺の範囲
+EXTERN int32_t *EdgeTo;			// [NEdge] 終点 (昇順)
+EXTERN int32_t *TetEdge;		// [6*NTet] 四面体の辺番号
+EXTERN signed char *TetEdgeSgn;	// [6*NTet] 局所の並びと全体の向きの符号
+
 EXTERN int NTri;				// 三角形数 (電極面の指定に使う)
 EXTERN int32_t *Tri;			// [3*NTri]
 EXTERN int *TriTag;				// [NTri] 物理タグ

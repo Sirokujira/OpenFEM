@@ -28,6 +28,16 @@ int mesh_read(const char *);
 void crs_alloc_tet(crs_t *);
 void assemble_tet(crs_t *, int);
 
+// edge.c
+void edge_build(void);
+int64_t edge_id(int32_t, int32_t);
+void edge_free(void);
+void crs_alloc_edge(crs_t *);
+void edge_element(int, const double [6], double, double [6][6], double [6][6]);
+void assemble_edge(crs_t *, crs_t *);
+int solve_edge_test(FILE *);
+int tet_grad_pub(const int32_t [4], double [4][3], double *);
+
 // assemble.c (公開した材料係数)
 void material_coef_pub(int, int, double [6]);
 

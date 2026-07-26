@@ -311,7 +311,7 @@ static int64_t crs_find(const crs_t *A, int32_t row, int32_t col)
 
 // 1 次四面体の形状関数勾配 (要素内で一定) と体積
 // 戻り値 : 0 = 正常、1 = 退化要素
-static int tet_grad(const int32_t nd[4], double g[4][3], double *vol)
+int tet_grad_pub(const int32_t nd[4], double g[4][3], double *vol)
 {
 	const double x0 = Xp[nd[0]], y0 = Yp[nd[0]], z0 = Zp[nd[0]];
 	const double j00 = Xp[nd[1]] - x0, j01 = Xp[nd[2]] - x0, j02 = Xp[nd[3]] - x0;
@@ -357,7 +357,7 @@ void assemble_tet(crs_t *A, int mode)
 	for (int e = 0; e < NTet; e++) {
 		const int32_t *nd = &Tet[e * 4];
 		double g[4][3], vol;
-		if (tet_grad(nd, g, &vol)) continue;
+		if (tet_grad_pub(nd, g, &vol)) continue;
 
 		double c[6];
 		material_coef_pub(TetMat[e], mode, c);

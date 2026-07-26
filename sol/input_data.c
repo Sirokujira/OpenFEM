@@ -557,6 +557,7 @@ int input_data(FILE *fp)
 				else if (c == 'R') Analysis |= ANALYSIS_R;
 				else if (c == 'M') Analysis |= ANALYSIS_M;
 				else if (c == 'F') Analysis |= ANALYSIS_F;
+				else if (c == 'E') Analysis |= ANALYSIS_E;
 				else {
 					printf(errfmt2, strkey);
 					return 1;
@@ -752,6 +753,12 @@ int input_data(FILE *fp)
 		printf("%s\n", "*** analysis L requires the tline key (TEM per-unit-length)");
 		return 1;
 	}
+	// E 解析 (辺要素の自己検証) は非構造格子専用
+	if ((Analysis & ANALYSIS_E) && !MeshMode) {
+		printf("%s\n", "*** analysis E (edge elements) requires an unstructured mesh");
+		return 1;
+	}
+
 	// M 解析 (静磁場) は断面 2 次元の定式化なので伝送線路軸が要る
 	if ((Analysis & ANALYSIS_M) && !Tline) {
 		printf("%s\n", "*** analysis M requires the tline key (2D magnetostatic)");

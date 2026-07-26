@@ -1,0 +1,25 @@
+OpenFEM 1 0
+title = Nedelec edge element self test (3D eddy current foundation)
+#
+# 3 次元渦電流 (A-φ) の基盤となる辺要素の自己検証。
+# 節点要素では A の接線連続性を課せないため辺要素 (Whitney / 1 次 Nedelec) が要る。
+#
+# 検査項目 (いずれも閉形式で厳密に決まる):
+#   (a) 勾配は回転回転行列の零空間に入る       u^T S u = 0
+#   (b) 一様場 E0 の質量                       u^T T u = |E0|^2 * Σ σ_e V_e
+#   (b') 一様場は回転が 0                      u^T S u = 0
+#   (c) 回転場 E = (1/2)(z × r), curl E = z     u^T S u = Σ ν_e V_e
+#   (d) 行列の対称性
+#
+# (b) と (c) は最低次 Nedelec 空間 {a + b × r} に含まれる場なので補間が厳密になり、
+# 要素行列・辺の向き・組み立てのいずれかが間違っていれば必ず落ちる。
+#
+mesh = box_tet.msh
+material = 1.0 1e6
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = E
+solver = 50000 2000 1e-13
+end

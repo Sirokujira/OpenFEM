@@ -48,6 +48,7 @@ set(SOL_SOURCES
     sol/solve.c
     sol/matutil.c
     sol/unstruct.c
+    sol/edge.c
     sol/outputRLC.c
     sol/utils.c
 )

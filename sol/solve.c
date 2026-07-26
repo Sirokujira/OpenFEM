@@ -644,6 +644,12 @@ int solve(FILE *fp_log)
 	const int np = NPort;
 	int ierr = 0;
 
+	// 辺要素の自己検証 (3 次元渦電流の基盤。他の解析とは独立に走る)
+	if (Analysis & ANALYSIS_E) {
+		ierr |= solve_edge_test(fp_log);
+		if (Analysis == ANALYSIS_E) return ierr;
+	}
+
 	crs_t A;
 	crs_alloc(&A);
 
