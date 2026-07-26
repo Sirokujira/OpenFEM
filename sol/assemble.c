@@ -62,8 +62,31 @@ void element_matrix(double dx, double dy, double dz, double ke[8][8])
 }
 
 
+// 材料 m のセルに掛かる係数
+//   mode = 0 : ε0 εr           静電界 (容量)
+//        = 1 : ε0              真空静電界 (TEM インダクタンス)
+//        = 2 : σ + ω ε0 εr tanδ  定常電流界 (導電損 + 誘電損)
+//        = 3 : 1 / (μ0 μr)     静磁場 (DC インダクタンス)
+static double material_coef(int m, int mode)
+{
+	if      (mode == 0) {
+		return EPS0 * Material[m].epsr;
+	}
+	else if (mode == 1) {
+		return EPS0;
+	}
+	else if (mode == 2) {
+		// 誘電損は等価導電率 σ_d = ω ε0 εr tanδ として扱う (frequency 未指定なら 0)
+		const double omega = 2 * PI * Freq;
+		return Material[m].sigma + (omega * EPS0 * Material[m].epsr * Material[m].tand);
+	}
+	else {
+		return 1 / (MU0 * Material[m].mur);
+	}
+}
+
+
 // 全体行列の作成
-//   mode = 0 : c = ε0 εr, 1 : c = ε0 (真空), 2 : c = σ
 void assemble(crs_t *A, int mode)
 {
 	crs_zero(A);
@@ -72,10 +95,7 @@ void assemble(crs_t *A, int mode)
 	for (int j = 0; j < Ny; j++) {
 	for (int k = 0; k < Nz; k++) {
 		const int m = CellMaterial[((int64_t)i * Ny + j) * Nz + k];
-		double coef = 0;
-		if      (mode == 0) coef = EPS0 * Material[m].epsr;
-		else if (mode == 1) coef = EPS0;
-		else                coef = Material[m].sigma;
+		const double coef = material_coef(m, mode);
 		if (coef <= 0) continue;
 
 		double ke[8][8];

@@ -73,10 +73,12 @@ int input_data(FILE *fp)
 
 	NMaterial = 2;		// 0 : 真空, 1 : PEC (予約)
 	Material = (material_t *)malloc(NMaterial * sizeof(material_t));
-	Material[0].epsr = 1;
-	Material[0].sigma = 0;
-	Material[1].epsr = 1;
-	Material[1].sigma = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		Material[m].epsr  = 1;
+		Material[m].sigma = 0;
+		Material[m].mur   = 1;
+		Material[m].tand  = 0;
+	}
 
 	NGeometry = 0;
 	Geometry = NULL;
@@ -89,7 +91,12 @@ int input_data(FILE *fp)
 	Tline = 0;
 	LineLength = 0;
 	Volt = 1;
+	Freq = 0;
+	Curr = 1;
 	NSection = 1;
+	for (int p = 0; p < MAXPORT; p++) {
+		CondSigma[p] = 0;
+	}
 
 	Solver.maxiter = 10000;
 	Solver.nout = 100;
@@ -198,6 +205,8 @@ int input_data(FILE *fp)
 			}
 			Material[NMaterial].epsr  = epsr;
 			Material[NMaterial].sigma = sigma;
+			Material[NMaterial].mur   = 1;
+			Material[NMaterial].tand  = 0;
 			NMaterial++;
 		}
 		else if (!strcmp(strkey, "geometry")) {
@@ -241,6 +250,60 @@ int input_data(FILE *fp)
 			if (id > NPort) NPort = id;
 			NConductor++;
 		}
+		else if (!strcmp(strkey, "mur") || !strcmp(strkey, "tand")) {
+			// mur  = <material_id> <mur>    : 比透磁率 (静磁場解析)
+			// tand = <material_id> <tand>   : 誘電正接 (frequency 指定時の誘電損)
+			if (nval < 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			const double val = atof(token[3]);
+			if ((mid < 0) || (mid >= NMaterial) || (val < 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			if (strkey[0] == 'm') {
+				if (val <= 0) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+				Material[mid].mur = val;
+			}
+			else {
+				Material[mid].tand = val;
+			}
+		}
+		else if (!strcmp(strkey, "conductorsigma")) {
+			// conductorsigma = <conductor_id> <sigma>  : 導体の DC 直列抵抗の計算に使う
+			if (nval < 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int cid = atoi(token[2]);
+			const double val = atof(token[3]);
+			if ((cid < 0) || (cid >= MAXPORT) || (val <= 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			CondSigma[cid] = val;
+		}
+		else if (!strcmp(strkey, "frequency")) {
+			// frequency = <f [Hz]>  : tanδ による並列コンダクタンスの計算に使う
+			Freq = atof(token[2]);
+			if (Freq < 0) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+		}
+		else if (!strcmp(strkey, "current")) {
+			// current = <I [A]>  : 静磁場解析の励振電流
+			Curr = atof(token[2]);
+			if (Curr == 0) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+		}
 		else if (!strcmp(strkey, "analysis")) {
 			// analysis = C L R (部分集合)
 			Analysis = 0;
@@ -249,6 +312,7 @@ int input_data(FILE *fp)
 				if      (c == 'C') Analysis |= ANALYSIS_C;
 				else if (c == 'L') Analysis |= ANALYSIS_L;
 				else if (c == 'R') Analysis |= ANALYSIS_R;
+				else if (c == 'M') Analysis |= ANALYSIS_M;
 				else {
 					printf(errfmt2, strkey);
 					return 1;
@@ -360,6 +424,11 @@ int input_data(FILE *fp)
 	// L 解析は TEM 仮定 (単位長あたり) でのみ意味を持つ
 	if ((Analysis & ANALYSIS_L) && !Tline) {
 		printf("%s\n", "*** analysis L requires the tline key (TEM per-unit-length)");
+		return 1;
+	}
+	// M 解析 (静磁場) は断面 2 次元の定式化なので伝送線路軸が要る
+	if ((Analysis & ANALYSIS_M) && !Tline) {
+		printf("%s\n", "*** analysis M requires the tline key (2D magnetostatic)");
 		return 1;
 	}
 

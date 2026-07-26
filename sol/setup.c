@@ -54,14 +54,39 @@ int setup(void)
 		const int    m     = Geometry[n].m;
 		const int    shape = Geometry[n].shape;
 		const double *g    = Geometry[n].g;
+		int i;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-		for (int i = 0; i < Nx; i++) {
+		for (i = 0; i < Nx; i++) {
 		for (int j = 0; j < Ny; j++) {
 		for (int k = 0; k < Nz; k++) {
 			if (ingeometry(Xc[i], Yc[j], Zc[k], shape, g, eps)) {
 				CellMaterial[((int64_t)i * Ny + j) * Nz + k] = (unsigned char)m;
+			}
+		}
+		}
+		}
+	}
+
+	// 導体セル (断面積・電流密度の計算に使う。節点と同じ順序で重ね塗りする)
+
+	CellConductor = (signed char *)malloc(ncell * sizeof(signed char));
+	memset(CellConductor, -1, ncell * sizeof(signed char));
+
+	for (int n = 0; n < NConductor; n++) {
+		const int    id    = Conductor[n].id;
+		const int    shape = Conductor[n].shape;
+		const double *g    = Conductor[n].g;
+		int i;
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+		for (i = 0; i < Nx; i++) {
+		for (int j = 0; j < Ny; j++) {
+		for (int k = 0; k < Nz; k++) {
+			if (ingeometry(Xc[i], Yc[j], Zc[k], shape, g, eps)) {
+				CellConductor[((int64_t)i * Ny + j) * Nz + k] = (signed char)id;
 			}
 		}
 		}
@@ -78,10 +103,11 @@ int setup(void)
 		const int    id    = Conductor[n].id;
 		const int    shape = Conductor[n].shape;
 		const double *g    = Conductor[n].g;
+		int i;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-		for (int i = 0; i <= Nx; i++) {
+		for (i = 0; i <= Nx; i++) {
 		for (int j = 0; j <= Ny; j++) {
 		for (int k = 0; k <= Nz; k++) {
 			if (ingeometry(Xn[i], Yn[j], Zn[k], shape, g, eps)) {
@@ -117,6 +143,25 @@ int setup(void)
 	// 等価回路の線路長 (linelength 省略時は解析領域長)
 	if (LineLength <= 0) LineLength = TlineLength;
 
+	// 導体の断面積 (体積 / 線路長)。静磁場の電流密度と DC 直列抵抗に使う
+	for (int p = 0; p < MAXPORT; p++) {
+		CondArea[p] = 0;
+	}
+	if (TlineLength > 0) {
+		for (int i = 0; i < Nx; i++) {
+		for (int j = 0; j < Ny; j++) {
+		for (int k = 0; k < Nz; k++) {
+			const int id = CellConductor[((int64_t)i * Ny + j) * Nz + k];
+			if (id < 0) continue;
+			CondArea[id] += (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]);
+		}
+		}
+		}
+		for (int p = 0; p <= NPort; p++) {
+			CondArea[p] /= TlineLength;
+		}
+	}
+
 	// 結果行列
 
 	const size_t msize = (size_t)NPort * NPort * sizeof(double);
@@ -124,11 +169,36 @@ int setup(void)
 	Lmat = (double *)malloc(msize);
 	Gmat = (double *)malloc(msize);
 	Rmat = (double *)malloc(msize);
+	Mmat = (double *)malloc(msize);
+	Smat = (double *)malloc(msize);
 	memset(Cmat, 0, msize);
 	memset(Lmat, 0, msize);
 	memset(Gmat, 0, msize);
 	memset(Rmat, 0, msize);
-	HaveC = HaveL = HaveR = 0;
+	memset(Mmat, 0, msize);
+	memset(Smat, 0, msize);
+	HaveC = HaveL = HaveR = HaveM = HaveS = 0;
+
+	// 導体の DC 直列抵抗 [ohm/m] (conductorsigma 指定時)
+	// 帰路を基準導体が共有するので Smat[k][j] = R0 + (k==j ? Rk : 0) とする
+	if (TlineLength > 0) {
+		int have = 0;
+		for (int p = 0; p <= NPort; p++) {
+			if ((CondSigma[p] > 0) && (CondArea[p] > 0)) have = 1;
+		}
+		if (have) {
+			const double r0 = ((CondSigma[0] > 0) && (CondArea[0] > 0))
+				? (1 / (CondSigma[0] * CondArea[0])) : 0;
+			for (int k = 1; k <= NPort; k++) {
+				const double rk = ((CondSigma[k] > 0) && (CondArea[k] > 0))
+					? (1 / (CondSigma[k] * CondArea[k])) : 0;
+				for (int j = 1; j <= NPort; j++) {
+					Smat[((k - 1) * NPort) + (j - 1)] = r0 + ((k == j) ? rk : 0);
+				}
+			}
+			HaveS = 1;
+		}
+	}
 
 	return 0;
 }
@@ -142,6 +212,7 @@ void memfree(void)
 	free(Geometry);
 	free(Conductor);
 	free(CellMaterial);
+	free(CellConductor);
 	free(NodeConductor);
-	free(Cmat); free(Lmat); free(Gmat); free(Rmat);
+	free(Cmat); free(Lmat); free(Gmat); free(Rmat); free(Mmat); free(Smat);
 }

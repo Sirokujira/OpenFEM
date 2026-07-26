@@ -66,10 +66,11 @@ void crs_alloc(crs_t *A)
 	A->val = (double *)malloc(A->nnz * sizeof(double));
 
 	// 列番号 (昇順)
+	int i;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (int i = 0; i <= Nx; i++) {
+	for (i = 0; i <= Nx; i++) {
 	for (int j = 0; j <= Ny; j++) {
 	for (int k = 0; k <= Nz; k++) {
 		int dilo, dihi, djlo, djhi, dklo, dkhi;
@@ -116,10 +117,11 @@ void crs_spmv(const crs_t *A, const double *x, double *y, const unsigned char *f
 	// (節点数が INT32_MAX 未満であることは setup() で確認済み)
 	const int n = (int)A->n;
 
+	int row;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (int row = 0; row < n; row++) {
+	for (row = 0; row < n; row++) {
 		if ((fix != NULL) && fix[row]) {
 			y[row] = x[row];
 			continue;
@@ -140,10 +142,11 @@ void crs_diag(const crs_t *A, double *d)
 {
 	const int n = (int)A->n;
 
+	int row;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (int row = 0; row < n; row++) {
+	for (row = 0; row < n; row++) {
 		double s = 0;
 		const int64_t p0 = A->rowptr[row];
 		const int64_t p1 = A->rowptr[row + 1];

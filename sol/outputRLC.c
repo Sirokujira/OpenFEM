@@ -7,7 +7,7 @@ outputRLC.c
 #include "fem.h"
 #include "fem_prototype.h"
 
-#define OUT_MAGIC "OFEOUT01"
+#define OUT_MAGIC "OFEOUT02"
 
 static void print_matrix(FILE *fp, const char *name, const char *unit, const double *m, int np)
 {
@@ -56,23 +56,38 @@ void outputRLC(FILE *fp)
 	}
 
 	if (HaveL) {
-		print_matrix(fp, "Inductance matrix L (TEM)", "H/m", Lmat, np);
+		print_matrix(fp, "Inductance matrix L (TEM, external only)", "H/m", Lmat, np);
+	}
+
+	if (HaveM) {
+		print_matrix(fp, "Inductance matrix L (magnetostatic, incl. internal)", "H/m", Mmat, np);
 	}
 
 	if (HaveR) {
-		print_matrix(fp, "Conductance matrix G", (pul ? "S/m" : "S"), Gmat, np);
-		print_matrix(fp, "Resistance matrix R = inv(G)", (pul ? "ohm*m" : "ohm"), Rmat, np);
+		if (Freq > 0) {
+			fprintf(fp, "\n(shunt loss evaluated at %.6e [Hz]; tan-delta enters as "
+				"sigma_d = omega*eps0*epsr*tand)\n", Freq);
+		}
+		print_matrix(fp, "Shunt conductance matrix G", (pul ? "S/m" : "S"), Gmat, np);
+		print_matrix(fp, "Shunt resistance matrix R = inv(G)", (pul ? "ohm*m" : "ohm"), Rmat, np);
+	}
+
+	if (HaveS) {
+		print_matrix(fp, "Series resistance matrix Rs (DC, conductor loss)", "ohm/m", Smat, np);
 	}
 
 	// 単一ポートの伝送線路定数
-	if (pul && HaveC && HaveL && (np == 1)) {
+	// Z0 は高周波量なので、外部インダクタンス (TEM) があればそちらを使う
+	// (静磁場の L_dc は表皮効果の無い低周波モデルの値)
+	if (pul && HaveC && (HaveL || HaveM) && (np == 1)) {
 		const double c = Cmat[0];
-		const double l = Lmat[0];
+		const double l = (HaveL ? Lmat[0] : Mmat[0]);
 		if ((c > 0) && (l > 0)) {
 			const double z0 = sqrt(l / c);
 			const double vp = 1 / sqrt(l * c);
 			const double eeff = (C0 * C0) * l * c;
-			fprintf(fp, "\nTransmission line (TEM):\n");
+			fprintf(fp, "\nTransmission line (L = %s):\n",
+				(HaveL ? "TEM, external" : "magnetostatic, incl. internal"));
 			fprintf(fp, "  Z0        = %14.6e [ohm]\n", z0);
 			fprintf(fp, "  eps_eff   = %14.6e\n", eeff);
 			fprintf(fp, "  v_p       = %14.6e [m/s] (%.4f c)\n", vp, vp / C0);
@@ -93,15 +108,15 @@ void writeout(FILE *fp)
 	const size_t tlen = strlen(Title);
 	memcpy(title, Title, ((tlen < sizeof(title) - 1) ? tlen : sizeof(title) - 1));
 
-	const int32_t flag[4] = {HaveC, HaveL, HaveR, NSection};
+	const int32_t flag[6] = {HaveC, HaveL, HaveR, NSection, HaveM, HaveS};
 	const int32_t tline = (int32_t)Tline;
-	const double dval[2] = {LineLength, Volt};
+	const double dval[3] = {LineLength, Volt, Freq};
 
 	fwrite(OUT_MAGIC, 1, 8, fp);
 	fwrite(&np, sizeof(int32_t), 1, fp);
-	fwrite(flag, sizeof(int32_t), 4, fp);
+	fwrite(flag, sizeof(int32_t), 6, fp);
 	fwrite(&tline, sizeof(int32_t), 1, fp);
-	fwrite(dval, sizeof(double), 2, fp);
+	fwrite(dval, sizeof(double), 3, fp);
 	fwrite(title, 1, sizeof(title), fp);
 
 	const size_t nn = (size_t)np * np;
@@ -109,4 +124,6 @@ void writeout(FILE *fp)
 	fwrite(Lmat, sizeof(double), nn, fp);
 	fwrite(Gmat, sizeof(double), nn, fp);
 	fwrite(Rmat, sizeof(double), nn, fp);
+	fwrite(Mmat, sizeof(double), nn, fp);
+	fwrite(Smat, sizeof(double), nn, fp);
 }

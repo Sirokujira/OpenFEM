@@ -36,7 +36,7 @@ jobs:
           test -s ofe_circuit.sp
 
       # 平行平板 / 抵抗 / 同軸 / マイクロストリップを解析解と比較する
-      - name: Validation test — R/L/C
+      - name: Validation test — RLGC vs analytic
         run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check
 
       - name: Upload binaries (artifact)
@@ -101,7 +101,7 @@ jobs:
           test -s ofe.out
           "$GITHUB_WORKSPACE/bin/ofe_post"
 
-      - name: Validation test — R/L/C
+      - name: Validation test — RLGC vs analytic
         run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check
 
       - name: Upload binaries (artifact)
@@ -166,7 +166,7 @@ jobs:
           & "$env:GITHUB_WORKSPACE\bin\ofe_post.exe"
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Validation test — R/L/C
+      - name: Validation test — RLGC vs analytic
         shell: bash
         run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe.exe" "$GITHUB_WORKSPACE/bin/ofe_post.exe" /tmp/rlc-check
 

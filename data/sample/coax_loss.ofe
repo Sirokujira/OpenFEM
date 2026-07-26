@@ -1,0 +1,42 @@
+OpenFEM 1 0
+title = lossy coaxial line (a=0.5mm, b=1.5mm, c=1.9mm, epsr=2.1, tand=0.001)
+#
+# 損失を含む同軸線路。C / L(TEM) / G(誘電損) / L_dc(静磁場) / Rs(導体 DC 抵抗)
+# をまとめて求める。解析解:
+#
+#   C'    = 2*pi*eps0*epsr / ln(b/a)          = 1.063395e-10 [F/m]
+#   G'    = omega * C' * tand                 (均質誘電体では厳密にこの関係)
+#   L'ext = mu0/(2*pi) * ln(b/a)              = 2.197225e-07 [H/m]
+#   L'dc  = L'ext + mu0/(8*pi) + L'shield     = 2.873953e-07 [H/m]
+#           (内部導体の内部インダクタンス mu0/(8pi) = 5.0e-8、
+#            外部導体 b..c の内部インダクタンス = 1.767e-8)
+#   Rs'   = 1/(sigma*pi*a^2) + 1/(sigma*pi*(c^2-b^2)) = 2.599e-02 [ohm/m]
+#
+# 円形導体を直交格子で階段近似するため数 % の誤差が出る。
+#
+xmesh = -2e-3 200 2e-3
+ymesh = -2e-3 200 2e-3
+zmesh = 0 1 1e-4
+
+# material id 2 : 誘電体 (PTFE 相当、tanδ = 0.001)
+material = 2.1 0
+tand = 2 0.001
+geometry = 2 1 -2e-3 2e-3 -2e-3 2e-3 0 1e-4
+
+# 外部導体 : 半径 c の円柱から半径 b の円柱をくり抜く (id = -1 は取り消し)
+conductor =  0 13 -1.9e-3 1.9e-3 -1.9e-3 1.9e-3 0 1e-4
+conductor = -1 13 -1.5e-3 1.5e-3 -1.5e-3 1.5e-3 0 1e-4
+# 内部導体 : 半径 a の円柱
+conductor =  1 13 -0.5e-3 0.5e-3 -0.5e-3 0.5e-3 0 1e-4
+
+# 導体の DC 直列抵抗 (銅)
+conductorsigma = 0 5.8e7
+conductorsigma = 1 5.8e7
+
+analysis = C L R M
+tline = Z
+frequency = 1e9
+linelength = 100e-3
+nsection = 4
+solver = 50000 2000 1e-11
+end

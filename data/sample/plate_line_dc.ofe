@@ -1,0 +1,32 @@
+OpenFEM 1 0
+title = wide parallel plate line (magnetostatic L incl. internal, DC series R)
+#
+# 幅 W = 1mm、間隔 d = 0.2mm、板厚 t = 0.05mm の平行平板線路。
+# 側面・上下面は自然境界条件 (磁気壁 : 接線方向 B = 0) なので磁界は厳密に
+# 1 次元となり、内部インダクタンスを含む解析解と比較できる:
+#
+#   L' = mu0*d/W + 2*mu0*t/(3W) = 2.932153e-07 [H/m]
+#        (外部)     (内部、板 2 枚分)
+#
+# 導体の DC 直列抵抗 (sigma = 5.8e7 S/m, 断面積 W*t = 5e-8 m^2):
+#   R'(板 1 枚) = 1/(sigma*W*t) = 0.3448276 [ohm/m]
+#   Rs[1][1] = R'(往路) + R'(帰路) = 0.6896552 [ohm/m]
+#
+xmesh = 0 4 1e-3
+ymesh = 0 20 0.05e-3 20 0.25e-3 20 0.30e-3
+zmesh = 0 1 1e-4
+
+# 板間は真空 (材料指定なし = id 0)
+
+# 帰路導体 (下側の板) と往路導体 (上側の板)
+conductor = 0 1 0 1e-3 0      0.05e-3 0 1e-4
+conductor = 1 1 0 1e-3 0.25e-3 0.30e-3 0 1e-4
+
+conductorsigma = 0 5.8e7
+conductorsigma = 1 5.8e7
+
+analysis = M
+tline = Z
+current = 1
+solver = 50000 2000 1e-12
+end

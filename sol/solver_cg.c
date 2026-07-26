@@ -16,10 +16,11 @@ Dirichlet 節点 (fix[] != 0) は恒等行として扱い、右辺を 0 にし�
 static double dotprod(const double *a, const double *b, int n)
 {
 	double s = 0;
+	int i;
 #ifdef _OPENMP
 #pragma omp parallel for reduction(+:s)
 #endif
-	for (int i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		s += a[i] * b[i];
 	}
 
@@ -40,10 +41,11 @@ int solver_cg(const crs_t *A, const double *b, double *x, const unsigned char *f
 
 	// 前処理 (対角)
 	crs_diag(A, d);
+	int i;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (int i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		if (fix[i] || (d[i] <= 0)) d[i] = 1;
 	}
 
@@ -51,7 +53,7 @@ int solver_cg(const crs_t *A, const double *b, double *x, const unsigned char *f
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (int i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		x[i] = 0;
 		r[i] = b[i];
 	}
@@ -65,7 +67,7 @@ int solver_cg(const crs_t *A, const double *b, double *x, const unsigned char *f
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (int i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		z[i] = r[i] / d[i];
 		p[i] = z[i];
 	}
@@ -82,10 +84,11 @@ int solver_cg(const crs_t *A, const double *b, double *x, const unsigned char *f
 		if (pq <= 0) break;			// 正定値でない (異常)
 		const double alpha = rz / pq;
 
+		int i;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-		for (int i = 0; i < n; i++) {
+		for (i = 0; i < n; i++) {
 			x[i] += alpha * p[i];
 			r[i] -= alpha * q[i];
 		}
@@ -103,7 +106,7 @@ int solver_cg(const crs_t *A, const double *b, double *x, const unsigned char *f
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-		for (int i = 0; i < n; i++) {
+		for (i = 0; i < n; i++) {
 			z[i] = r[i] / d[i];
 		}
 		const double rznew = dotprod(r, z, n);
@@ -113,7 +116,7 @@ int solver_cg(const crs_t *A, const double *b, double *x, const unsigned char *f
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-		for (int i = 0; i < n; i++) {
+		for (i = 0; i < n; i++) {
 			p[i] = z[i] + (beta * p[i]);
 		}
 	}

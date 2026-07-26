@@ -9,6 +9,11 @@
 #   coax           : C' = 2 pi eps / ln(b/a)        (階段近似、許容 5%)
 #                    L' = mu0 / (2 pi) ln(b/a)      (階段近似、許容 5%)
 #   microstrip     : Z0 が 40..60 ohm の範囲にあること (設計値 ~50 ohm)
+#   plate_line_dc  : L'dc = mu0(d + 2t/3)/W         (1 次元厳密、許容 1%)
+#                    Rs' = 2/(sigma W t)            (厳密、許容 1%)
+#   coax_loss      : L'dc (内部インダクタンス込み)  (階段近似、許容 5%)
+#                    Rs' (導体 DC 抵抗)             (階段近似、許容 3%)
+#                    G' = omega C' tand             (均質誘電体では厳密、許容 0.1%)
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -82,6 +87,20 @@ echo "[microstrip] w/h = 0.75/0.4, epsr = 4.4"
 run_case microstrip
 in_range "Z0 [ohm]" "$(scalar_of 'Z0 [ohm]')" 40 60
 in_range "eps_eff" "$(scalar_of 'eps_eff')" 2.5 4.0
+
+echo "[plate_line_dc] W=1mm, d=0.2mm, t=0.05mm (magnetostatic, 1-D exact)"
+run_case plate_line_dc
+compare "Ldc [H/m]" "$(value_of Ldc)" 2.932153e-07 0.01
+compare "Rs [ohm/m]" "$(value_of Rs)" 6.896552e-01 0.01
+
+echo "[coax_loss] a=0.5mm, b=1.5mm, c=1.9mm, tand=0.001 @ 1GHz"
+run_case coax_loss
+compare "Ldc [H/m]" "$(value_of Ldc)" 2.873953e-07 0.05
+compare "Rs [ohm/m]" "$(value_of Rs)" 2.598776e-02 0.03
+# 均質誘電体では G' = omega * C' * tand が厳密に成り立つ (離散化誤差が相殺する)
+gexp=$(awk -v c="$(value_of C)" -v f=1e9 -v td=0.001 \
+	'BEGIN{ printf "%.8e", 2 * 3.14159265358979324 * f * c * td }')
+compare "G [S/m]" "$(value_of G)" "$gexp" 0.001
 
 if [ "$status" -ne 0 ]; then
 	echo "*** RLC validation FAILED" >&2

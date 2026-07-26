@@ -23,10 +23,11 @@ static int solve_port(const crs_t *A, const unsigned char *fix, int kport,
 	const int n = (int)A->n;
 
 	// Dirichlet 値 (phi は φ_D として使い、後で u を足す)
+	int i;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (int i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		const int id = NodeConductor[i];
 		phi[i] = ((id == kport) ? Volt : 0);
 	}
@@ -36,7 +37,7 @@ static int solve_port(const crs_t *A, const unsigned char *fix, int kport,
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (int i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		work[i] = (fix[i] ? 0 : -work[i]);
 	}
 
@@ -49,7 +50,7 @@ static int solve_port(const crs_t *A, const unsigned char *fix, int kport,
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (int i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		phi[i] += u[i];
 	}
 	free(u);
@@ -93,6 +94,119 @@ static void symmetrize(double *m, int np, FILE *fp_log, const char *name)
 	if ((fp_log != NULL) && (np > 1) && (amax > 0)) {
 		fprintf(fp_log, "  %s matrix asymmetry = %.3e (relative)\n", name, dmax / amax);
 	}
+}
+
+
+// 静磁場解析 (断面 2 次元、ベクトルポテンシャル Az 定式化)
+//
+//   ∇・(ν ∇Az) = -Jz,  ν = 1/(μ0 μr)
+//
+// ポート k に +I、基準導体 (id=0) に -I を一様電流密度で流して解く。
+// 正味電流が 0 なので純 Neumann 系は可解 (定数分の不定性のみ) であり、
+// 1 節点を固定して解いた解は真の解を定数だけずらしたものになる。
+// 相互エネルギー ∫J^(j)・A^(k) dV = L_kj I_k I_j は定数分に依らない
+// (∫J dV = 0) ので、そのまま L 行列が得られる。
+// 導体内部の電流分布を含むため内部インダクタンスが自動的に入り、μr にも対応する。
+static int solve_magnetostatic(FILE *fp_log)
+{
+	const int n = (int)num_node();
+	const int np = NPort;
+	int ierr = 0;
+
+	if (np < 1) return 1;
+
+	fprintf(fp_log, "\n=== magnetostatic analysis ===\n");
+
+	// 電流密度の計算に導体の断面積が要る
+	for (int p = 0; p <= np; p++) {
+		if (CondArea[p] <= 0) {
+			fprintf(fp_log, "*** conductor %d has no cell (magnetostatic analysis needs "
+				"conductors with a finite cross section)\n", p);
+			return 1;
+		}
+	}
+	fprintf(fp_log, "  current = %.6e [A], cross sections [m^2] :", Curr);
+	for (int p = 0; p <= np; p++) {
+		fprintf(fp_log, " %d:%.4e", p, CondArea[p]);
+	}
+	fprintf(fp_log, "\n");
+	fprintf(fp_log, "  %-10s %8s %13s\n", "port", "iter", "residual");
+	fflush(fp_log);
+
+	crs_t A;
+	crs_alloc(&A);
+	assemble(&A, 3);
+
+	// 定数分の不定性を除くために 1 節点だけ固定する
+	unsigned char *fix = (unsigned char *)malloc(n * sizeof(unsigned char));
+	memset(fix, 0, n * sizeof(unsigned char));
+	fix[0] = 1;
+
+	// ポート毎の電流密度ベクトル (要素の形状関数で節点に配分)
+	double **b = (double **)malloc((size_t)np * sizeof(double *));
+	for (int k = 1; k <= np; k++) {
+		double *bk = (double *)malloc(n * sizeof(double));
+		memset(bk, 0, n * sizeof(double));
+		for (int i = 0; i < Nx; i++) {
+		for (int j = 0; j < Ny; j++) {
+		for (int m = 0; m < Nz; m++) {
+			const int id = CellConductor[((int64_t)i * Ny + j) * Nz + m];
+			double jz = 0;
+			if      (id == k) jz = +Curr / CondArea[k];
+			else if (id == 0) jz = -Curr / CondArea[0];
+			else continue;
+			const double vol = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[m + 1] - Zn[m]);
+			const double w = jz * vol / 8;
+			for (int l = 0; l < 8; l++) {
+				bk[node_index(i + ((l >> 2) & 1), j + ((l >> 1) & 1), m + (l & 1))] += w;
+			}
+		}
+		}
+		}
+		b[k - 1] = bk;
+	}
+
+	double *rhs = (double *)malloc(n * sizeof(double));
+	double *az  = (double *)malloc(n * sizeof(double));
+	const double scale = 1 / TlineLength;
+
+	for (int k = 1; k <= np; k++) {
+		// 固定節点の右辺は 0 にする (行を恒等行として扱うため)
+		memcpy(rhs, b[k - 1], n * sizeof(double));
+		rhs[0] = 0;
+
+		char label[BUFSIZ];
+		sprintf(label, "port%d", k);
+		const int iter = solver_cg(&A, rhs, az, fix,
+			Solver.maxiter, Solver.nout, Solver.converg, fp_log, label);
+		if (iter < 0) {
+			fprintf(fp_log, "*** solver did not converge (port %d)\n", k);
+			ierr = 1;
+		}
+
+		// L_kj = ∫ J^(j)・A^(k) dV / (I_k I_j) / 線路長
+		for (int j = 1; j <= np; j++) {
+			double w = 0;
+			for (int i = 0; i < n; i++) {
+				w += b[j - 1][i] * az[i];
+			}
+			Mmat[((k - 1) * np) + (j - 1)] = w / (Curr * Curr) * scale;
+		}
+	}
+
+	symmetrize(Mmat, np, fp_log, "magnetostatic");
+	HaveM = 1;
+
+	for (int k = 0; k < np; k++) {
+		free(b[k]);
+	}
+	free(b);
+	free(rhs);
+	free(az);
+	free(fix);
+	crs_free(&A);
+
+	return ierr;
 }
 
 
@@ -217,6 +331,11 @@ int solve(FILE *fp_log)
 	free(diag);
 	free(q);
 	crs_free(&A);
+
+	// 静磁場解析 (DC インダクタンス)。行列を作り直すので静電界の後始末をしてから呼ぶ
+	if (!ierr && (Analysis & ANALYSIS_M)) {
+		ierr |= solve_magnetostatic(fp_log);
+	}
 
 	return ierr;
 }

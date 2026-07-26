@@ -54,6 +54,7 @@ extern "C" {
 #define ANALYSIS_C (1 << 0)		// 静電界 -> 容量行列 C
 #define ANALYSIS_L (1 << 1)		// 真空静電界 -> インダクタンス行列 L (TEM 近似)
 #define ANALYSIS_R (1 << 2)		// 定常電流界 -> 抵抗/コンダクタンス行列 R, G
+#define ANALYSIS_M (1 << 3)		// 静磁場 -> DC インダクタンス行列 (内部インダクタンス込み)
 
 #define MAXPORT (16)			// 導体 (基準導体 + ポート) の最大数
 
@@ -61,6 +62,8 @@ extern "C" {
 typedef struct {
 	double epsr;				// 比誘電率
 	double sigma;				// 導電率 [S/m]
+	double mur;					// 比透磁率 (静磁場解析で使う、既定 1)
+	double tand;				// 誘電正接 tanδ (frequency 指定時に G へ寄与、既定 0)
 } material_t;
 
 // 形状 (shape/g は OpenFDTD の geometry と共通)
@@ -120,6 +123,8 @@ EXTERN int Analysis;			// ANALYSIS_* のビット OR
 EXTERN char Tline;				// 'X'/'Y'/'Z' : 単位長あたりで出力、0 : 絶対値
 EXTERN double LineLength;		// 等価回路を作るときの線路長 [m] (既定 : 解析領域長)
 EXTERN double Volt;				// 励振電圧 [V]
+EXTERN double Freq;				// 周波数 [Hz] (tanδ による誘電損の計算に使う、0 = 無効)
+EXTERN double Curr;				// 静磁場解析の励振電流 [A]
 EXTERN int NSection;			// SPICE 等価回路の梯子段数
 
 // セル毎の材料番号
@@ -128,12 +133,21 @@ EXTERN unsigned char *CellMaterial;
 // 節点毎の導体番号 (-1 : 導体でない、0.. : 導体番号)
 EXTERN signed char *NodeConductor;
 
+// セル毎の導体番号 (断面積・電流密度の計算に使う)
+EXTERN signed char *CellConductor;
+
+// 導体毎の量 ([0] = 基準導体、[1..NPort] = ポート)
+EXTERN double CondSigma[MAXPORT];	// 導電率 [S/m] (0 = 未指定)
+EXTERN double CondArea[MAXPORT];	// 断面積 [m^2] (tline 指定時)
+
 // 抽出結果 (行列は [NPort][NPort]、単位は Tline 指定時 F/m, H/m, S/m)
 EXTERN double *Cmat;			// 短絡容量行列 (Maxwell 行列)
-EXTERN double *Lmat;			// インダクタンス行列
+EXTERN double *Lmat;			// インダクタンス行列 (TEM 近似)
 EXTERN double *Gmat;			// コンダクタンス行列
-EXTERN double *Rmat;			// 抵抗行列 (= inv(G))
-EXTERN int HaveC, HaveL, HaveR;	// 各行列が計算済みか
+EXTERN double *Rmat;			// 並列抵抗行列 (= inv(G))
+EXTERN double *Mmat;			// DC インダクタンス行列 (静磁場、内部インダクタンス込み)
+EXTERN double *Smat;			// 直列抵抗行列 (導体の DC 抵抗) [ohm/m]
+EXTERN int HaveC, HaveL, HaveR, HaveM, HaveS;	// 各行列が計算済みか
 EXTERN double TlineLength;		// 伝送線路長 [m] (Tline 指定時)
 
 #ifdef __cplusplus
