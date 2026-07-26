@@ -44,6 +44,11 @@ int solver_cg_edge(const crs_t *, const crs_t *, const double *, double *,
 	const unsigned char *, int, int, int, double, FILE *, const char *);
 int tet_grad_pub(const int32_t [4], double [4][3], double *);
 
+// eddy3d.c
+void crs_alloc_edge_node(crs_t *);
+void assemble_eddy3d(crs_t *, crs_t *, double);
+int solve_eddy3d(FILE *);
+
 // assemble.c (公開した材料係数)
 void material_coef_pub(int, int, double [6]);
 

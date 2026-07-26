@@ -1,0 +1,49 @@
+OpenFEM 1 0
+title = 3D eddy current (A-phi) : conducting bar, 1-D exact skin effect
+#
+# 3 次元渦電流解析 (A-φ、辺要素) の検証。
+#
+# 形状 : 銅の直方体 L(x) = 2 mm, W(y) = 0.25 mm, t(z) = 1 mm, sigma = 5.8e7 S/m
+#        x 方向に電流を流す (x=0 面が電極 0、x=L 面が電極 1)
+#
+# 境界条件 (mkmesh.py の bar が付けるタグ 20) :
+#   z=0, z=t, x=0, x=L で A の接線成分を 0 (B・n = 0)
+#   y 面は自然境界条件 n×(ν∇×A) = 0
+#
+# この条件では磁束が y 方向にしか出られないので解は 1 次元になり、厳密解がある。
+# E_x = -jω A_x - ∂φ/∂x、∂φ/∂x = -E0 (一定) として
+#
+#   ν A_x'' - jωσ A_x = -σ E0,   A_x(0) = A_x(t) = 0
+#   -> J_x(z) = σ E0 cosh(γ(z - t/2)) / cosh(γ t/2),   γ = sqrt(jωμσ)
+#   -> I = σ E0 W (2/γ) tanh(γ t/2),  V = E0 L
+#
+#   Z = V / I = γ L / (2 σ W tanh(γ t/2))
+#
+# 低周波展開 tanh(x) ≈ x - x^3/3 より
+#   Z -> L/(σ W t) + jω μ0 t L /(12 W)
+#   R_dc  = 1.3793103448e-04 [ohm]   (ω→0 でこの値に厳密一致する)
+#   L_int = 8.3775804096e-10 [H]
+#
+# 厳密値 (上式を複素数で評価したもの) :
+#   f = 1e2 : R = 1.37931436e-04, L = 8.37757344e-10  (t/delta = 0.15, R/Rdc = 1.000003)
+#   f = 1e4 : R = 1.41899129e-04, L = 8.30877185e-10  (t/delta = 1.51, R/Rdc = 1.028769)
+#   f = 1e5 : R = 3.24859232e-04, L = 5.34552067e-10  (t/delta = 4.79, R/Rdc = 2.355229)
+#
+# 格子について : 1 次 Nedelec 要素の誤差は「場が変化する方向の刻み」ではなく
+# **要素の最大寸法**で決まる。この解は x, y に一様だが、dx を粗くすると誤差が出る
+# (dz を 1/40 にしても dx = 1.7 mm では R が 13% ずれ、dx = 0.42 mm で 1%、
+#  0.083 mm で 0.06%)。そのため格子は等方的にとってある
+#  (dx = 0.083 mm, dy = 0.125 mm, dz = 0.042 mm、1e5 Hz の表皮深さ 0.209 mm)。
+#
+mesh = bar_tet.msh
+material = 1.0 5.8e7
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+awall = 20
+
+frequency = 1e5
+voltage = 1.0
+analysis = A
+solver = 100000 20000 1e-11
+end

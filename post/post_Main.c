@@ -172,8 +172,8 @@ static void write_csv(const result_t *res)
 	}
 	if (res->haveS) write_matrix_csv(fp, "Rs", "ohm/m", res->s, np);
 	if (res->haveF) {
-		write_matrix_csv(fp, "Rf", "ohm/m", res->rf, np);
-		write_matrix_csv(fp, "Lf", "H/m", res->lf, np);
+		write_matrix_csv(fp, "Rf", (pul ? "ohm/m" : "ohm"), res->rf, np);
+		write_matrix_csv(fp, "Lf", (pul ? "H/m" : "H"), res->lf, np);
 	}
 
 	if (res->haveC && (res->haveL || res->haveM) && (np == 1)

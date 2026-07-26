@@ -111,6 +111,8 @@ int input_data(FILE *fp)
 	strcpy(MeshFile, "");
 	NRegion = 0;
 	NElectrode = 0;
+	NAWall = 0;
+	GaugeTree = 0;
 
 	NSweep = 0;
 	JaSub = 20;
@@ -459,6 +461,28 @@ int input_data(FILE *fp)
 			if (cid > NPort) NPort = cid;
 			NElectrode++;
 		}
+		else if (!strcmp(strkey, "awall")) {
+			// awall = <physical_tag>  : その面で A の接線成分を 0 に固定する
+			//   B・n = 0 (磁束が面を貫かない) 対称面 / 磁気遮蔽。analysis = A で使う。
+			//   省略すると外部境界はすべて自然境界条件 (磁気壁 n×(ν∇×A) = 0) になる
+			if ((nval < 1) || (NAWall >= MAXTAGMAP)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			AWallTag[NAWall] = atoi(token[2]);
+			NAWall++;
+		}
+		else if (!strcmp(strkey, "gauge")) {
+			// gauge = 0|1  : 3 次元渦電流 (analysis = A) のゲージ固定 (tree-cotree)
+			//   R(f)/L(f) はゲージ不変なので既定 (0) のままでも結果は変わらない
+			//   (7 桁一致を確認済み)。1 にすると A と φ 自体が物理的に意味のある値に
+			//   なる代わりに、条件数が悪化して反復回数が約 6 倍になる
+			if (nval < 1) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			GaugeTree = (atoi(token[2]) != 0);
+		}
 		else if (!strcmp(strkey, "ja")) {
 			// ja = <material_id> <Ms> <a> <alpha> <k> <c>
 			//   Jiles-Atherton ヒステリシスモデル。currentsweep と併用する
@@ -558,6 +582,7 @@ int input_data(FILE *fp)
 				else if (c == 'M') Analysis |= ANALYSIS_M;
 				else if (c == 'F') Analysis |= ANALYSIS_F;
 				else if (c == 'E') Analysis |= ANALYSIS_E;
+				else if (c == 'A') Analysis |= ANALYSIS_A;
 				else {
 					printf(errfmt2, strkey);
 					return 1;
@@ -690,6 +715,25 @@ int input_data(FILE *fp)
 			printf("%s\n", "*** analysis M / F are available only on a structured mesh");
 			return 1;
 		}
+		// A 解析 (3 次元渦電流) は周波数と導電材料が要る
+		if (Analysis & ANALYSIS_A) {
+			if (Freq <= 0) {
+				printf("%s\n", "*** analysis A requires the frequency key");
+				return 1;
+			}
+			int haveSigma = 0;
+			for (int m = 0; m < NMaterial; m++) {
+				if (Material[m].sigma > 0) haveSigma = 1;
+			}
+			if (!haveSigma) {
+				printf("%s\n", "*** analysis A requires a conducting material (sigma > 0)");
+				return 1;
+			}
+			if (NPort < 1) {
+				printf("%s\n", "*** analysis A requires at least one port (electrode)");
+				return 1;
+			}
+		}
 		return 0;
 	}
 
@@ -753,9 +797,13 @@ int input_data(FILE *fp)
 		printf("%s\n", "*** analysis L requires the tline key (TEM per-unit-length)");
 		return 1;
 	}
-	// E 解析 (辺要素の自己検証) は非構造格子専用
+	// E / A 解析 (辺要素) は非構造格子専用
 	if ((Analysis & ANALYSIS_E) && !MeshMode) {
 		printf("%s\n", "*** analysis E (edge elements) requires an unstructured mesh");
+		return 1;
+	}
+	if ((Analysis & ANALYSIS_A) && !MeshMode) {
+		printf("%s\n", "*** analysis A (3D eddy current) requires an unstructured mesh");
 		return 1;
 	}
 

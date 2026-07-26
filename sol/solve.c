@@ -776,5 +776,10 @@ int solve(FILE *fp_log)
 		ierr |= solve_eddy(fp_log);
 	}
 
+	// 3 次元渦電流解析 (A-φ、辺要素)
+	if (!ierr && (Analysis & ANALYSIS_A)) {
+		ierr |= solve_eddy3d(fp_log);
+	}
+
 	return ierr;
 }

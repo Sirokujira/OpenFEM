@@ -79,8 +79,8 @@ void outputRLC(FILE *fp)
 	if (HaveF) {
 		fprintf(fp, "\n(eddy current solution at %.6e [Hz]; includes skin and "
 			"proximity effect)\n", Freq);
-		print_matrix(fp, "Series resistance matrix R(f)", "ohm/m", Rfmat, np);
-		print_matrix(fp, "Series inductance matrix L(f)", "H/m", Lfmat, np);
+		print_matrix(fp, "Series resistance matrix R(f)", (pul ? "ohm/m" : "ohm"), Rfmat, np);
+		print_matrix(fp, "Series inductance matrix L(f)", (pul ? "H/m" : "H"), Lfmat, np);
 		if (HaveS && (np >= 1) && (Smat[0] > 0)) {
 			fprintf(fp, "  R(f)/R(dc) = %.4f (port 1)\n", Rfmat[0] / Smat[0]);
 		}

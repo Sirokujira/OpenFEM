@@ -28,6 +28,8 @@
 #                    + ゲージ固定 (tree-cotree) と Hiptmair 前処理の検証
 #   edge_test_aniso : 同じ自己検証を非対角成分まで詰まった異方性 ν で行う
 #                    (等方性だけだと異方性項が一度も実行されない)
+#   bar_eddy       : 3 次元渦電流 (A-φ)。Z = γL/(2σW tanh(γt/2)) と比較
+#                    (1e2 / 1e4 / 1e5 Hz、許容 0.5% / 0.5% / 2%)
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -228,6 +230,29 @@ awk '/\(e\) spanning tree/ { print "  " $0 }
 # 6 成分すべてが非零な μ でもう一度回して成分順序と対称性を検証する
 echo "[edge_test_aniso] the same self test with a fully anisotropic nu"
 edge_selftest edge_test_aniso
+
+# 3 次元渦電流 (A-φ、辺要素)。1 次元厳密解 Z = γL/(2σW tanh(γt/2)) と比較する。
+# ω→0 では R が DC 抵抗 L/(σWt) に厳密一致しなければならない (連成系全体の検査)
+echo "[bar_eddy] 3D eddy current (A-phi) vs the 1-D exact skin effect"
+cp "$SRC/bar_eddy.ofe" "$WORK/"
+for m in "$SRC"/*.msh; do
+	[ -f "$m" ] && cp "$m" "$WORK/"
+done
+# freq  R[ohm]        L[H]           許容 (要素の最大寸法 / 表皮深さ で決まる)
+for pair in "1e2 1.37931436e-04 8.37757344e-10 0.005" \
+            "1e4 1.41899129e-04 8.30877185e-10 0.005" \
+            "1e5 3.24859232e-04 5.34552067e-10 0.02"; do
+	set -- $pair
+	freq=$1
+	sed "s/^frequency = .*/frequency = $freq/" "$SRC/bar_eddy.ofe" > "$WORK/bar_eddy_run.ofe"
+	(cd "$WORK" && "$OFE" -n 2 bar_eddy_run.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "R(f=$freq) [ohm]" "$(value_of Rf)" "$2" "$4"
+	compare "L(f=$freq) [H]" "$(value_of Lf)" "$3" "$4"
+	if grep -q "NOT converged" "$WORK/ofe.log"; then
+		echo "  *** A-phi solver did not converge at $freq Hz" >&2
+		status=1
+	fi
+done
 
 # ヒステリシス (Jiles-Atherton) : H = I/W が Ampere の法則で厳密に決まるので、
 # FEM の結果はスカラー J-A モデルを H 掃引で積分した ODE 解と一致しなければならない

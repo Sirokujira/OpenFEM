@@ -60,13 +60,14 @@ void monitor2(FILE *fp, int nthread)
 	fprintf(fp, "No. of Geometries = %d\n", NGeometry);
 	fprintf(fp, "No. of Conductors = %d (ports = %d)\n",
 		(MeshMode ? NElectrode : NConductor), NPort);
-	fprintf(fp, "Analysis =%s%s%s%s%s%s\n",
+	fprintf(fp, "Analysis =%s%s%s%s%s%s%s\n",
 		((Analysis & ANALYSIS_C) ? " C" : ""),
 		((Analysis & ANALYSIS_L) ? " L" : ""),
 		((Analysis & ANALYSIS_R) ? " R" : ""),
 		((Analysis & ANALYSIS_M) ? " M" : ""),
 		((Analysis & ANALYSIS_F) ? " F" : ""),
-		((Analysis & ANALYSIS_E) ? " E" : ""));
+		((Analysis & ANALYSIS_E) ? " E" : ""),
+		((Analysis & ANALYSIS_A) ? " A" : ""));
 	if (Freq > 0) {
 		fprintf(fp, "Frequency = %.6e [Hz]\n", Freq);
 	}

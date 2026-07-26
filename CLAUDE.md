@@ -15,7 +15,8 @@ mkdir -p /tmp/smoke && cp data/sample/microstrip.ofe /tmp/smoke/ && cd /tmp/smok
 $OLDPWD/bin/ofe -n 2 microstrip.ofe && grep "normal end" ofe.log
 
 # 検証 (解析解との比較: 平行平板 1%, 抵抗 1%, 同軸 5%)
-sh data/sample/rlc_check.sh bin/ofe bin/ofe_post /tmp/rlc-check
+# 相対パスは script 内で cd するので絶対パスで渡すこと
+sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
 ```
 
 ## 移植性の絶対規則 (OpenFDTD が Windows CI で踏んだもの)
@@ -55,6 +56,17 @@ sh data/sample/rlc_check.sh bin/ofe bin/ofe_post /tmp/rlc-check
 - 非線形磁性体 (`bh`) は Newton-Raphson。ν の逐次代入は飽和領域で発散するので
   使わない。残差とヤコビアンで ν の評価点 (Gauss 点) を揃えること。
 - 収束判定は相対残差。`solver` キーの既定は `10000 100 1e-9`。
+- 3 次元渦電流 (`analysis = A`) は A (辺) と φ (節点) の連成。**節点側の式を
+  jω で割ると複素対称**になるので COCG がそのまま使える。この形にしないと
+  (1,2) = TG と (2,1) = jωGᵀT が食い違って対称でなくなる。
+- A-φ 系は (A, φ) → (A + Gψ, φ − jωψ) で不変なので特異。右辺を Dirichlet の
+  持ち上げ b = −A x_D で作れば b は必ず値域に入るので COCG は収束し、
+  Z はゲージ不変なので**ゲージ固定しない方が速い** (実測で反復 1/6、Z は 7 桁一致)。
+  A・φ 自体が要るときだけ `gauge = 1` (tree-cotree)。その場合 awall の辺を
+  優先して木に入れないと境界条件と端子電圧が壊れる。
+- **1 次 Nedelec 要素の誤差は要素の最大寸法で決まる** (場が変化する方向の
+  刻みではない)。場が一様な方向を粗くすると誤差が出る (実測で 13%)。
+  辺要素を使う解析では要素を等方的にとること。
 
 ## 機能追加の規則
 

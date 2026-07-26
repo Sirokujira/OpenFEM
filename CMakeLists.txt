@@ -49,6 +49,7 @@ set(SOL_SOURCES
     sol/matutil.c
     sol/unstruct.c
     sol/edge.c
+    sol/eddy3d.c
     sol/outputRLC.c
     sol/utils.c
 )

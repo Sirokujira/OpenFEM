@@ -57,6 +57,7 @@ extern "C" {
 #define ANALYSIS_M (1 << 3)		// 静磁場 -> DC インダクタンス行列 (内部インダクタンス込み)
 #define ANALYSIS_F (1 << 4)		// 時間調和渦電流 -> 表皮効果を含む R(f), L(f)
 #define ANALYSIS_E (1 << 5)		// 辺要素 (Nedelec) の自己検証 (3 次元渦電流の基盤)
+#define ANALYSIS_A (1 << 6)		// 3 次元渦電流 (A-φ、辺要素) -> R(f), L(f)
 
 #define MAXPORT (16)			// 導体 (基準導体 + ポート) の最大数
 #define MAXBH   (64)			// B-H 曲線の点数の最大数
@@ -164,6 +165,10 @@ EXTERN int *TriTag;				// [NTri] 物理タグ
 #define MAXTAGMAP (64)
 EXTERN int NRegion, RegionTag[MAXTAGMAP], RegionMat[MAXTAGMAP];
 EXTERN int NElectrode, ElecTag[MAXTAGMAP], ElecCond[MAXTAGMAP];
+// A の接線成分を 0 に固定する面 (B・n = 0 の対称面 / 磁束を通さない境界)
+EXTERN int NAWall, AWallTag[MAXTAGMAP];
+// 3 次元渦電流のゲージ固定 (tree-cotree)。0 = 固定しない (既定)
+EXTERN int GaugeTree;
 
 // 格子 (節点座標)。セル数 Nx x Ny x Nz、節点数 (Nx+1) x (Ny+1) x (Nz+1)
 EXTERN int Nx, Ny, Nz;
