@@ -293,7 +293,9 @@ static void awall_mark(unsigned char *fix)
 // ただし A_t = 0 (awall) の辺は物理的な境界条件なので、木がそれを壊さないよう
 // **awall の辺を先に木へ入れる** (Kruskal の優先処理)。こうすると木から決まる
 // ψ は awall 上で一定になり、awall が連結なら電極上で ψ = 0 にできる
-// = 電極間の電位差 V が保たれる。awall が分断されていると保証できない。
+// = 電極間の電位差 V が保たれる。awall の辺だけで電極が連結していないと
+// ψ が電極毎に別の定数になって V がずれるので、その場合はエラーで落とす
+// (既定の gauge = 0 は常に正しいので、黙って続ける理由が無い)。
 //
 // Z はゲージ不変なので既定 (gauge = 0) では使わない。A・φ 自体が要るときだけ。
 static int uf_find(int *par, int x)
@@ -381,17 +383,28 @@ int solve_eddy3d(FILE *fp_log)
 	const int n = ne + nn;
 	const double omega = 2 * PI * Freq;
 
-	// 導体の導電率 (最大値) から表皮深さの目安を出す
-	double sigmax = 0;
+	// 導体の σ μr (最大値) から表皮深さの目安を出す。
+	// δ = sqrt(2/(ω μ0 μr σ)) なので μr を落とすと磁性導体で δ を過大評価し、
+	// 下の格子分解能の警告が出るべきときに出なくなる。
+	// 異方性のときは向きが分からないので μr の最大値 (= δ の最小値) を取る。
+	// mu6[0..2] は anisomur 未指定なら mur で埋まっている (input_data.c)
+	double sigmax = 0, sigmumax = 0;
 	for (int e = 0; e < NTet; e++) {
-		const double s = Material[TetMat[e]].sigma;
+		const material_t *mt = &Material[TetMat[e]];
+		const double s = mt->sigma;
 		if (s > sigmax) sigmax = s;
+		if (s <= 0) continue;
+		double mr = mt->mu6[0];
+		if (mt->mu6[1] > mr) mr = mt->mu6[1];
+		if (mt->mu6[2] > mr) mr = mt->mu6[2];
+		if (mr <= 0) mr = 1;
+		if ((s * mr) > sigmumax) sigmumax = s * mr;
 	}
 	if (sigmax <= 0) {
 		fprintf(fp_log, "*** analysis A requires a conducting material (sigma > 0)\n");
 		return 1;
 	}
-	const double delta = sqrt(2 / (omega * MU0 * sigmax));
+	const double delta = sqrt(2 / (omega * MU0 * sigmumax));
 	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, edges = %d, unknowns = %d\n",
 		nn, NTet, ne, n);
 	fprintf(fp_log, "  frequency = %.6e [Hz], skin depth = %.4e [m]\n", Freq, delta);
@@ -459,8 +472,13 @@ int solve_eddy3d(FILE *fp_log)
 		}
 		fprintf(fp_log, "  gauge : %d tree edges (%d beyond the wall)\n", ntree, ngauge);
 		if (bad) {
-			fprintf(fp_log, "*** warning : the electrodes are not connected through "
-				"awall edges; the tree gauge may shift the terminal voltage\n");
+			// 木から決まる ψ が電極毎に違う定数になり、端子電圧 V がずれる。
+			// 既定 (gauge = 0) なら常に正しいので、黙って続けずに落とす
+			fprintf(fp_log, "*** the electrodes are not connected through awall edges, "
+				"so the tree gauge would shift the terminal voltage; "
+				"use gauge = 0 (the default), or extend awall so that all electrodes "
+				"share one A_t = 0 surface\n");
+			ierr = 1;
 		}
 	}
 

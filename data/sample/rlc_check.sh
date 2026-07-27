@@ -30,6 +30,8 @@
 #                    (等方性だけだと異方性項が一度も実行されない)
 #   bar_eddy       : 3 次元渦電流 (A-φ)。Z = γL/(2σW tanh(γt/2)) と比較
 #                    (1e2 / 1e4 / 1e5 Hz、許容 0.5% / 0.5% / 2%)
+#                    + gauge = 1 で Z が変わらないこと (ゲージ不変性)
+#                    + 磁性導体 (mur = 50) の Z と、表皮深さ警告が出ること
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -253,6 +255,41 @@ for pair in "1e2 1.37931436e-04 8.37757344e-10 0.005" \
 		status=1
 	fi
 done
+
+# ゲージ固定 (gauge = 1) は Z を変えてはいけない。awall の辺を優先して木に入れる
+# 処理が壊れると端子電圧がずれるので、その不変性を直接検査する
+# (既定 gauge = 0 のケースだけでは edge_tree_gauge() が一度も実行されない)
+sed -e "s/^frequency = .*/frequency = 1e4/" -e "s/^awall = 20/awall = 20\ngauge = 1/" \
+    "$SRC/bar_eddy.ofe" > "$WORK/bar_eddy_gauge.ofe"
+# 木が awall を壊すと ofe 自身が電極の連結を検出して落とすので、
+# その失敗を set -e の打ち切りではなく読める形で報告する
+if (cd "$WORK" && "$OFE" -n 2 bar_eddy_gauge.ofe > /dev/null && "$OFE_POST" > /dev/null); then
+	compare "R(gauge=1, f=1e4) [ohm]" "$(value_of Rf)" 1.41899129e-04 0.005
+	compare "L(gauge=1, f=1e4) [H]" "$(value_of Lf)" 8.30877185e-10 0.005
+else
+	echo "  gauge=1 : the run failed -> NG" >&2
+	sed -n 's/^\*\*\* /    /p' "$WORK/ofe.log" >&2
+	status=1
+fi
+
+# 磁性導体 (mur != 1)。ν = (μ0 μr)^-1 の材料参照を通す唯一のケース。
+# 厳密解は同じ閉形式で γ = sqrt(jω 50 μ0 σ) としたもの
+sed -e "s/^frequency = .*/frequency = 1e2/" -e "s/^region = 1 2/region = 1 2\nmur = 2 50/" \
+    "$SRC/bar_eddy.ofe" > "$WORK/bar_eddy_mur.ofe"
+(cd "$WORK" && "$OFE" -n 2 bar_eddy_mur.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "R(mur=50, f=1e2) [ohm]" "$(value_of Rf)" 1.38932306e-04 0.005
+compare "L(mur=50, f=1e2) [H]" "$(value_of Lf)" 4.18010403e-08 0.005
+# 磁性導体では表皮深さに μr が効く。診断が μ0 だけで計算していると
+# 「刻めている」と誤報するので、警告が出るべきケースで出ることを見る
+sed -e "s/^frequency = .*/frequency = 1e5/" -e "s/^region = 1 2/region = 1 2\nmur = 2 50/" \
+    "$SRC/bar_eddy.ofe" > "$WORK/bar_eddy_mur_coarse.ofe"
+(cd "$WORK" && "$OFE" -n 2 bar_eddy_mur_coarse.ofe > /dev/null) || true
+if grep -q "exceeds the skin depth" "$WORK/ofe.log"; then
+	echo "  skin-depth warning (mur=50, f=1e5) : raised -> OK"
+else
+	echo "  skin-depth warning (mur=50, f=1e5) : missing -> NG" >&2
+	status=1
+fi
 
 # ヒステリシス (Jiles-Atherton) : H = I/W が Ampere の法則で厳密に決まるので、
 # FEM の結果はスカラー J-A モデルを H 掃引で積分した ODE 解と一致しなければならない
