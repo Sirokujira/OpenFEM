@@ -378,10 +378,15 @@ end
 | `tand` | `<material_id> <tand>` | 0 | 誘電正接。`frequency` と併用して誘電損 G を求める |
 | `debye` | `<material_id> <eps_inf> (<deps> <tau>)...` | なし | Debye 分散材料 (多極可)。`frequency` の値で εr と tanδ に展開する |
 | `lorentz` | `<material_id> <eps_inf> (<deps> <f0> <delta>)...` | なし | Lorentz 分散材料 (多極可)。`debye` と混在させると極が足し合わされる |
+| `drude` | `<material_id> <eps_inf> (<fp> <gamma>)...` | なし | Drude 媒質 (多極可)。ωp = 2π·fp、Γ = 2π·gamma。低周波では σ = ε0ωp²/Γ の導体になる |
+| `colecole` | `<material_id> <eps_inf> (<deps> <tau> <alpha>)...` | なし | Cole-Cole 分散 (多極可)。0 ≤ α < 1、α = 0 は Debye に厳密一致 |
 | `anisoeps` | `<material_id> <exx> <eyy> <ezz> [<exy> <eyz> <ezx>]` | 等方性 | 異方性の比誘電率。3 値で対角、6 値で非対角を含む対称テンソル |
 | `anisomur` | `<material_id> <mxx> <myy> <mzz> [<mxy> <myz> <mzx>]` | 等方性 | 異方性の比透磁率 (同上)。ν = (μ0μ̃)⁻¹ をテンソルとして逆転する |
 | `conductorsigma` | `<conductor_id> <sigma>` | なし | 導体の導電率。DC 直列抵抗 Rs の計算に使う |
 | `frequency` | 実数 [Hz] | 0 | 誘電損 (tanδ)・分散材料・渦電流 (`F`) を評価する周波数。0 なら tanδ は無視 |
+| `temperature` | 実数 [°C] | 20 | 動作温度。`tempco` / `conductortempco` と併用する |
+| `tempco` | `<material_id> <alpha> [<T0>]` | なし | 材料の導電率の温度依存 σ(T) = σ0/(1+α(T−T0))。T0 の既定は 20 °C |
+| `conductortempco` | `<conductor_id> <alpha> [<T0>]` | なし | `conductorsigma` で与えた導体に同じモデルを適用する (Rs と `F` が使う系統) |
 | `current` | 実数 [A] | 1 | 静磁場解析の励振電流 |
 | `analysis` | `C` / `L` / `R` / `M` / `F` / `E` / `A` の組 | `C` | 実行する解析 (`E` は辺要素の自己検証、`A` は 3 次元渦電流。どちらも非構造格子専用) |
 | `tline` | `X` / `Y` / `Z` | なし | 伝送線路軸。指定すると単位長あたりの値で出力する (`L`, `M`, `F` は必須) |
@@ -411,6 +416,9 @@ end
 | `plate_line_ac.ofe` | 平行平板線路の渦電流 | 1 次元厳密解 Z = 2γcoth(γt)/(σW) + jωμ0d/W と比較 (1kHz: R 誤差 0.00% / 10MHz: R 誤差 0.12%) |
 | `plate_line_bh.ofe` | 非線形磁性体を挟んだ平行平板線路 | L(I) = B(I/W)d/I + 2μ0t/(3W) と 4 電流で比較 (いずれも誤差 0.00%、Newton 2〜3 回) |
 | `dispersive_plate.ofe` | 多極分散 (Debye + Lorentz) | 1GHz での C, G が展開式と厳密一致 (誤差 0.00%) |
+| `drude_plate.ofe` | Drude 媒質 (fp = 2GHz, Γ = 5GHz) | C, G が展開式と厳密一致。1MHz で G が σ = ε0ωp²/Γ の導体の値に収束 (8 桁)。εr' < 0 は入力エラーで停止 |
+| `colecole_plate.ofe` | Cole-Cole 分散 (α = 0.3) | C, G が展開式と厳密一致。α = 0 が Debye に、ωτ = 1 の C が α に依らないことも恒等式として検査 |
+| `temp_resistor.ofe` | 導電率の温度依存 (銅の α) | R が 1+α(T−T0) にちょうど比例 (4 温度、誤差 0.00%)。Rs 側 (CondSigma) も別に検査 |
 | `aniso_plate.ofe` | 異方性誘電体 (εx,εy,εz = 10,5,2) | C = ε0 εz A/d と厳密一致 (軸の対応の検査) |
 | `aniso_rot.ofe` | 同じテンソルを z 軸まわり 30° 回転 (非対角) | C が回転前と厳密一致 (非対角成分の検査) |
 | `plate_line_bh_aniso.ofe` | 軸毎 B-H (Y/Z は 10 倍硬い) | B が x のみなので X 曲線だけが効く。plate_line_bh と厳密一致 |
@@ -444,13 +452,20 @@ sh data/sample/rlc_check.sh bin/ofe bin/ofe_post /tmp/rlc-check
 - 表皮効果は `F` (渦電流) で扱う。`Rs` と `M` の L は DC 値 (電流一様) なので、
   高周波では `F` を使うこと。格子が表皮深さを刻めていないと R(f) を
   過小評価するため、その場合は警告を出す。
-- 分散材料は Debye / Lorentz の多極 (最大 8 極)。Drude・Cole-Cole は未対応。
+- 分散材料は **Debye / Lorentz / Drude / Cole-Cole** の多極 (合計最大 8 極、混在可)。
+  Drude は準静的な定式化の制約から εr'(ω) > 0 の範囲でのみ使える
+  (ω < ωp では εr' < 0 になり ∇・(ε∇φ) = 0 が正定値でなくなるので入力エラーにする)。
+  Havriliak-Negami・Cole-Davidson は未対応。
 - 異方性は**対称テンソル** (非対角を含む) に対応。非線形との併用は
   軸毎の B-H 曲線 (直交異方性) の形で対応しており、主軸は格子軸に
   一致している必要があります。
+- 温度依存は**導電率のみ** σ(T) = σ0/(1+α(T−T0))。σ の読み出し系統が
+  `Material[].sigma` (`R` / `A` / `E`) と `CondSigma[]` (`Rs` / `F`) の 2 つあるので、
+  それぞれ `tempco` / `conductortempco` で指定する。εr・μr・B-H の温度依存
+  (キュリー点など) は未対応。
 - ヒステリシスは**スカラー Jiles-Atherton** (場の向きが回転しない問題向け)。
-  ベクトルヒステリシス (回転磁界)、異常渦電流損、温度依存は未対応。
-  非線形/ヒステリシスと渦電流 (`F`) の同時解析も未対応。
+  ベクトルヒステリシス (回転磁界)、異常渦電流損は未対応。
+  非線形/ヒステリシスと渦電流 (`F` / `A`) の同時解析も未対応。
 - `M` / `F` は 2 次元断面 (伝送線路) 専用。3 次元の渦電流は `A` (A-φ 定式化、
   非構造格子) で扱う。変位電流を含む全波解析は未対応 (全波は OpenFDTD 側の担当)。
 

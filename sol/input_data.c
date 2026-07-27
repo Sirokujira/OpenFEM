@@ -80,6 +80,8 @@ int input_data(FILE *fp)
 		Material[m].tand  = 0;
 		Material[m].npole = 0;
 		Material[m].einf  = 1;
+		Material[m].tempco = 0;
+		Material[m].temp0 = 20;
 		Material[m].bhaniso = 0;
 		Material[m].ja.on = 0;
 		for (int d = 0; d < 3; d++) Material[m].nbh[d] = 0;
@@ -105,7 +107,10 @@ int input_data(FILE *fp)
 	NSection = 1;
 	for (int p = 0; p < MAXPORT; p++) {
 		CondSigma[p] = 0;
+		CondTempco[p] = 0;
+		CondTemp0[p] = 20;
 	}
+	Temperature = 20;
 
 	MeshMode = 0;
 	strcpy(MeshFile, "");
@@ -232,6 +237,8 @@ int input_data(FILE *fp)
 			Material[NMaterial].tand  = 0;
 			Material[NMaterial].npole = 0;
 			Material[NMaterial].einf  = 1;
+			Material[NMaterial].tempco = 0;
+			Material[NMaterial].temp0 = 20;
 			Material[NMaterial].bhaniso = 0;
 			Material[NMaterial].ja.on = 0;
 			for (int d = 0; d < 3; d++) Material[NMaterial].nbh[d] = 0;
@@ -306,15 +313,22 @@ int input_data(FILE *fp)
 				Material[mid].tand = val;
 			}
 		}
-		else if (!strcmp(strkey, "debye") || !strcmp(strkey, "lorentz")) {
-			// debye   = <material_id> <eps_inf> (<deps> <tau>)...
-			// lorentz = <material_id> <eps_inf> (<deps> <f0> <delta>)...
-			//   εr(ω) = eps_inf + Σ Debye Δε/(1+jωτ)
-			//                   + Σ Lorentz Δε ω0^2/(ω0^2-ω^2+jωδ)
+		else if (!strcmp(strkey, "debye") || !strcmp(strkey, "lorentz")
+		      || !strcmp(strkey, "drude") || !strcmp(strkey, "colecole")) {
+			// debye    = <material_id> <eps_inf> (<deps> <tau>)...
+			// lorentz  = <material_id> <eps_inf> (<deps> <f0> <delta>)...
+			// drude    = <material_id> <eps_inf> (<fp> <gamma>)...
+			// colecole = <material_id> <eps_inf> (<deps> <tau> <alpha>)...
+			//   εr(ω) = eps_inf + Σ Debye    Δε/(1+jωτ)
+			//                   + Σ Lorentz  Δε ω0^2/(ω0^2-ω^2+jωδ)
+			//                   - Σ Drude    ωp^2/(ω^2-jωΓ)          (ωp=2πfp, Γ=2πgamma)
+			//                   + Σ ColeCole Δε/(1+(jωτ)^(1-α))
 			// frequency の値で epsr (実部) と tand (= εr''/εr') に展開する。
 			// 同じ材料に複数行書くと極が追加される (eps_inf は最後の指定が効く)。
-			const int lor = !strcmp(strkey, "lorentz");
-			const int nper = (lor ? 3 : 2);
+			const int ptype = (!strcmp(strkey, "debye")   ? 1 :
+			                   !strcmp(strkey, "lorentz") ? 2 :
+			                   !strcmp(strkey, "drude")   ? 3 : 4);
+			const int nper = ((ptype == 1) ? 2 : (ptype == 3) ? 2 : 3);
 			if ((nval < 2 + nper) || (((nval - 2) % nper) != 0)) {
 				printf(errfmt2, strkey);
 				return 1;
@@ -339,12 +353,20 @@ int input_data(FILE *fp)
 				}
 				const char **tk = (const char **)&token[4 + (q * nper)];
 				pole_t *pl = &mt->pole[mt->npole];
-				pl->type = (lor ? 2 : 1);
+				pl->type = ptype;
 				pl->a = atof(tk[0]);
 				pl->b = atof(tk[1]);
-				pl->c = (lor ? atof(tk[2]) : 0);
-				if ((pl->a < 0) || (pl->b <= 0) || (lor && (pl->c < 0))) {
+				pl->c = ((nper == 3) ? atof(tk[2]) : 0);
+				if ((pl->a < 0) || (pl->b <= 0)) {
 					printf(errfmt2, strkey);
+					return 1;
+				}
+				if ((ptype == 2) && (pl->c < 0)) {			// Lorentz の減衰
+					printf(errfmt2, strkey);
+					return 1;
+				}
+				if ((ptype == 4) && ((pl->c < 0) || (pl->c >= 1))) {	// Cole-Cole の α
+					printf("*** colecole : alpha must be 0 <= alpha < 1\n");
 					return 1;
 				}
 				mt->npole++;
@@ -460,6 +482,46 @@ int input_data(FILE *fp)
 			ElecCond[NElectrode] = cid;
 			if (cid > NPort) NPort = cid;
 			NElectrode++;
+		}
+		else if (!strcmp(strkey, "temperature")) {
+			// temperature = <T [degC]>  : 動作温度。tempco / conductortempco と併用する
+			if (nval < 1) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			Temperature = atof(token[2]);
+		}
+		else if (!strcmp(strkey, "tempco")) {
+			// tempco = <material_id> <alpha> [<T0>]
+			//   σ(T) = σ0 / (1 + α (T - T0))  (金属の標準的な抵抗率モデル)
+			//   例 : 銅 α = 3.93e-3 [1/K], T0 = 20 [degC]
+			if ((nval < 2) || (nval > 3)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			if ((mid < 0) || (mid >= NMaterial)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			Material[mid].tempco = atof(token[3]);
+			if (nval == 3) Material[mid].temp0 = atof(token[4]);
+		}
+		else if (!strcmp(strkey, "conductortempco")) {
+			// conductortempco = <conductor_id> <alpha> [<T0>]
+			//   conductorsigma で与えた導体の σ に同じモデルを適用する
+			//   (Rs と analysis = F が使う CondSigma[] は Material[].sigma とは別系統)
+			if ((nval < 2) || (nval > 3)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int cid = atoi(token[2]);
+			if ((cid < 0) || (cid >= MAXPORT)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			CondTempco[cid] = atof(token[3]);
+			if (nval == 3) CondTemp0[cid] = atof(token[4]);
 		}
 		else if (!strcmp(strkey, "awall")) {
 			// awall = <physical_tag>  : その面で A の接線成分を 0 に固定する
@@ -653,7 +715,7 @@ int input_data(FILE *fp)
 				er += pl->a / den;
 				ei += pl->a * wt / den;
 			}
-			else {
+			else if (pl->type == 2) {
 				// Lorentz : Δε ω0^2 / (ω0^2 - ω^2 + jωδ)
 				const double w0 = 2 * PI * pl->b;
 				const double dl = 2 * PI * pl->c;
@@ -664,13 +726,74 @@ int input_data(FILE *fp)
 				er += pl->a * w0 * w0 * d1 / den;
 				ei += pl->a * w0 * w0 * d2 / den;
 			}
+			else if (pl->type == 3) {
+				// Drude : -ωp^2/(ω^2 - jωΓ) = -ωp^2/(ω^2+Γ^2) - j ωp^2 Γ/(ω(ω^2+Γ^2))
+				// ω << Γ で ε'' -> ωp^2/(ωΓ)、つまり σ = ω ε0 ε'' = ε0 ωp^2/Γ (一定) になる
+				const double wp = 2 * PI * pl->a;
+				const double gm = 2 * PI * pl->b;
+				const double den = (omega_d * omega_d) + (gm * gm);
+				if ((den <= 0) || (omega_d <= 0)) continue;
+				er -= wp * wp / den;
+				ei += wp * wp * gm / (omega_d * den);
+			}
+			else {
+				// Cole-Cole : Δε / (1 + (jωτ)^β),  β = 1-α
+				//   (jωτ)^β = (ωτ)^β (cos(βπ/2) + j sin(βπ/2))
+				//   α = 0 で β = 1、cos = 0、sin = 1 となり Debye に厳密一致する
+				const double beta = 1 - pl->c;
+				const double wt = omega_d * pl->b;
+				if (wt <= 0) {
+					er += pl->a;					// ω = 0 は静的値
+					continue;
+				}
+				const double x = pow(wt, beta);
+				const double cs = cos(beta * PI / 2);
+				const double sn = sin(beta * PI / 2);
+				const double d1 = 1 + (x * cs);
+				const double d2 = x * sn;
+				const double den = (d1 * d1) + (d2 * d2);
+				if (den <= 0) continue;
+				er += pl->a * d1 / den;
+				ei += pl->a * d2 / den;
+			}
 		}
 		if (er <= 0) {
-			printf("*** dispersive material %d has a non-positive epsr at %.4e Hz\n", m, Freq);
+			// 準静的な定式化は ∇・(ε∇φ) = 0 が正定値であることを前提にしている。
+			// Drude 媒質を ω < ωp で使うと ε' < 0 になり、この前提が崩れる
+			printf("*** dispersive material %d has a non-positive epsr (%.4e) at %.4e Hz; "
+				"the quasi-static formulation needs epsr' > 0 "
+				"(a Drude medium below its plasma frequency does not qualify)\n",
+				m, er, Freq);
 			return 1;
 		}
 		mt->epsr = er;
 		mt->tand = ei / er;
+	}
+
+	// 導電率の温度補正 σ(T) = σ0/(1 + α(T-T0))。
+	// σ の読み出し箇所は Material[].sigma (R / A / E) と CondSigma[] (Rs / F) の
+	// 2 系統あるので、**ここで一度だけ**両方に掛ける。こうすれば下流を触らずに済み、
+	// 補正し忘れる箇所が原理的に出ない。α = 0 (既定) なら何も変わらない。
+	for (int m = 0; m < NMaterial; m++) {
+		material_t *mt = &Material[m];
+		if (mt->tempco == 0) continue;
+		const double den = 1 + (mt->tempco * (Temperature - mt->temp0));
+		if (den <= 0) {
+			printf("*** tempco : material %d has a non-positive resistivity factor "
+				"(1 + alpha (T - T0) = %.4e) at T = %.4e degC\n", m, den, Temperature);
+			return 1;
+		}
+		mt->sigma /= den;
+	}
+	for (int p = 0; p < MAXPORT; p++) {
+		if (CondTempco[p] == 0) continue;
+		const double den = 1 + (CondTempco[p] * (Temperature - CondTemp0[p]));
+		if (den <= 0) {
+			printf("*** conductortempco : conductor %d has a non-positive resistivity "
+				"factor (1 + alpha (T - T0) = %.4e) at T = %.4e degC\n", p, den, Temperature);
+			return 1;
+		}
+		CondSigma[p] /= den;
 	}
 
 	// 異方性が指定されていない材料は等方性 (epsr / mur) で埋める

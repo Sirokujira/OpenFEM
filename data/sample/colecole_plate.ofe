@@ -1,0 +1,37 @@
+OpenFEM 1 0
+title = parallel plate with a Cole-Cole dielectric (alpha = 0.3)
+#
+# 平行平板 (1mm x 1mm、間隔 0.2mm) に Cole-Cole 分散を詰める。
+#
+#   εr(ω) = eps_inf + Δε / (1 + (jωτ)^(1-α))
+#   (jωτ)^β = (ωτ)^β (cos(βπ/2) + j sin(βπ/2)),  β = 1-α
+#
+# eps_inf = 2.0, Δε = 3.0, τ = 1.591549431e-10 s (1GHz で ωτ = 1), α = 0.3
+#
+# f = 1 GHz での値:
+#   εr' = 3.500000000,  εr'' = 0.919201182
+#   C = eps0 * εr' * A/d = 1.549482868e-13 [F]
+#   G = ω * eps0 * εr'' * A/d = 2.556873117e-04 [S]
+#
+# 2 つの厳密な性質を検証に使う:
+#  (1) α = 0 は Debye に**厳密に一致**する (β=1 で cos(βπ/2)=0, sin(βπ/2)=1)。
+#      dispersive_plate.ofe の Debye 極と同じ値になること。
+#  (2) ωτ = 1 では実部が α に依らず eps_inf + Δε/2 = 3.5 になる
+#      (x=1 のとき Δε(1+c)/((1+c)^2+s^2) = Δε(1+c)/(2(1+c)) = Δε/2)。
+#      つまり α を変えても C は動かず、G だけが動く。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 4 1e-3
+zmesh = 0 8 0.2e-3
+
+material = 1.0 0
+colecole = 2 2.0 3.0 1.591549431e-10 0.3
+geometry = 2 1 0 1e-3 0 1e-3 0 0.2e-3
+
+conductor = 0 1 0 1e-3 0 1e-3 0      0
+conductor = 1 1 0 1e-3 0 1e-3 0.2e-3 0.2e-3
+
+analysis = C R
+frequency = 1e9
+solver = 20000 500 1e-12
+end

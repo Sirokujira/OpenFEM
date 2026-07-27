@@ -77,9 +77,12 @@ typedef struct {
 	double c;					// 可逆成分の割合 c
 } ja_t;
 
-// 分散材料の極
-//   type 1 (Debye)   : Δε / (1 + jωτ)                     a=Δε, b=τ [s]
-//   type 2 (Lorentz) : Δε ω0^2 / (ω0^2 - ω^2 + jωδ)       a=Δε, b=f0 [Hz], c=δ [Hz]
+// 分散材料の極 (時間因子 e^{jωt}、ε = ε' - jε'')
+//   type 1 (Debye)     : Δε / (1 + jωτ)                   a=Δε,  b=τ [s]
+//   type 2 (Lorentz)   : Δε ω0^2 / (ω0^2 - ω^2 + jωδ)     a=Δε,  b=f0 [Hz], c=δ [Hz]
+//   type 3 (Drude)     : -ωp^2 / (ω^2 - jωΓ)              a=fp [Hz], b=Γ/2π [Hz]
+//   type 4 (Cole-Cole) : Δε / (1 + (jωτ)^(1-α))           a=Δε,  b=τ [s],  c=α (0<=α<1)
+//     α = 0 の Cole-Cole は Debye に厳密に一致する (検証で使う)
 typedef struct {
 	int    type;
 	double a, b, c;
@@ -98,6 +101,9 @@ typedef struct {
 	double eps6[6];				// 比誘電率テンソル
 	double mu6[6];				// 比透磁率テンソル
 	// B-H 曲線 (軸毎)。bhaniso = 0 なら軸 0 の曲線を |B| に対して等方的に使う
+	// 導電率の温度依存 : σ(T) = σ0 / (1 + α (T - T0))  (金属の標準的な抵抗率モデル)
+	double tempco;				// 抵抗率の温度係数 α [1/K] (0 : 温度依存なし)
+	double temp0;				// 基準温度 T0 [degC]
 	int    bhaniso;				// 1 : 軸毎に別の曲線 (直交異方性)
 	int    nbh[3];				// 各軸の点数 (0 : 線形、mu6 を使う)
 	double bh_h[3][MAXBH];		// H [A/m]
@@ -196,6 +202,7 @@ EXTERN double LineLength;		// 等価回路を作るときの線路長 [m] (既�
 EXTERN double Volt;				// 励振電圧 [V]
 EXTERN double Freq;				// 周波数 [Hz] (tanδ による誘電損の計算に使う、0 = 無効)
 EXTERN double Curr;				// 静磁場解析の励振電流 [A]
+EXTERN double Temperature;		// 動作温度 [degC] (tempco と併せて σ を補正する)
 EXTERN int NSection;			// SPICE 等価回路の梯子段数
 
 // 電流掃引 (ヒステリシス解析)。履歴に沿って順に解く
@@ -224,6 +231,8 @@ EXTERN signed char *CellConductor;
 
 // 導体毎の量 ([0] = 基準導体、[1..NPort] = ポート)
 EXTERN double CondSigma[MAXPORT];	// 導電率 [S/m] (0 = 未指定)
+EXTERN double CondTempco[MAXPORT];	// 抵抗率の温度係数 α [1/K] (0 = 温度依存なし)
+EXTERN double CondTemp0[MAXPORT];	// 基準温度 T0 [degC]
 EXTERN double CondArea[MAXPORT];	// 断面積 [m^2] (tline 指定時)
 
 // 抽出結果 (行列は [NPort][NPort]、単位は Tline 指定時 F/m, H/m, S/m)

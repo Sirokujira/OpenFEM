@@ -1,0 +1,39 @@
+OpenFEM 1 0
+title = parallel plate with a Drude medium (plasma frequency + collision rate)
+#
+# 平行平板 (1mm x 1mm、間隔 0.2mm) に Drude 媒質を詰め、frequency の値で
+# 展開した εr(ω) から C と G を求める。
+#
+#   εr(ω) = eps_inf - ωp^2/(ω^2 - jωΓ)         (ωp = 2π fp, Γ = 2π gamma)
+#         = eps_inf - ωp^2/(ω^2+Γ^2) - j ωp^2 Γ/(ω(ω^2+Γ^2))
+#
+# eps_inf = 4.0, fp = 2 GHz, gamma = 5 GHz
+#
+# f = 1 GHz での値:
+#   εr' = 3.846153846154,  εr'' = 0.769230769231  (tanδ = 0.2 ちょうど)
+#   C = eps0 * εr' * A/d = 1.702728426e-13 [F]
+#   G = ω * eps0 * εr'' * A/d = 2.139711646e-04 [S]
+#
+# ω << Γ では ε'' -> ωp^2/(ωΓ) となり σ = ω ε0 ε'' = ε0 ωp^2/Γ (周波数に依らない) に
+# なる。つまり低周波の Drude 媒質はただの導体で、
+#   σ = 4.4506002242e-02 [S/m] -> G = σ A/d = 2.2253001121e-04 [S]
+# に収束する (f = 1 MHz で 4 桁一致)。この極限は rlc_check.sh でも見る。
+#
+# ω < ωp では εr' < 0 になり準静的な定式化 (∇・(ε∇φ) = 0 が正定値) が破綻するので、
+# その場合はエラーで停止する。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 4 1e-3
+zmesh = 0 8 0.2e-3
+
+material = 1.0 0
+drude = 2 4.0 2e9 5e9
+geometry = 2 1 0 1e-3 0 1e-3 0 0.2e-3
+
+conductor = 0 1 0 1e-3 0 1e-3 0      0
+conductor = 1 1 0 1e-3 0 1e-3 0.2e-3 0.2e-3
+
+analysis = C R
+frequency = 1e9
+solver = 20000 500 1e-12
+end

@@ -1,0 +1,30 @@
+OpenFEM 1 0
+title = resistor bar with a temperature-dependent conductivity
+#
+# resistor_bar.ofe と同じ形状 (1mm x 1mm x 0.2mm、σ0 = 1e3 S/m) を、
+# 銅の温度係数で 85 degC の動作温度で解く。
+#
+#   σ(T) = σ0 / (1 + α (T - T0)),  α = 3.93e-3 [1/K], T0 = 20 [degC]
+#
+# 抵抗はこの因子にちょうど比例するので厳密解がある:
+#   R(20 degC) = d/(σ0 A) = 0.2e-3 / (1e3 * 1e-6) = 2.0e-1 [ohm]
+#   1 + α(85-20) = 1 + 3.93e-3 * 65 = 1.25545
+#   R(85 degC) = 2.0e-1 * 1.25545 = 2.5109e-01 [ohm]
+#
+# temperature を書かなければ既定は 20 degC = T0 なので従来と完全に一致する。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 4 1e-3
+zmesh = 0 8 0.2e-3
+
+material = 1.0 1e3
+tempco = 2 3.93e-3 20
+temperature = 85
+geometry = 2 1 0 1e-3 0 1e-3 0 0.2e-3
+
+conductor = 0 1 0 1e-3 0 1e-3 0      0
+conductor = 1 1 0 1e-3 0 1e-3 0.2e-3 0.2e-3
+
+analysis = R
+solver = 20000 500 1e-12
+end

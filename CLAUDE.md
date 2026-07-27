@@ -56,6 +56,12 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
 - 非線形磁性体 (`bh`) は Newton-Raphson。ν の逐次代入は飽和領域で発散するので
   使わない。残差とヤコビアンで ν の評価点 (Gauss 点) を揃えること。
 - 収束判定は相対残差。`solver` キーの既定は `10000 100 1e-9`。
+- 分散材料 (`debye`/`lorentz`/`drude`/`colecole`) は時間因子 e^{jωt}、ε = ε' − jε''。
+  `er` に ε'、`ei` に **+ε''** (損失が正) を足す。極を足すときはこの符号規約に従う。
+  Cole-Cole は α = 0 で Debye に厳密一致するので、その恒等式を検証に使う。
+- 温度依存は σ の読み出し**手前で一度だけ**掛ける (`input_data.c` の末尾)。σ の
+  読み出しは `Material[].sigma` と `CondSigma[]` の 2 系統あり、下流で個別に
+  補正すると必ず漏れる。
 - 3 次元渦電流 (`analysis = A`) は A (辺) と φ (節点) の連成。**節点側の式を
   jω で割ると複素対称**になるので COCG がそのまま使える。この形にしないと
   (1,2) = TG と (2,1) = jωGᵀT が食い違って対称でなくなる。

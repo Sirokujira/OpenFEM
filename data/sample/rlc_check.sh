@@ -17,6 +17,9 @@
 #   plate_line_ac  : R(f), L(f) を 1 次元厳密解と比較 (1kHz / 10MHz、許容 2%)
 #   plate_line_bh  : 非線形磁性体 L(I) を 1 次元厳密解と比較 (4 電流、許容 1%)
 #   dispersive_plate : 多極分散 (Debye+Lorentz) の C, G  (厳密、許容 0.1%)
+#   drude_plate    : Drude 媒質の C, G と、低周波で σ = ε0ωp^2/Γ の導体に収束すること
+#   colecole_plate : Cole-Cole の C, G。α=0 が Debye に厳密一致することも見る
+#   temp_resistor  : σ(T) = σ0/(1+α(T-T0)) で R が厳密に比例すること (4 温度)
 #   aniso_plate    : 異方性誘電体の C = eps0 εz A/d      (厳密、許容 0.1%)
 #   aniso_rot      : 非対角テンソル (z 軸 30 度回転) でも同値 (厳密、許容 0.1%)
 #   plate_line_bh_aniso : 軸毎 B-H。B は x のみなので X 曲線だけが効くこと
@@ -142,6 +145,61 @@ echo "[dispersive_plate] Debye + Lorentz multi-pole at 1 GHz"
 run_case dispersive_plate
 compare "C [F]" "$(value_of C)" 2.123808563e-13 0.001
 compare "G [S]" "$(value_of G)" 4.773870170e-04 0.001
+
+# Drude 媒質 : 低周波では σ = ε0 ωp^2/Γ の導体に厳密に収束する
+echo "[drude_plate] Drude medium (fp = 2 GHz, gamma = 5 GHz) at 1 GHz"
+run_case drude_plate
+compare "C [F]" "$(value_of C)" 1.702728426e-13 0.001
+compare "G [S]" "$(value_of G)" 2.139711646e-04 0.001
+# ω << Γ の極限で G -> σ A/d、σ = ε0 ωp^2/Γ = 4.4506002242e-02 S/m
+sed "s/^frequency = .*/frequency = 1e6/" "$SRC/drude_plate.ofe" > "$WORK/drude_lf.ofe"
+(cd "$WORK" && "$OFE" -n 2 drude_lf.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "G(f=1MHz) [S] -> sigma A/d" "$(value_of G)" 2.2253001121e-04 0.001
+# ω < ωp では εr' < 0 になり準静的定式化が成り立たないので落ちること
+sed -e "s/^drude = .*/drude = 2 4.0 2e9 1e8/" -e "s/^frequency = .*/frequency = 5e8/" \
+    "$SRC/drude_plate.ofe" > "$WORK/drude_neg.ofe"
+if (cd "$WORK" && "$OFE" -n 2 drude_neg.ofe > /dev/null 2>&1); then
+	echo "  epsr' < 0 rejected : no -> NG" >&2
+	status=1
+else
+	echo "  epsr' < 0 rejected : yes -> OK"
+fi
+
+# Cole-Cole 分散。α = 0 が Debye に厳密一致することと、ωτ = 1 で実部が α に
+# 依らないことの 2 つを恒等式として使う
+echo "[colecole_plate] Cole-Cole (alpha = 0.3) at 1 GHz"
+run_case colecole_plate
+compare "C [F]" "$(value_of C)" 1.549482868e-13 0.001
+compare "G [S]" "$(value_of G)" 2.556873117e-04 0.001
+sed "s/^colecole = .*/colecole = 2 2.0 3.0 1.591549431e-10 0.0/" \
+    "$SRC/colecole_plate.ofe" > "$WORK/cc_a0.ofe"
+(cd "$WORK" && "$OFE" -n 2 cc_a0.ofe > /dev/null && "$OFE_POST" > /dev/null)
+cc0c=$(value_of C); cc0g=$(value_of G)
+sed "s/^colecole = .*/debye = 2 2.0 3.0 1.591549431e-10/" \
+    "$SRC/colecole_plate.ofe" > "$WORK/cc_db.ofe"
+(cd "$WORK" && "$OFE" -n 2 cc_db.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "C (alpha=0) == Debye" "$cc0c" "$(value_of C)" 1e-12
+compare "G (alpha=0) == Debye" "$cc0g" "$(value_of G)" 1e-12
+# ωτ = 1 では実部が α に依らない (虚部だけ動く)
+sed "s/^colecole = .*/colecole = 2 2.0 3.0 1.591549431e-10 0.6/" \
+    "$SRC/colecole_plate.ofe" > "$WORK/cc_a6.ofe"
+(cd "$WORK" && "$OFE" -n 2 cc_a6.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "C (alpha=0.6) == C (alpha=0)" "$(value_of C)" "$cc0c" 1e-12
+compare "G (alpha=0.6) [S]" "$(value_of G)" 1.355707190e-04 0.001
+
+# 導電率の温度依存 σ(T) = σ0/(1+α(T-T0))。R はこの因子にちょうど比例する
+echo "[temp_resistor] sigma(T) = sigma0/(1+alpha(T-T0)), copper alpha"
+for pair in "20 2.0000000e-01" "85 2.5109000e-01" "-40 1.5284000e-01" "125 2.8253000e-01"; do
+	set -- $pair
+	sed "s/^temperature = .*/temperature = $1/" "$SRC/temp_resistor.ofe" > "$WORK/temp_run.ofe"
+	(cd "$WORK" && "$OFE" -n 2 temp_run.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "R(T=$1 degC) [ohm]" "$(value_of R)" "$2" 0.001
+done
+# CondSigma[] は Material[].sigma とは別系統なので、Rs 側も温度が効くこと
+sed -e "s/^analysis = .*/conductortempco = 0 3.93e-3 20\nconductortempco = 1 3.93e-3 20\ntemperature = 85\n&/" \
+    "$SRC/plate_line_dc.ofe" > "$WORK/temp_rs.ofe"
+(cd "$WORK" && "$OFE" -n 2 temp_rs.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "Rs(T=85 degC) [ohm/m]" "$(value_of Rs)" 8.658275862e-01 0.001
 
 echo "[aniso_plate] anisotropic eps (10, 5, 2), field along z"
 run_case aniso_plate
