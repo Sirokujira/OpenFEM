@@ -50,6 +50,7 @@ set(SOL_SOURCES
     sol/unstruct.c
     sol/edge.c
     sol/eddy3d.c
+    sol/fieldout.c
     sol/outputRLC.c
     sol/utils.c
 )

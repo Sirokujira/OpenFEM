@@ -20,6 +20,8 @@
 #   drude_plate    : Drude 媒質の C, G と、低周波で σ = ε0ωp^2/Γ の導体に収束すること
 #   colecole_plate : Cole-Cole の C, G。α=0 が Debye に厳密一致することも見る
 #   temp_resistor  : σ(T) = σ0/(1+α(T-T0)) で R が厳密に比例すること (4 温度)
+#   fieldout       : 書き出した場から集中定数を作り直して元の値と比べる
+#                    (∫½ε|E|²dV = ½CV²、∫|J|²/(2σ)dV = ½Re(VI*))
 #   input lint     : 選んだ解析が読まないキーを警告すること (5 つの罠) と、
 #                    正しい 17 ケースで警告が 1 件も出ないこと
 #   aniso_plate    : 異方性誘電体の C = eps0 εz A/d      (厳密、許容 0.1%)
@@ -352,6 +354,71 @@ else
 	echo "  skin-depth warning (mur=50, f=1e5) : missing -> NG" >&2
 	status=1
 fi
+
+# 場の出力 (fieldout = 1)。**書き出した場から集中定数を作り直して**元の抽出値と
+# 比べる。厳密な恒等式なので、場が壊れていれば必ず落ちる
+#   ∫ ½ε|E|² dV = ½CV²          (静電界)
+#   ∫ |J|²/(2σ) dV = ½Re(V I*)  (渦電流。J が一様な低周波では厳密)
+echo "[fieldout] the written field must reproduce the extracted lumped values"
+vtk() { awk -v arr="$2" -v axis="${3:-0}" -v xcut="${4:-}" -f "$SRC/vtkcheck.awk" \
+	"$WORK/ofe_field.vtk" | awk -v k="$1" '$1 == k { print $2 }'; }
+
+# (0) 向き・分母・並べ替えの検査。直列 2 材料で E が区分一様になり、
+#     3 軸とも長さも分割数も違い、通電方向は不等間隔にしてある。
+#     体積加重平均は**符号つき**なので E = -∇φ の向きの誤りが落ちる。
+#     xcut で界面の両側に分けた平均は、セルと座標の対応が崩れると入れ替わる。
+for pair in "x 0" "y 1"; do
+	set -- $pair
+	cp "$SRC/field_probe_$1.ofe" "$WORK/"
+	(cd "$WORK" && "$OFE" -n 2 "field_probe_$1.ofe" > /dev/null)
+	compare "mean E_$1 (signed) [V/m]" "$(vtk mean$2 E_R_port1 $2 0.4e-3)" -1.0e3 1e-6
+	compare "E_$1 below the interface [V/m]" "$(vtk lo E_R_port1 $2 0.4e-3)" -1.8181818182e3 1e-6
+	compare "E_$1 above the interface [V/m]" "$(vtk hi E_R_port1 $2 0.4e-3)" -4.5454545455e2 1e-6
+	o=$(vtk amax0 E_R_port1); p=$(vtk amax1 E_R_port1); q=$(vtk amax2 E_R_port1)
+	res=$(awk -v a="$o" -v b="$p" -v c="$q" -v ax="$2" \
+		'BEGIN{ m = (ax == 0) ? (b > c ? b : c) : (a > c ? a : c)
+		        printf "%s", (m < 1e-6) ? "OK" : "NG" }')
+	echo "  E transverse to $1 ~ 0 : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+
+# (1) 構造格子 + 静電界 : E は誘電体内で厳密に一様、C は恒等式で戻る
+
+awk '/^analysis = /{print "fieldout = 1"} {print}' "$SRC/parallel_plate.ofe" > "$WORK/fld_pp.ofe"
+(cd "$WORK" && "$OFE" -n 2 fld_pp.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "field vol [m^3]" "$(vtk vol E_C_port1)" 2.0e-10 1e-9
+compare "|E| min [V/m]" "$(vtk vmin E_C_port1)" 5.0e3 1e-9
+compare "|E| max [V/m]" "$(vtk vmax E_C_port1)" 5.0e3 1e-9
+compare "mean E_z (signed) [V/m]" "$(vtk mean2 E_C_port1)" -5.0e3 1e-9
+res=$(awk -v a="$(vtk amax0 E_C_port1)" -v b="$(vtk amax1 E_C_port1)" \
+	'BEGIN{ printf "%s", ((a < 1e-3) && (b < 1e-3)) ? "OK" : "NG" }')
+echo "  E transverse ~ 0 : max|Ex|=$(vtk amax0 E_C_port1) -> $res"
+case "$res" in NG*) status=1 ;; esac
+cfld=$(awk -v i2="$(vtk int2 E_C_port1)" 'BEGIN{ printf "%.10e", 8.8541878128e-12 * 4 * i2 }')
+compare "C from the field [F]" "$cfld" "$(value_of C)" 1e-6
+
+# (2) 非構造格子 + 静電界 : 同じ恒等式が四面体でも成り立つこと
+awk '/^analysis = /{print "fieldout = 1"} {print}' "$SRC/box_tet.ofe" > "$WORK/fld_box.ofe"
+(cd "$WORK" && "$OFE" -n 2 fld_box.ofe > /dev/null && "$OFE_POST" > /dev/null)
+cfld=$(awk -v i2="$(vtk int2 E_C_port1)" 'BEGIN{ printf "%.10e", 8.8541878128e-12 * 4 * i2 }')
+compare "C from the field (tet) [F]" "$cfld" "$(value_of C)" 1e-6
+# |E|^2 の恒等式は符号に無感なので、四面体側も符号つきで見る (E = -∇φ の向き)
+compare "mean E_z (tet, signed) [V/m]" "$(vtk mean2 E_C_port1)" -5.0e3 1e-9
+
+# (3) 3 次元渦電流 : 場の損失と端子電力が一致すること。
+#     J は重心で評価するので、J が一様な低周波でのみ厳密になる (100 Hz で 8 桁)
+sed -e "s/^frequency = .*/frequency = 1e2/" \
+    -e "s/^analysis = A/fieldout = 1\nanalysis = A/" "$SRC/bar_eddy.ofe" > "$WORK/fld_bar.ofe"
+(cd "$WORK" && "$OFE" -n 2 fld_bar.ofe > /dev/null)
+compare "field vol (tet) [m^3]" "$(vtk vol J_A_re)" 5.0e-10 1e-9
+# DC の電流密度は σ V / L = 5.8e7 / 2e-3 = 2.9e10 [A/m^2] で一様
+compare "|J| max [A/m^2]" "$(vtk vmax J_A_re)" 2.9e10 1e-4
+compare "|J| min [A/m^2]" "$(vtk vmin J_A_re)" 2.9e10 1e-4
+compare "mean J_x (signed) [A/m^2]" "$(vtk mean0 J_A_re)" -2.9e10 1e-4
+pf=$(awk -v r="$(vtk int2 J_A_re)" -v m="$(vtk int2 J_A_im)" \
+	'BEGIN{ printf "%.10e", (r + m) / (2 * 5.8e7) }')
+pt=$(awk '/port 1 : I =/{ printf "%.10e", 0.5 * $6 }' "$WORK/ofe.log")
+compare "ohmic loss from the field [W]" "$pf" "$pt" 1e-6
 
 # 非導電領域 (空気) を含む 3 次元渦電流。空気層は界面で Robin 条件に潰れるので
 # 1 次元の閉形式が残る。**空気が効いていることを見るには L を見る必要がある**

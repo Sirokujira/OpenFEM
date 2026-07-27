@@ -140,6 +140,9 @@ int input_data(FILE *fp)
 	NAWall = 0;
 	GaugeTree = 0;
 	NInputWarn = 0;
+	FieldOut = 0;
+	NFieldN = 0;
+	NFieldC = 0;
 
 	NSweep = 0;
 	JaSub = 20;
@@ -544,6 +547,16 @@ int input_data(FILE *fp)
 			}
 			CondTempco[cid] = atof(token[3]);
 			if (nval == 3) CondTemp0[cid] = atof(token[4]);
+		}
+		else if (!strcmp(strkey, "fieldout")) {
+			// fieldout = 0|1  : 解いた場を ofe_field.vtk (VTK legacy ASCII) に書く
+			//   節点スカラー (φ / Az) と、そこから作った要素ベクトル (E / B)、
+			//   要素の材料番号・導体番号を出す。既定 0 で従来と完全に一致する
+			if (nval < 1) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			FieldOut = (atoi(token[2]) != 0);
 		}
 		else if (!strcmp(strkey, "awall")) {
 			// awall = <physical_tag>  : その面で A の接線成分を 0 に固定する

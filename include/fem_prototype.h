@@ -53,6 +53,14 @@ int solve_eddy3d(FILE *);
 // assemble.c (公開した材料係数)
 void material_coef_pub(int, int, double [6]);
 
+// fieldout.c
+int64_t num_cell(void);
+void field_add_node(const char *, const double *);
+void field_add_cellvec(const char *, const double *);
+void field_add_grad(const char *, const double *, int);
+void field_free(void);
+int field_write(FILE *);
+
 // crs.c
 void crs_alloc(crs_t *);
 void crs_free(crs_t *);

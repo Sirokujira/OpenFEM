@@ -41,6 +41,7 @@ extern "C" {
 #define FN_out   "ofe.out"
 #define FN_csv   "rlc.csv"
 #define FN_spice "ofe_circuit.sp"
+#define FN_field "ofe_field.vtk"
 
 // 数学・物理定数 (OpenFDTD の ofd.h と同じ定義)
 #define PI     (4.0 * atan(1.0))
@@ -204,6 +205,15 @@ EXTERN double Freq;				// 周波数 [Hz] (tanδ による誘電損の計算に�
 EXTERN double Curr;				// 静磁場解析の励振電流 [A]
 EXTERN double Temperature;		// 動作温度 [degC] (tempco と併せて σ を補正する)
 EXTERN int NSection;			// SPICE 等価回路の梯子段数
+
+// 場の出力 (fieldout キー)。solve() の途中でしか手元に無い解を溜めて最後に書く
+#define MAXFIELD (16)
+EXTERN int FieldOut;			// 1 : ofe_field.vtk を書く (既定 0)
+EXTERN int NFieldN, NFieldC;
+EXTERN char FieldNName[MAXFIELD][64];
+EXTERN double *FieldN[MAXFIELD];	// [num_node()] 節点スカラー
+EXTERN char FieldCName[MAXFIELD][64];
+EXTERN double *FieldC[MAXFIELD];	// [3*num_cell()] 要素ベクトル
 
 // 入力解釈で出た警告 (ofe.log を開く前に走るので溜めておき、後でログにも出す)
 #define MAXINWARN (16)

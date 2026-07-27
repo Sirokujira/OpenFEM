@@ -398,6 +398,10 @@ static int solve_magnetostatic(FILE *fp_log)
 		}
 		Mmat[0] = w / (Curr * Curr) * scale;
 		HaveM = 1;
+		if (FieldOut) {
+			field_add_node("Az_M", az);
+			field_add_grad("B_M", az, 1);
+		}
 
 		crs_free(&J);
 		free(res);
@@ -435,6 +439,13 @@ static int solve_magnetostatic(FILE *fp_log)
 				w += b[j - 1][i] * az[i];
 			}
 			Mmat[((k - 1) * np) + (j - 1)] = w / (Curr * Curr) * scale;
+		}
+		if (FieldOut) {
+			char nm[BUFSIZ];
+			sprintf(nm, "Az_M_port%d", k);
+			field_add_node(nm, az);
+			sprintf(nm, "B_M_port%d", k);
+			field_add_grad(nm, az, 1);
 		}
 	}
 
@@ -719,6 +730,16 @@ int solve(FILE *fp_log)
 			for (int j = 1; j <= np; j++) {
 				mat[((k - 1) * np) + (j - 1)] = q[j] / Volt * scale;
 			}
+			// 場の出力 (fieldout = 1 のときだけ溜める)
+			if (FieldOut) {
+				char nm[BUFSIZ];
+				const char *mn = ((mode == 0) ? "C" : (mode == 1) ? "L" : "R");
+				sprintf(nm, "phi_%s_port%d", mn, k);
+				field_add_node(nm, phi);
+				sprintf(nm, "E_%s_port%d", mn, k);
+				field_add_grad(nm, phi, 0);
+			}
+
 			// 自己項のエネルギーによる検算 (2W/V^2 = C[k][k])
 			if (mode != 2) {
 				const double cself = 2 * energy / (Volt * Volt) * scale;
@@ -780,6 +801,10 @@ int solve(FILE *fp_log)
 	if (!ierr && (Analysis & ANALYSIS_A)) {
 		ierr |= solve_eddy3d(fp_log);
 	}
+
+	// 溜めた場を書き出す
+	if (!ierr) ierr |= field_write(fp_log);
+	field_free();
 
 	return ierr;
 }

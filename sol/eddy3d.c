@@ -549,6 +549,62 @@ int solve_eddy3d(FILE *fp_log)
 			ui[i] += xdi[i];
 		}
 
+		// 場の出力 : 四面体毎に B = ∇×A と J = -σ(jωA + ∇φ) を作る
+		// (∇×W_e = 2∇λ_a×∇λ_b、W_e は要素内で 1 次なので重心で評価する)
+		if (FieldOut && (jc == 1)) {
+			double *bv = (double *)malloc((size_t)NTet * 3 * sizeof(double));
+			double *jr = (double *)malloc((size_t)NTet * 3 * sizeof(double));
+			double *ji = (double *)malloc((size_t)NTet * 3 * sizeof(double));
+			for (int e = 0; e < NTet; e++) {
+				double g[4][3], vol;
+				for (int c = 0; c < 3; c++) {
+					bv[(e * 3) + c] = jr[(e * 3) + c] = ji[(e * 3) + c] = 0;
+				}
+				if (tet_grad_pub(&Tet[e * 4], g, &vol)) continue;
+				const int32_t *ed = &TetEdge[e * 6];
+				const signed char *sg = &TetEdgeSgn[e * 6];
+				const int32_t *nd = &Tet[e * 4];
+				double br[3] = {0, 0, 0}, bi[3] = {0, 0, 0};
+				double ar[3] = {0, 0, 0}, ai[3] = {0, 0, 0};
+				for (int k = 0; k < 6; k++) {
+					const int a = EDGE_NODE3[k][0], b = EDGE_NODE3[k][1];
+					const double cr[3] = {
+						(g[a][1] * g[b][2]) - (g[a][2] * g[b][1]),
+						(g[a][2] * g[b][0]) - (g[a][0] * g[b][2]),
+						(g[a][0] * g[b][1]) - (g[a][1] * g[b][0])};
+					const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
+					// ∇×A : ∇×W_e = 2 cr
+					for (int c = 0; c < 3; c++) {
+						br[c] += 2 * wr * cr[c];
+						bi[c] += 2 * wi * cr[c];
+					}
+					// 重心での W_e = (λ_a ∇λ_b - λ_b ∇λ_a)|_{λ=1/4} = (∇λ_b - ∇λ_a)/4
+					for (int c = 0; c < 3; c++) {
+						ar[c] += wr * (g[b][c] - g[a][c]) / 4;
+						ai[c] += wi * (g[b][c] - g[a][c]) / 4;
+					}
+				}
+				double pr[3] = {0, 0, 0}, pi[3] = {0, 0, 0};	// ∇φ
+				for (int a = 0; a < 4; a++) {
+					for (int c = 0; c < 3; c++) {
+						pr[c] += ur[ne + nd[a]] * g[a][c];
+						pi[c] += ui[ne + nd[a]] * g[a][c];
+					}
+				}
+				const double sg2 = Material[TetMat[e]].sigma;
+				for (int c = 0; c < 3; c++) {
+					bv[(e * 3) + c] = br[c];		// |B| は実部で代表させる
+					// J = -σ(jωA + ∇φ)、jωA = jω(ar + j ai) = -ω ai + j ω ar
+					jr[(e * 3) + c] = -sg2 * ((-omega * ai[c]) + pr[c]);
+					ji[(e * 3) + c] = -sg2 * ((omega * ar[c]) + pi[c]);
+				}
+			}
+			field_add_cellvec("B_A_re", bv);
+			field_add_cellvec("J_A_re", jr);
+			field_add_cellvec("J_A_im", ji);
+			free(bv); free(jr); free(ji);
+		}
+
 		// 電極上の反作用 -> 流れ込む電流
 		// 節点行は 1/(jω) 倍してあるので、元の残差は jω 倍して戻す
 		double qr[MAXPORT], qi[MAXPORT];
