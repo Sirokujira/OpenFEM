@@ -14,6 +14,7 @@ extern "C" {
 // input_data.c
 int input_data(FILE *);
 void input_warn(const char *, ...);
+int material_freq(void);
 
 // setup.c
 int setup(void);

@@ -73,6 +73,105 @@ void input_warn(const char *fmt, ...)
 }
 
 
+// 分散材料を現在の Freq で展開し、異方性が未指定の材料を等方性で埋める。
+// **周波数掃引では各点で呼び直す**ので、何度呼んでも結果が同じ (べき等) である
+// 必要がある。極 (pole[]) と einf は不変なので epsr/tand は毎回作り直せるし、
+// eps6 は anisoeps が明示されていないときだけ epsr から埋め直す。
+// 導電率の温度補正はここではやらない (掛け算が累積するので入力解釈で 1 回だけ)。
+int material_freq(void)
+{
+	// 分散材料を frequency の値で展開する
+	// (frequency 未指定なら静的な εr(0) = ε∞ + ΣΔε、損失なしとして扱う)
+
+	const double omega_d = 2 * PI * Freq;
+	for (int m = 0; m < NMaterial; m++) {
+		material_t *mt = &Material[m];
+		if (mt->npole <= 0) continue;
+		double er = mt->einf, ei = 0;
+		for (int q = 0; q < mt->npole; q++) {
+			const pole_t *pl = &mt->pole[q];
+			if (pl->type == 1) {
+				// Debye : Δε / (1 + jωτ)
+				const double wt = omega_d * pl->b;
+				const double den = 1 + (wt * wt);
+				er += pl->a / den;
+				ei += pl->a * wt / den;
+			}
+			else if (pl->type == 2) {
+				// Lorentz : Δε ω0^2 / (ω0^2 - ω^2 + jωδ)
+				const double w0 = 2 * PI * pl->b;
+				const double dl = 2 * PI * pl->c;
+				const double d1 = (w0 * w0) - (omega_d * omega_d);
+				const double d2 = omega_d * dl;
+				const double den = (d1 * d1) + (d2 * d2);
+				if (den <= 0) continue;
+				er += pl->a * w0 * w0 * d1 / den;
+				ei += pl->a * w0 * w0 * d2 / den;
+			}
+			else if (pl->type == 3) {
+				// Drude : -ωp^2/(ω^2 - jωΓ) = -ωp^2/(ω^2+Γ^2) - j ωp^2 Γ/(ω(ω^2+Γ^2))
+				// ω << Γ で ε'' -> ωp^2/(ωΓ)、つまり σ = ω ε0 ε'' = ε0 ωp^2/Γ (一定) になる
+				const double wp = 2 * PI * pl->a;
+				const double gm = 2 * PI * pl->b;
+				const double den = (omega_d * omega_d) + (gm * gm);
+				if ((den <= 0) || (omega_d <= 0)) continue;
+				er -= wp * wp / den;
+				ei += wp * wp * gm / (omega_d * den);
+			}
+			else {
+				// Cole-Cole : Δε / (1 + (jωτ)^β),  β = 1-α
+				//   (jωτ)^β = (ωτ)^β (cos(βπ/2) + j sin(βπ/2))
+				//   α = 0 で β = 1、cos = 0、sin = 1 となり Debye に厳密一致する
+				const double beta = 1 - pl->c;
+				const double wt = omega_d * pl->b;
+				if (wt <= 0) {
+					er += pl->a;					// ω = 0 は静的値
+					continue;
+				}
+				const double x = pow(wt, beta);
+				const double cs = cos(beta * PI / 2);
+				const double sn = sin(beta * PI / 2);
+				const double d1 = 1 + (x * cs);
+				const double d2 = x * sn;
+				const double den = (d1 * d1) + (d2 * d2);
+				if (den <= 0) continue;
+				er += pl->a * d1 / den;
+				ei += pl->a * d2 / den;
+			}
+		}
+		if (er <= 0) {
+			// 準静的な定式化は ∇・(ε∇φ) = 0 が正定値であることを前提にしている。
+			// Drude 媒質を ω < ωp で使うと ε' < 0 になり、この前提が崩れる
+			printf("*** dispersive material %d has a non-positive epsr (%.4e) at %.4e Hz; "
+				"the quasi-static formulation needs epsr' > 0 "
+				"(a Drude medium below its plasma frequency does not qualify)\n",
+				m, er, Freq);
+			return 1;
+		}
+		mt->epsr = er;
+		mt->tand = ei / er;
+	}
+
+	// 異方性が指定されていない材料は等方性 (epsr / mur) で埋める
+
+	for (int m = 0; m < NMaterial; m++) {
+		// **eps6[0] <= 0 で判定してはいけない。** 2 回目以降は既に埋まっていて
+		// スキップされ、周波数掃引で epsr(ω) が eps6 に反映されなくなる
+		// (実測: 分散材料の C が最初の周波数で凍結した)
+		if (!Material[m].eps6_given) {
+			Material[m].eps6[0] = Material[m].eps6[1] = Material[m].eps6[2] = Material[m].epsr;
+			Material[m].eps6[3] = Material[m].eps6[4] = Material[m].eps6[5] = 0;
+		}
+		if (Material[m].mu6[0] <= 0) {
+			Material[m].mu6[0] = Material[m].mu6[1] = Material[m].mu6[2] = Material[m].mur;
+			Material[m].mu6[3] = Material[m].mu6[4] = Material[m].mu6[5] = 0;
+		}
+	}
+
+	return 0;
+}
+
+
 int input_data(FILE *fp)
 {
 	int    nline = 0;
@@ -103,6 +202,7 @@ int input_data(FILE *fp)
 		Material[m].einf  = 1;
 		Material[m].tempco = 0;
 		Material[m].temp0 = 20;
+		Material[m].eps6_given = 0;
 		Material[m].bhaniso = 0;
 		Material[m].ja.on = 0;
 		for (int d = 0; d < 3; d++) Material[m].nbh[d] = 0;
@@ -145,6 +245,7 @@ int input_data(FILE *fp)
 	NFieldC = 0;
 
 	NSweep = 0;
+	NFreqSweep = 0;
 	JaSub = 20;
 
 	NlMaxiter = 50;
@@ -264,6 +365,7 @@ int input_data(FILE *fp)
 			Material[NMaterial].einf  = 1;
 			Material[NMaterial].tempco = 0;
 			Material[NMaterial].temp0 = 20;
+			Material[NMaterial].eps6_given = 0;
 			Material[NMaterial].bhaniso = 0;
 			Material[NMaterial].ja.on = 0;
 			for (int d = 0; d < 3; d++) Material[NMaterial].nbh[d] = 0;
@@ -415,6 +517,7 @@ int input_data(FILE *fp)
 			for (int d = 0; d < nval - 1; d++) {
 				v[d] = atof(token[3 + d]);
 			}
+			if (!strcmp(strkey, "anisoeps")) Material[mid].eps6_given = 1;
 			// 対角成分は正、テンソルは正定値であること
 			if ((v[0] <= 0) || (v[1] <= 0) || (v[2] <= 0)) {
 				printf(errfmt2, strkey);
@@ -547,6 +650,49 @@ int input_data(FILE *fp)
 			}
 			CondTempco[cid] = atof(token[3]);
 			if (nval == 3) CondTemp0[cid] = atof(token[4]);
+		}
+		else if (!strcmp(strkey, "frequencysweep")) {
+			// frequencysweep = <f1> <f2> ...        : 周波数を明示列挙
+			//                = log <fmin> <fmax> <n> : 対数等分 n 点
+			//                = lin <fmin> <fmax> <n> : 線形等分 n 点
+			//   各点で分散材料を展開し直して解き直し、ofe_sweep.csv に 1 行ずつ出す
+			if (nval < 1) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int islog = !strcmp(token[2], "log");
+			if (islog || !strcmp(token[2], "lin")) {
+				if (nval != 4) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+				const double f0 = atof(token[3]), f1 = atof(token[4]);
+				const int nf = atoi(token[5]);
+				if ((f0 <= 0) || (f1 < f0) || (nf < 1) || (nf > MAXSWEEP)) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+				for (int q = 0; q < nf; q++) {
+					const double t = ((nf > 1) ? ((double)q / (nf - 1)) : 0);
+					FreqSweep[q] = (islog ? (f0 * pow(f1 / f0, t)) : (f0 + ((f1 - f0) * t)));
+				}
+				NFreqSweep = nf;
+			}
+			else {
+				if (nval > MAXSWEEP) {
+					printf(errfmt1, strkey);
+					return 1;
+				}
+				for (int q = 0; q < nval; q++) {
+					FreqSweep[q] = atof(token[2 + q]);
+					if (FreqSweep[q] <= 0) {
+						printf(errfmt2, strkey);
+						return 1;
+					}
+				}
+				NFreqSweep = nval;
+			}
+			Freq = FreqSweep[0];
 		}
 		else if (!strcmp(strkey, "fieldout")) {
 			// fieldout = 0|1  : 解いた場を ofe_field.vtk (VTK legacy ASCII) に書く
@@ -733,78 +879,7 @@ int input_data(FILE *fp)
 		}
 	}
 
-	// 分散材料を frequency の値で展開する
-	// (frequency 未指定なら静的な εr(0) = ε∞ + ΣΔε、損失なしとして扱う)
-
-	const double omega_d = 2 * PI * Freq;
-	for (int m = 0; m < NMaterial; m++) {
-		material_t *mt = &Material[m];
-		if (mt->npole <= 0) continue;
-		double er = mt->einf, ei = 0;
-		for (int q = 0; q < mt->npole; q++) {
-			const pole_t *pl = &mt->pole[q];
-			if (pl->type == 1) {
-				// Debye : Δε / (1 + jωτ)
-				const double wt = omega_d * pl->b;
-				const double den = 1 + (wt * wt);
-				er += pl->a / den;
-				ei += pl->a * wt / den;
-			}
-			else if (pl->type == 2) {
-				// Lorentz : Δε ω0^2 / (ω0^2 - ω^2 + jωδ)
-				const double w0 = 2 * PI * pl->b;
-				const double dl = 2 * PI * pl->c;
-				const double d1 = (w0 * w0) - (omega_d * omega_d);
-				const double d2 = omega_d * dl;
-				const double den = (d1 * d1) + (d2 * d2);
-				if (den <= 0) continue;
-				er += pl->a * w0 * w0 * d1 / den;
-				ei += pl->a * w0 * w0 * d2 / den;
-			}
-			else if (pl->type == 3) {
-				// Drude : -ωp^2/(ω^2 - jωΓ) = -ωp^2/(ω^2+Γ^2) - j ωp^2 Γ/(ω(ω^2+Γ^2))
-				// ω << Γ で ε'' -> ωp^2/(ωΓ)、つまり σ = ω ε0 ε'' = ε0 ωp^2/Γ (一定) になる
-				const double wp = 2 * PI * pl->a;
-				const double gm = 2 * PI * pl->b;
-				const double den = (omega_d * omega_d) + (gm * gm);
-				if ((den <= 0) || (omega_d <= 0)) continue;
-				er -= wp * wp / den;
-				ei += wp * wp * gm / (omega_d * den);
-			}
-			else {
-				// Cole-Cole : Δε / (1 + (jωτ)^β),  β = 1-α
-				//   (jωτ)^β = (ωτ)^β (cos(βπ/2) + j sin(βπ/2))
-				//   α = 0 で β = 1、cos = 0、sin = 1 となり Debye に厳密一致する
-				const double beta = 1 - pl->c;
-				const double wt = omega_d * pl->b;
-				if (wt <= 0) {
-					er += pl->a;					// ω = 0 は静的値
-					continue;
-				}
-				const double x = pow(wt, beta);
-				const double cs = cos(beta * PI / 2);
-				const double sn = sin(beta * PI / 2);
-				const double d1 = 1 + (x * cs);
-				const double d2 = x * sn;
-				const double den = (d1 * d1) + (d2 * d2);
-				if (den <= 0) continue;
-				er += pl->a * d1 / den;
-				ei += pl->a * d2 / den;
-			}
-		}
-		if (er <= 0) {
-			// 準静的な定式化は ∇・(ε∇φ) = 0 が正定値であることを前提にしている。
-			// Drude 媒質を ω < ωp で使うと ε' < 0 になり、この前提が崩れる
-			printf("*** dispersive material %d has a non-positive epsr (%.4e) at %.4e Hz; "
-				"the quasi-static formulation needs epsr' > 0 "
-				"(a Drude medium below its plasma frequency does not qualify)\n",
-				m, er, Freq);
-			return 1;
-		}
-		mt->epsr = er;
-		mt->tand = ei / er;
-	}
-
+	// 分散材料の展開と異方性の埋め (周波数掃引では material_freq を呼び直す)
 	// 導電率の温度補正 σ(T) = σ0/(1 + α(T-T0))。
 	// σ の読み出し箇所は Material[].sigma (R / A / E) と CondSigma[] (Rs / F) の
 	// 2 系統あるので、**ここで一度だけ**両方に掛ける。こうすれば下流を触らずに済み、
@@ -898,20 +973,21 @@ int input_data(FILE *fp)
 			input_warn("analysis L solves the VACUUM electrostatic problem, so no "
 				"material property is read at all (use C for the filled problem)");
 		}
+		if (NFreqSweep > 0) {
+			int freqdep = 0;
+			if (Analysis & (ANALYSIS_F | ANALYSIS_A)) freqdep = 1;
+			for (int m = 0; m < NMaterial; m++) {
+				if ((Material[m].npole > 0) || (Material[m].tand > 0)) freqdep = 1;
+			}
+			if (!freqdep) {
+				input_warn("frequencysweep has no effect : the selected analysis and "
+					"materials do not depend on frequency (F / A, tand or a "
+					"dispersive material are needed)");
+			}
+		}
 	}
 
-	// 異方性が指定されていない材料は等方性 (epsr / mur) で埋める
-
-	for (int m = 0; m < NMaterial; m++) {
-		if (Material[m].eps6[0] <= 0) {
-			Material[m].eps6[0] = Material[m].eps6[1] = Material[m].eps6[2] = Material[m].epsr;
-			Material[m].eps6[3] = Material[m].eps6[4] = Material[m].eps6[5] = 0;
-		}
-		if (Material[m].mu6[0] <= 0) {
-			Material[m].mu6[0] = Material[m].mu6[1] = Material[m].mu6[2] = Material[m].mur;
-			Material[m].mu6[3] = Material[m].mu6[4] = Material[m].mu6[5] = 0;
-		}
-	}
+	if (material_freq()) return 1;
 
 	// 非構造格子のときは xmesh 等も conductor も要らない
 
@@ -1084,6 +1160,10 @@ int input_data(FILE *fp)
 	}
 	else if (NSweep > 0) {
 		printf("%s\n", "*** currentsweep needs a hysteretic (ja) material");
+		return 1;
+	}
+	if ((NFreqSweep > 0) && (NSweep > 0)) {
+		printf("%s\n", "*** frequencysweep and currentsweep cannot be combined");
 		return 1;
 	}
 

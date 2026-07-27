@@ -42,6 +42,7 @@ extern "C" {
 #define FN_csv   "rlc.csv"
 #define FN_spice "ofe_circuit.sp"
 #define FN_field "ofe_field.vtk"
+#define FN_sweep "ofe_sweep.csv"
 
 // 数学・物理定数 (OpenFDTD の ofd.h と同じ定義)
 #define PI     (4.0 * atan(1.0))
@@ -99,6 +100,7 @@ typedef struct {
 	double einf;				// ε∞
 	pole_t pole[MAXPOLE];
 	// 異方性テンソル (対称、成分順 xx, yy, zz, xy, yz, zx)。既定は等方性
+	int    eps6_given;			// 1 : anisoeps が明示された (周波数掃引で上書きしない)
 	double eps6[6];				// 比誘電率テンソル
 	double mu6[6];				// 比透磁率テンソル
 	// 導電率の温度依存 : σ(T) = σ0 / (1 + α (T - T0))  (金属の標準的な抵抗率モデル)
@@ -204,6 +206,10 @@ EXTERN double Volt;				// 励振電圧 [V]
 EXTERN double Freq;				// 周波数 [Hz] (tanδ による誘電損の計算に使う、0 = 無効)
 EXTERN double Curr;				// 静磁場解析の励振電流 [A]
 EXTERN double Temperature;		// 動作温度 [degC] (tempco と併せて σ を補正する)
+
+// 周波数掃引 (frequencysweep)。各点で分散材料を展開し直して解き直す
+EXTERN int NFreqSweep;
+EXTERN double FreqSweep[MAXSWEEP];
 EXTERN int NSection;			// SPICE 等価回路の梯子段数
 
 // 場の出力 (fieldout キー)。solve() の途中でしか手元に無い解を溜めて最後に書く

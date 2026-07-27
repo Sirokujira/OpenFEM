@@ -649,7 +649,7 @@ static int solve_eddy(FILE *fp_log)
 }
 
 
-int solve(FILE *fp_log)
+static int solve_one(FILE *fp_log)
 {
 	const int n = (int)num_node();
 	const int np = NPort;
@@ -802,8 +802,120 @@ int solve(FILE *fp_log)
 		ierr |= solve_eddy3d(fp_log);
 	}
 
-	// 溜めた場を書き出す
-	if (!ierr) ierr |= field_write(fp_log);
+	return ierr;
+}
+
+
+// ---- 周波数掃引 ----
+//
+// 分散材料の展開 (epsr / tand / eps6) は Freq に依存するので、各点で
+// material_freq() を呼び直してから解き直す。結果は 1 行 1 周波数で
+// ofe_sweep.csv に出す。ofe.out / rlc.csv には**最後の周波数**の結果が入る
+// (掃引が無い従来の挙動と同じ形にするため)。
+// ヘッダと行は**同じ列構成**でなければならない。掃引の途中で解析が失敗して
+// Have* が変わると CSV が不揃いになるので、最初の点の構成を固定して使い、
+// 以降の点で構成が変わったらその列を空にして警告する。
+typedef struct { int c, r, f; } sweepcol_t;
+
+static void sweep_header(FILE *fp, sweepcol_t k)
+{
+	const int np = NPort;
+
+	fprintf(fp, "frequency [Hz]");
+	if (k.c) for (int i = 0; i < np; i++) for (int j = 0; j < np; j++) fprintf(fp, ",C(%d;%d)", i + 1, j + 1);
+	if (k.r) for (int i = 0; i < np; i++) for (int j = 0; j < np; j++) fprintf(fp, ",G(%d;%d)", i + 1, j + 1);
+	if (k.r) for (int i = 0; i < np; i++) for (int j = 0; j < np; j++) fprintf(fp, ",R(%d;%d)", i + 1, j + 1);
+	if (k.f) for (int i = 0; i < np; i++) for (int j = 0; j < np; j++) fprintf(fp, ",Rf(%d;%d)", i + 1, j + 1);
+	if (k.f) for (int i = 0; i < np; i++) for (int j = 0; j < np; j++) fprintf(fp, ",Lf(%d;%d)", i + 1, j + 1);
+	fprintf(fp, "\n");
+}
+
+
+static void sweep_block(FILE *fp, int want, int have, const double *m, int nn)
+{
+	if (!want) return;
+	for (int i = 0; i < nn; i++) {
+		if (have) fprintf(fp, ",%.8e", m[i]);
+		else      fprintf(fp, ",");
+	}
+}
+
+
+static void sweep_row(FILE *fp, sweepcol_t k, FILE *fp_log)
+{
+	const int nn = NPort * NPort;
+
+	if (((k.c != 0) != (HaveC != 0)) || ((k.r != 0) != (HaveR != 0))
+	 || ((k.f != 0) != (HaveF != 0))) {
+		fprintf(fp_log, "*** warning : the available matrices changed at %.6e Hz; "
+			"those columns are left empty in %s\n", Freq, FN_sweep);
+	}
+	fprintf(fp, "%.8e", Freq);
+	sweep_block(fp, k.c, HaveC, Cmat, nn);
+	sweep_block(fp, k.r, HaveR, Gmat, nn);
+	sweep_block(fp, k.r, HaveR, Rmat, nn);
+	sweep_block(fp, k.f, HaveF, Rfmat, nn);
+	sweep_block(fp, k.f, HaveF, Lfmat, nn);
+	fprintf(fp, "\n");
+}
+
+
+int solve(FILE *fp_log)
+{
+	int ierr = 0;
+
+	if (NFreqSweep < 1) {
+		ierr = solve_one(fp_log);
+		if (!ierr) ierr |= field_write(fp_log);
+		field_free();
+		return ierr;
+	}
+
+	FILE *fp = fopen(FN_sweep, "w");
+	if (fp == NULL) {
+		fprintf(fp_log, "*** %s open error\n", FN_sweep);
+		return 1;
+	}
+	fprintf(fp_log, "\n=== frequency sweep (%d points) ===\n", NFreqSweep);
+
+	sweepcol_t kcol = {0, 0, 0};
+	int nhead = 0;
+	for (int q = 0; q < NFreqSweep; q++) {
+		Freq = FreqSweep[q];
+		if (material_freq()) {
+			fprintf(fp_log, "*** material expansion failed at %.6e Hz\n", Freq);
+			ierr = 1;
+			break;
+		}
+		fprintf(fp_log, "\n--- sweep point %d/%d : %.6e [Hz] ---\n",
+			q + 1, NFreqSweep, Freq);
+		fflush(fp_log);
+
+		// 各点で溜め直す (場は最後の周波数のものだけ残す)。
+		// HaveS は setup() が 1 度だけ設定する DC 直列抵抗なので消さない
+		field_free();
+		HaveC = HaveL = HaveR = HaveM = HaveF = 0;
+
+		ierr = solve_one(fp_log);
+		if (ierr) break;
+
+		if (!nhead) {
+			kcol.c = (HaveC != 0);
+			kcol.r = (HaveR != 0);
+			kcol.f = (HaveF != 0);
+			sweep_header(fp, kcol);
+			nhead = 1;
+		}
+		sweep_row(fp, kcol, fp_log);
+		fflush(fp);
+	}
+	fclose(fp);
+
+	if (!ierr) {
+		fprintf(fp_log, "\n  frequency sweep written to %s (%d points)\n",
+			FN_sweep, NFreqSweep);
+		ierr |= field_write(fp_log);
+	}
 	field_free();
 
 	return ierr;

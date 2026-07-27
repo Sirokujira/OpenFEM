@@ -115,6 +115,46 @@ Rs[k][j] = R0 + (k=j のとき Rk))。これで RLGC が揃います。
 渦電流の複素対称系は COCG、いずれも OpenMP 並列) です。剛性行列は
 CRS (27 点ステンシル) で保持します。
 
+## 周波数掃引 (`frequencysweep`)
+
+`frequency` は 1 点だけなので、周波数特性を出すには `.ofe` を書き換えて
+回し直す必要がありました。`frequencysweep` で 1 回の実行にまとめられます。
+
+```
+frequencysweep = 1e3 1e5 1e7      # 明示列挙
+frequencysweep = log 1e8 1e10 5   # 対数等分 5 点
+frequencysweep = lin 1e9 5e9 3    # 線形等分 3 点
+```
+
+各点で**分散材料を展開し直して**から解き直します (εr(ω), tanδ(ω) が点ごとに
+変わる)。結果は **`ofe_sweep.csv`** に 1 行 1 周波数で出ます:
+
+```
+frequency [Hz],C(1;1),G(1;1),R(1;1)
+1.00000000e+08,2.64414642e-13,8.61164622e-06,1.16121816e+05
+...
+```
+
+`ofe.out` / `rlc.csv` / `ofe_field.vtk` には**最後の周波数**の結果が入ります
+(掃引が無い従来の挙動と同じ形にするため)。`currentsweep` (ヒステリシス) との
+併用は物理的に意味がないので入力エラーにします。
+
+**検証** (`data/sample/sweep_plate.ofe`): Lorentz 共鳴 (2 GHz) をまたぐ 5 点を
+掃引し、各点を閉形式と比較します (C が 3.6 倍変化する)。加えて
+**掃引の各点が個別実行と完全一致すること**を見ます — これが掃引間の状態の
+漏れを直接捕まえる検査です。
+
+実際にこの検査で不具合が 1 件出ました。異方性テンソルの埋め込み条件が
+`eps6[0] <= 0` だったため 2 回目以降スキップされ、**分散材料の C が最初の
+周波数で凍結**していました (`eps6_given` フラグで判定するよう修正)。
+
+| 埋め込んだ誤り | 検出 |
+|---|---|
+| 埋め条件を `eps6[0] <= 0` に戻す (実際の不具合) | C +3.85% |
+| 掃引ループで `material_freq()` を呼ばない | G −65.75% |
+| `log` の生成を `lin` にする | 周波数が +714% |
+| `currentsweep` との併用禁止を外す | 弾かれずに NG |
+
 ## 場の出力 (`fieldout = 1`)
 
 `fieldout = 1` を書くと、解いた場を **`ofe_field.vtk`** (VTK legacy ASCII) に
@@ -463,6 +503,7 @@ dx = 0.42mm で 1%、0.083mm で 0.06% になりました。扁平な要素は�
 | `sol/edge.c` | 辺要素 (辺の抽出、辺ベース CRS、Whitney 要素行列、自己検証) |
 | `sol/eddy3d.c` | 3 次元渦電流 (A-φ 連成の CRS・組み立て・求解、tree-cotree ゲージ) |
 | `sol/fieldout.c` | 場の出力 (VTK legacy ASCII、構造格子/四面体の両方) |
+| — | 周波数掃引は `sol/solve.c` の `solve()` が `solve_one()` を回して実装 |
 | `sol/assemble.c` | 6 面体要素の要素行列と全体行列の作成 |
 | `sol/solver_cg.c` | Jacobi-PCG (実対称) |
 | `sol/solver_cocg.c` | COCG (複素対称、渦電流解析用) |
@@ -553,6 +594,7 @@ end
 | `voltage` | 実数 [V] | 1 | 励振電圧 |
 | `awall` | `<physical_tag>` | なし | その面で A の接線成分を 0 にする (B・n = 0)。`analysis = A` 用。複数指定可 |
 | `gauge` | `0` / `1` | `0` | `analysis = A` のゲージ固定 (tree-cotree)。R(f)/L(f) はゲージ不変なので既定は 0 (反復が約 6 倍少ない)。A・φ 自体が要るときだけ 1 |
+| `frequencysweep` | `<f1> <f2> ...` / `log <fmin> <fmax> <n>` / `lin <fmin> <fmax> <n>` | なし | 周波数掃引。各点で分散材料を展開し直し `ofe_sweep.csv` に 1 行ずつ出す |
 | `fieldout` | `0` / `1` | `0` | 解いた場を `ofe_field.vtk` (VTK legacy ASCII) に書く |
 | `solver` | `<maxiter> <nout> <converg>` | `10000 100 1e-9` | 反復解法の最大回数・出力間隔・収束判定 (相対残差) |
 
@@ -577,6 +619,7 @@ end
 | `dispersive_plate.ofe` | 多極分散 (Debye + Lorentz) | 1GHz での C, G が展開式と厳密一致 (誤差 0.00%) |
 | `drude_plate.ofe` | Drude 媒質 (fp = 2GHz, Γ = 5GHz) | C, G が展開式と厳密一致。1MHz で G が σ = ε0ωp²/Γ の導体の値に収束 (8 桁)。εr' < 0 は入力エラーで停止 |
 | `colecole_plate.ofe` | Cole-Cole 分散 (α = 0.3) | C, G が展開式と厳密一致。α = 0 が Debye に、ωτ = 1 の C が α に依らないことも恒等式として検査 |
+| `sweep_plate.ofe` | 周波数掃引 (Lorentz 共鳴をまたぐ 5 点) | 各点が閉形式と一致し、かつ個別実行と完全一致 |
 | `temp_resistor.ofe` | 導電率の温度依存 (銅の α) | R が 1+α(T−T0) にちょうど比例 (4 温度、誤差 0.00%)。Rs 側 (CondSigma) も別に検査 |
 | `aniso_plate.ofe` | 異方性誘電体 (εx,εy,εz = 10,5,2) | C = ε0 εz A/d と厳密一致 (軸の対応の検査) |
 | `aniso_rot.ofe` | 同じテンソルを z 軸まわり 30° 回転 (非対角) | C が回転前と厳密一致 (非対角成分の検査) |

@@ -20,6 +20,7 @@
 #   drude_plate    : Drude 媒質の C, G と、低周波で σ = ε0ωp^2/Γ の導体に収束すること
 #   colecole_plate : Cole-Cole の C, G。α=0 が Debye に厳密一致することも見る
 #   temp_resistor  : σ(T) = σ0/(1+α(T-T0)) で R が厳密に比例すること (4 温度)
+#   sweep_plate    : 周波数掃引。各点が閉形式と一致し、かつ個別実行と完全一致すること
 #   fieldout       : 書き出した場から集中定数を作り直して元の値と比べる
 #                    (∫½ε|E|²dV = ½CV²、∫|J|²/(2σ)dV = ½Re(VI*))
 #   input lint     : 選んだ解析が読まないキーを警告すること (5 つの罠) と、
@@ -353,6 +354,50 @@ if grep -q "exceeds the skin depth" "$WORK/ofe.log"; then
 else
 	echo "  skin-depth warning (mur=50, f=1e5) : missing -> NG" >&2
 	status=1
+fi
+
+# 周波数掃引。**掃引の各点が個別実行とビット単位で一致すること**を見る。
+# これは掃引間で状態が漏れる誤りを直接捕まえる (分散材料の再展開漏れで
+# 実際に C が最初の周波数で凍結する不具合が出た)。
+echo "[sweep_plate] frequency sweep : each point must equal a separate run"
+cp "$SRC/sweep_plate.ofe" "$WORK/"
+(cd "$WORK" && "$OFE" -n 2 sweep_plate.ofe > /dev/null)
+# 閉形式との比較 (Lorentz 共鳴をまたぐので C が 3.6 倍変わる)
+n=0
+for pair in "1.00000000e+08 2.64414642e-13 8.61164622e-06" \
+            "3.16227766e+08 2.54612385e-13 7.95141286e-05" \
+            "1.00000000e+09 2.12380856e-13 4.77387017e-04" \
+            "3.16227766e+09 7.30183021e-14 9.03125045e-04" \
+            "1.00000000e+10 8.80172244e-14 8.32245471e-04"; do
+	set -- $pair
+	n=$((n + 1))
+	row=$(awk -F, -v r="$n" 'NR == r + 1 { print }' "$WORK/ofe_sweep.csv")
+	compare "sweep f=$1 : f [Hz]" "$(echo "$row" | cut -d, -f1)" "$1" 1e-6
+	compare "sweep f=$1 : C [F]"  "$(echo "$row" | cut -d, -f2)" "$2" 1e-6
+	compare "sweep f=$1 : G [S]"  "$(echo "$row" | cut -d, -f3)" "$3" 1e-6
+done
+# 掃引の 1 点を個別に回して**完全一致**すること (状態の漏れの検出)
+for f in 1e8 1e10; do
+	sed -e "s/^frequencysweep = .*/frequency = $f/" "$SRC/sweep_plate.ofe" > "$WORK/sweep_one.ofe"
+	(cd "$WORK" && "$OFE" -n 2 sweep_one.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	r=$(awk -F, -v ff="$f" 'NR > 1 { if (($1 + 0) == (ff + 0)) print }' "$WORK/ofe_sweep.csv")
+	compare "sweep vs single run (f=$f) C" "$(echo "$r" | cut -d, -f2)" "$(value_of C)" 1e-12
+	compare "sweep vs single run (f=$f) G" "$(echo "$r" | cut -d, -f3)" "$(value_of G)" 1e-12
+done
+# log / lin の生成が正しいこと
+sed "s/^frequencysweep = .*/frequencysweep = lin 1e9 5e9 3/" "$SRC/sweep_plate.ofe" > "$WORK/sweep_lin.ofe"
+(cd "$WORK" && "$OFE" -n 2 sweep_lin.ofe > /dev/null)
+compare "lin sweep point 2 [Hz]" "$(awk -F, 'NR == 3 { print $1 }' "$WORK/ofe_sweep.csv")" 3.0e9 1e-9
+# currentsweep との併用は禁止。ja がある正当なケース (plate_line_ja) に
+# frequencysweep を足す。ja 抜きで currentsweep を書くと「ja が要る」という
+# 別の検査に引っかかり、併用禁止が外れても気づけない
+sed "s/^analysis = .*/frequencysweep = 1e3 1e4\nanalysis = M/" \
+    "$SRC/plate_line_ja.ofe" > "$WORK/sweep_bad.ofe"
+if (cd "$WORK" && "$OFE" -n 2 sweep_bad.ofe > /dev/null 2>&1); then
+	echo "  frequencysweep + currentsweep rejected : no -> NG" >&2
+	status=1
+else
+	echo "  frequencysweep + currentsweep rejected : yes -> OK"
 fi
 
 # 場の出力 (fieldout = 1)。**書き出した場から集中定数を作り直して**元の抽出値と
