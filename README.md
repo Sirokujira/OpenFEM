@@ -115,6 +115,46 @@ Rs[k][j] = R0 + (k=j のとき Rk))。これで RLGC が揃います。
 渦電流の複素対称系は COCG、いずれも OpenMP 並列) です。剛性行列は
 CRS (27 点ステンシル) で保持します。
 
+## どの解析がどの材料量を読むか
+
+材料係数の読み出しは `material_coef_pub()` (`sol/assemble.c`) に集約されています。
+**指定しても読まれないキーがある**ので、対応を明示します:
+
+| キー | `C` | `L` | `R` | `M` | `F` | `A` | `E` |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| `material` の εr / `anisoeps` | ✓ | – | ✓ | – | – | – | – |
+| `tand` (`frequency` > 0 のとき) | – | – | ✓ | – | – | – | – |
+| `debye` / `lorentz` / `drude` / `colecole` | ✓ | – | ✓ | – | – | – | – |
+| `material` の σ / `tempco` | – | – | ✓ | – | – | ✓ | ✓ |
+| `mur` / `anisomur` | – | – | – | ✓ | ✓ | ✓ | ✓ |
+| `conductorsigma` / `conductortempco` | – | – | – | Rs | ✓ | – | – |
+| `bh` / `ja` | – | – | – | ✓ | 禁止 | 到達不能 | – |
+
+**`analysis = L` は材料を一切読みません** (真空静電界 ε0 固定)。TEM の外部
+インダクタンスを求めるためのモードで、誘電体を入れたい場合は `C` を使います。
+
+### 導電率の読み出しが 2 系統ある
+
+これがいちばん間違えやすい点です:
+
+| 系統 | 与えるキー | 読む解析 |
+|---|---|---|
+| `Material[].sigma` | `material` の 2 番目の値、`tempco` | **`R` / `A` / `E`** |
+| `CondSigma[]` | `conductorsigma`、`conductortempco` | **`Rs` / `F`** |
+
+構造格子の `F` は「`conductor` 形状で指定したセル」の導電率を使う設計なので
+(`assemble_mass()`)、`material` の σ は読みません。逆に非構造格子の `A` には
+`conductor` の概念が無く `electrode` タグしかないので、`conductorsigma` は
+読まれません。**取り違えても値が 0 になるだけで黙って通る**ため、
+解いた解析が読まないキーが指定されていると `ofe` は警告を出します:
+
+```
+*** warning : conductortempco (conductor 1) scales CondSigma, which only Rs and
+              analysis F read; for R / A / E use tempco instead
+```
+
+警告は標準出力と `ofe.log` の両方に出ます (誤りではないので停止はしません)。
+
 ## 非構造格子 (四面体)
 
 `mesh` キーで Gmsh ASCII 2.2 形式の四面体メッシュを読むと、非構造格子で
@@ -459,10 +499,10 @@ sh data/sample/rlc_check.sh bin/ofe bin/ofe_post /tmp/rlc-check
 - 異方性は**対称テンソル** (非対角を含む) に対応。非線形との併用は
   軸毎の B-H 曲線 (直交異方性) の形で対応しており、主軸は格子軸に
   一致している必要があります。
-- 温度依存は**導電率のみ** σ(T) = σ0/(1+α(T−T0))。σ の読み出し系統が
-  `Material[].sigma` (`R` / `A` / `E`) と `CondSigma[]` (`Rs` / `F`) の 2 つあるので、
-  それぞれ `tempco` / `conductortempco` で指定する。εr・μr・B-H の温度依存
-  (キュリー点など) は未対応。
+- 温度依存は**導電率のみ** σ(T) = σ0/(1+α(T−T0))。σ の読み出し系統が 2 つある
+  ので `tempco` / `conductortempco` を使い分ける (「どの解析がどの材料量を読むか」
+  節を参照。取り違えると警告が出る)。εr・μr・B-H の温度依存 (キュリー点など)
+  は未対応。
 - ヒステリシスは**スカラー Jiles-Atherton** (場の向きが回転しない問題向け)。
   ベクトルヒステリシス (回転磁界)、異常渦電流損は未対応。
   非線形/ヒステリシスと渦電流 (`F` / `A`) の同時解析も未対応。

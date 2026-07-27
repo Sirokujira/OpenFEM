@@ -11,6 +11,8 @@ mesh / material / geometry の書式は .ofd からそのまま流用できる�
 #include "fem.h"
 #include "fem_prototype.h"
 
+#include <stdarg.h>
+
 #define MAXTOKEN (1000)
 #define ARRAY_INC (1000)
 
@@ -49,6 +51,25 @@ static double *mesh_expand(int nreg, const double *pos, const int *ndiv, int *nc
 	*ncell = n;
 
 	return p;
+}
+
+
+// 入力解釈の警告。ofe.log はまだ開いていないので溜めておき、標準出力にも出す
+void input_warn(const char *fmt, ...)
+{
+	char buf[BUFSIZ];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+
+	printf("*** warning : %s\n", buf);
+	if (NInputWarn < MAXINWARN) {
+		strncpy(InputWarn[NInputWarn], buf, BUFSIZ - 1);
+		InputWarn[NInputWarn][BUFSIZ - 1] = '\0';
+		NInputWarn++;
+	}
 }
 
 
@@ -118,6 +139,7 @@ int input_data(FILE *fp)
 	NElectrode = 0;
 	NAWall = 0;
 	GaugeTree = 0;
+	NInputWarn = 0;
 
 	NSweep = 0;
 	JaSub = 20;
@@ -794,6 +816,75 @@ int input_data(FILE *fp)
 			return 1;
 		}
 		CondSigma[p] /= den;
+	}
+
+	// ---- 指定されたのに、選んだ解析が読まないキーを知らせる ----
+	//
+	// 材料係数の読み出しは material_coef_pub() (assemble.c) に集約されていて
+	//   mode 0 (C)       : ε0 eps6
+	//   mode 1 (L)       : ε0 のみ = **材料を一切読まない**
+	//   mode 2 (R)       : ω ε0 eps6 tanδ + sigma
+	//   mode 3 (M/F/A/E) : ν = (μ0 mu6)^-1
+	// さらに σ の読み出しは 2 系統に分かれている:
+	//   Material[].sigma -> R / A / E     (material, tempco)
+	//   CondSigma[]      -> Rs / F        (conductorsigma, conductortempco)
+	// 取り違えても値が 0 になるだけで黙って通ってしまうので、明示的に警告する。
+	{
+		const int use_eps  = (Analysis & (ANALYSIS_C | ANALYSIS_R)) != 0;
+		const int use_matsig = (Analysis & (ANALYSIS_R | ANALYSIS_A | ANALYSIS_E)) != 0;
+		const int use_mu   = (Analysis & (ANALYSIS_M | ANALYSIS_F | ANALYSIS_A | ANALYSIS_E)) != 0;
+		int have_condsig = 0;
+		for (int p = 0; p < MAXPORT; p++) {
+			if (CondSigma[p] > 0) have_condsig = 1;
+		}
+		// Rs は conductorsigma があれば計算されるので、F でなくても読まれる
+		const int use_condsig = ((Analysis & ANALYSIS_F) != 0) || have_condsig;
+
+		for (int m = 0; m < NMaterial; m++) {
+			const material_t *mt = &Material[m];
+			if ((mt->tempco != 0) && !use_matsig) {
+				input_warn("tempco (material %d) scales Material.sigma, which only "
+					"analysis R / A / E reads; for Rs and analysis F use "
+					"conductortempco instead", m);
+			}
+			if ((mt->sigma > 0) && !use_matsig) {
+				input_warn("material %d has sigma = %.4e but no analysis reads it "
+					"(R / A / E); analysis F and Rs use conductorsigma instead",
+					m, mt->sigma);
+			}
+			if ((mt->npole > 0) && !use_eps) {
+				input_warn("the dispersion of material %d is not read by the selected "
+					"analysis (only C and R use epsr)", m);
+			}
+			if ((mt->tand > 0) && !use_eps) {
+				input_warn("tand (material %d) is not read by the selected analysis "
+					"(only R uses it, and only when frequency > 0)", m);
+			}
+			if ((mt->tand > 0) && (Analysis & ANALYSIS_R) && (Freq <= 0)) {
+				input_warn("tand (material %d) needs the frequency key; "
+					"the dielectric loss is 0 without it", m);
+			}
+			// mu6[] は下の等方性埋めで初めて設定されるので、ここでは
+			// 「mur が既定でない」か「anisomur が与えられた (mu6[0] > 0)」で見る
+			if (((fabs(mt->mur - 1) > EPS) || (mt->mu6[0] > 0)) && !use_mu) {
+				input_warn("mur / anisomur (material %d) is not read by the selected "
+					"analysis (only M / F / A / E use it)", m);
+			}
+		}
+		for (int p = 0; p < MAXPORT; p++) {
+			if ((CondTempco[p] != 0) && !use_condsig) {
+				input_warn("conductortempco (conductor %d) scales CondSigma, which only "
+					"Rs and analysis F read; for R / A / E use tempco instead", p);
+			}
+			if ((CondTempco[p] != 0) && (CondSigma[p] <= 0)) {
+				input_warn("conductortempco (conductor %d) has no effect because "
+					"conductorsigma was not given for it", p);
+			}
+		}
+		if (Analysis == ANALYSIS_L) {
+			input_warn("analysis L solves the VACUUM electrostatic problem, so no "
+				"material property is read at all (use C for the filled problem)");
+		}
 	}
 
 	// 異方性が指定されていない材料は等方性 (epsr / mur) で埋める

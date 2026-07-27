@@ -100,10 +100,10 @@ typedef struct {
 	// 異方性テンソル (対称、成分順 xx, yy, zz, xy, yz, zx)。既定は等方性
 	double eps6[6];				// 比誘電率テンソル
 	double mu6[6];				// 比透磁率テンソル
-	// B-H 曲線 (軸毎)。bhaniso = 0 なら軸 0 の曲線を |B| に対して等方的に使う
 	// 導電率の温度依存 : σ(T) = σ0 / (1 + α (T - T0))  (金属の標準的な抵抗率モデル)
 	double tempco;				// 抵抗率の温度係数 α [1/K] (0 : 温度依存なし)
 	double temp0;				// 基準温度 T0 [degC]
+	// B-H 曲線 (軸毎)。bhaniso = 0 なら軸 0 の曲線を |B| に対して等方的に使う
 	int    bhaniso;				// 1 : 軸毎に別の曲線 (直交異方性)
 	int    nbh[3];				// 各軸の点数 (0 : 線形、mu6 を使う)
 	double bh_h[3][MAXBH];		// H [A/m]
@@ -204,6 +204,11 @@ EXTERN double Freq;				// 周波数 [Hz] (tanδ による誘電損の計算に�
 EXTERN double Curr;				// 静磁場解析の励振電流 [A]
 EXTERN double Temperature;		// 動作温度 [degC] (tempco と併せて σ を補正する)
 EXTERN int NSection;			// SPICE 等価回路の梯子段数
+
+// 入力解釈で出た警告 (ofe.log を開く前に走るので溜めておき、後でログにも出す)
+#define MAXINWARN (16)
+EXTERN int NInputWarn;
+EXTERN char InputWarn[MAXINWARN][BUFSIZ];
 
 // 電流掃引 (ヒステリシス解析)。履歴に沿って順に解く
 EXTERN int NSweep;

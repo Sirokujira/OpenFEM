@@ -20,6 +20,8 @@
 #   drude_plate    : Drude 媒質の C, G と、低周波で σ = ε0ωp^2/Γ の導体に収束すること
 #   colecole_plate : Cole-Cole の C, G。α=0 が Debye に厳密一致することも見る
 #   temp_resistor  : σ(T) = σ0/(1+α(T-T0)) で R が厳密に比例すること (4 温度)
+#   input lint     : 選んだ解析が読まないキーを警告すること (5 つの罠) と、
+#                    正しい 17 ケースで警告が 1 件も出ないこと
 #   aniso_plate    : 異方性誘電体の C = eps0 εz A/d      (厳密、許容 0.1%)
 #   aniso_rot      : 非対角テンソル (z 軸 30 度回転) でも同値 (厳密、許容 0.1%)
 #   plate_line_bh_aniso : 軸毎 B-H。B は x のみなので X 曲線だけが効くこと
@@ -348,6 +350,43 @@ else
 	echo "  skin-depth warning (mur=50, f=1e5) : missing -> NG" >&2
 	status=1
 fi
+
+# 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
+# 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
+# 警告が (a) 罠のケースで必ず出て (b) 正しいケースでは 1 件も出ないことを両方見る
+echo "[input lint] keys the selected analysis cannot read"
+lint_expect() {	# lint_expect <label> <ofe> <yes|no>
+	nw=$(cd "$WORK" && "$OFE" -n 2 "$2" 2>&1 | grep -c "warning" || true)
+	if [ "$3" = yes ]; then
+		if [ "$nw" -gt 0 ]; then echo "  $1 : warned -> OK"
+		else echo "  $1 : no warning -> NG" >&2; status=1; fi
+	else
+		if [ "$nw" -eq 0 ]; then echo "  $1 : silent -> OK"
+		else echo "  $1 : $nw spurious warning(s) -> NG" >&2; status=1; fi
+	fi
+}
+cp "$SRC"/*.ofe "$WORK/" 2>/dev/null || true
+for m in "$SRC"/*.msh; do [ -f "$m" ] && cp "$m" "$WORK/"; done
+awk '/^analysis = /{print "tempco = 0 3.93e-3 20"} {print}' \
+    "$SRC/plate_line_ac.ofe" > "$WORK/lint_tempco_f.ofe"
+awk '/^analysis = /{print "conductortempco = 1 3.93e-3 20"} {print}' \
+    "$SRC/bar_eddy.ofe" > "$WORK/lint_ctempco_a.ofe"
+awk '/^analysis = /{print "mur = 2 100"} {print}' \
+    "$SRC/parallel_plate.ofe" > "$WORK/lint_mur_c.ofe"
+sed "s/^material = .*/material = 4.0 1e3/" \
+    "$SRC/parallel_plate.ofe" > "$WORK/lint_sigma_c.ofe"
+sed "s/^analysis = .*/analysis = L/" "$SRC/coax.ofe" > "$WORK/lint_l_only.ofe"
+lint_expect "tempco + analysis=F"          lint_tempco_f.ofe  yes
+lint_expect "conductortempco + analysis=A" lint_ctempco_a.ofe yes
+lint_expect "mur + analysis=C"             lint_mur_c.ofe     yes
+lint_expect "material sigma + analysis=C"  lint_sigma_c.ofe   yes
+lint_expect "analysis=L alone"             lint_l_only.ofe    yes
+# 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)
+for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
+         plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
+         temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy; do
+	lint_expect "$c (clean)" "$c.ofe" no
+done
 
 # ヒステリシス (Jiles-Atherton) : H = I/W が Ampere の法則で厳密に決まるので、
 # FEM の結果はスカラー J-A モデルを H 掃引で積分した ODE 解と一致しなければならない

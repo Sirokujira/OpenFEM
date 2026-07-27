@@ -13,6 +13,7 @@ extern "C" {
 
 // input_data.c
 int input_data(FILE *);
+void input_warn(const char *, ...);
 
 // setup.c
 int setup(void);

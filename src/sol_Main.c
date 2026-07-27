@@ -60,6 +60,11 @@ int main(int argc, char *argv[])
 		PROGRAM, VERSION_MAJOR, VERSION_MINOR, VERSION_BUILD);
 	monitor1(fp_log, str);
 
+	// 入力解釈の警告は ofe.log を開く前に出るので、ここでログにも残す
+	for (int w = 0; w < NInputWarn; w++) {
+		fprintf(fp_log, "*** warning : %s\n", InputWarn[w]);
+	}
+
 	// セットアップ
 	ierr = setup();
 	if (ierr) {
