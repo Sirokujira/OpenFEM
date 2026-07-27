@@ -16,10 +16,15 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
          物理タグ 1 = 体積、10 = x=0 面 (電極 0)、11 = x=lx 面 (電極 1)、
          20 = A_t = 0 の面 (z=0, z=lz, x=0, x=lx)
 
+  bar_air : bar に非導電層 (空気) を載せたもの。解は 1 次元のままで
+         閉形式が残るので、空気を含む系の検証に使える。
+         物理タグ 1 = 導体、2 = 空気、10/11 = 導体断面の電極、20 = A_t = 0
+
 使い方:
   python3 mkmesh.py box  box_tet.msh
   python3 mkmesh.py coax coax_tet.msh
   python3 mkmesh.py bar  bar_tet.msh
+  python3 mkmesh.py bar_air bar_air.msh
 """
 
 import math
@@ -197,6 +202,71 @@ def make_bar(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, grade=1.0):
     return nodes, tets, tris
 
 
+def make_bar_air(nx=24, ny=2, nz=24, nza=4,
+                 lx=2e-3, ly=0.25e-3, lz=1e-3, gz=0.5e-3):
+    """導体棒 + 非導電層 (3 次元渦電流 A-φ で空気を含む系の検証)
+
+    make_bar の上に厚さ gz の空気層を載せる。解は依然 1 次元で、空気層は
+    界面で Robin 条件 A(t) + (g/mur) A'(t) = 0 に潰れるため閉形式が残る:
+
+        Z = γ ℓ / (σ W [sinh(γt) − X (cosh(γt) − 1)])
+        X = (cosh(γt) − 1 + (g/mur) γ sinh(γt)) / (sinh(γt) + (g/mur) γ cosh(γt))
+
+    g → 0 で make_bar の 2 tanh(γt/2) に厳密に戻る。
+
+    **A_t = 0 の面は空気側も覆う。** 導体側だけタグを付けると、空気部分の
+    x 面が自然境界条件になって接線 H が 0 に強制され、1 次元解が崩れる。
+    そのため x 面はタグ 20 を全高さに、電極タグ 10/11 は導体部分だけに付ける。
+
+    物理タグ : 1 = 導体、2 = 空気、10 = x=0 の導体断面 (電極 0)、
+               11 = x=lx の導体断面 (電極 1)、20 = A_t = 0 の面
+    """
+    zs = [lz * k / nz for k in range(nz + 1)] \
+       + [lz + gz * k / nza for k in range(1, nza + 1)]
+    nzt = nz + nza
+
+    nodes = []
+    idx = {}
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            for k in range(nzt + 1):
+                idx[(i, j, k)] = len(nodes)
+                nodes.append((lx * i / nx, ly * j / ny, zs[k]))
+
+    tets, tris = [], []
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nzt):
+                tag = 1 if k < nz else 2
+                h = [idx[(i + ((b >> 2) & 1), j + ((b >> 1) & 1), k + (b & 1))]
+                     for b in range(8)]
+                for t in HEX2TET:
+                    tets.append((tag, [h[t[0]], h[t[1]], h[t[2]], h[t[3]]]))
+
+    def quad(a, b, c, d, tag):
+        tris.append((tag, [a, b, c]))
+        tris.append((tag, [a, c, d]))
+
+    # z = 0 と z = lz + gz : A_t = 0
+    for i in range(nx):
+        for j in range(ny):
+            for k in (0, nzt):
+                quad(idx[(i, j, k)], idx[(i + 1, j, k)],
+                     idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)], 20)
+    # x = 0 / x = lx : 全高さに A_t = 0、電極は導体部分だけ
+    for j in range(ny):
+        for k in range(nzt):
+            for i, tag in ((0, 10), (nx, 11)):
+                a = idx[(i, j, k)]
+                b = idx[(i, j + 1, k)]
+                c = idx[(i, j + 1, k + 1)]
+                d = idx[(i, j, k + 1)]
+                quad(a, b, c, d, 20)
+                if k < nz:
+                    quad(a, b, c, d, tag)
+    return nodes, tets, tris
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
@@ -208,6 +278,8 @@ def main():
         nodes, tets, tris = make_coax()
     elif kind == "bar":
         nodes, tets, tris = make_bar()
+    elif kind == "bar_air":
+        nodes, tets, tris = make_bar_air()
     else:
         print("unknown mesh kind: %s" % kind)
         return 1

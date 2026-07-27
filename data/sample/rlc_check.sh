@@ -37,6 +37,8 @@
 #                    (1e2 / 1e4 / 1e5 Hz、許容 0.5% / 0.5% / 2%)
 #                    + gauge = 1 で Z が変わらないこと (ゲージ不変性)
 #                    + 磁性導体 (mur = 50) の Z と、表皮深さ警告が出ること
+#   bar_air        : 非導電層 (空気) を含む A-φ。空気層が Robin 条件に潰れる
+#                    1 次元閉形式と比較 (1e2/1e4/1e5 Hz + mur=50 + gauge=1)
 #
 # 使い方 : rlc_check.sh <ofe 実行ファイル> <ofe_post 実行ファイル> [作業ディレクトリ]
 
@@ -348,6 +350,45 @@ if grep -q "exceeds the skin depth" "$WORK/ofe.log"; then
 	echo "  skin-depth warning (mur=50, f=1e5) : raised -> OK"
 else
 	echo "  skin-depth warning (mur=50, f=1e5) : missing -> NG" >&2
+	status=1
+fi
+
+# 非導電領域 (空気) を含む 3 次元渦電流。空気層は界面で Robin 条件に潰れるので
+# 1 次元の閉形式が残る。**空気が効いていることを見るには L を見る必要がある**
+# (空気の辺を A=0 に固定する変異は R をほとんど動かさず L だけ -43% ずらす)
+echo "[bar_air] A-phi with a non-conducting layer : 1-D exact with an air gap"
+cp "$SRC/bar_air.ofe" "$WORK/"
+for m in "$SRC"/*.msh; do
+	[ -f "$m" ] && cp "$m" "$WORK/"
+done
+for pair in "1e2 1.3793210584e-04 1.6755132157e-09 0.005" \
+            "1e4 1.4831436443e-04 1.6479186641e-09 0.005" \
+            "1e5 4.7930357804e-04 9.7419014024e-10 0.02"; do
+	set -- $pair
+	sed "s/^frequency = .*/frequency = $1/" "$SRC/bar_air.ofe" > "$WORK/bar_air_run.ofe"
+	(cd "$WORK" && "$OFE" -n 2 bar_air_run.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "R(f=$1) [ohm]" "$(value_of Rf)" "$2" "$4"
+	compare "L(f=$1) [H]" "$(value_of Lf)" "$3" "$4"
+	if grep -q "NOT converged" "$WORK/ofe.log"; then
+		echo "  *** A-phi solver did not converge at $1 Hz (air)" >&2
+		status=1
+	fi
+done
+# 磁性導体 + 空気。**1 つの格子に 2 つの異なる ν が同居する唯一のケース**なので、
+# 要素毎の材料参照を取り違える誤りを捕まえられるのはここだけ
+sed -e "s/^frequency = .*/frequency = 1e2/" -e "s/^region = 1 2/region = 1 2\nmur = 2 50/" \
+    "$SRC/bar_air.ofe" > "$WORK/bar_air_mur.ofe"
+(cd "$WORK" && "$OFE" -n 2 bar_air_mur.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "R(mur=50, f=1e2) [ohm]" "$(value_of Rf)" 1.3893378002e-04 0.005
+compare "L(mur=50, f=1e2) [H]" "$(value_of Lf)" 4.3045141586e-08 0.005
+# 空気があってもゲージ不変性は保たれること
+sed -e "s/^frequency = .*/frequency = 1e4/" -e "s/^awall = 20/awall = 20\ngauge = 1/" \
+    "$SRC/bar_air.ofe" > "$WORK/bar_air_gauge.ofe"
+if (cd "$WORK" && "$OFE" -n 2 bar_air_gauge.ofe > /dev/null && "$OFE_POST" > /dev/null); then
+	compare "R(gauge=1, air) [ohm]" "$(value_of Rf)" 1.4831436443e-04 0.005
+	compare "L(gauge=1, air) [H]" "$(value_of Lf)" 1.6479186641e-09 0.005
+else
+	echo "  gauge=1 (air) : the run failed -> NG" >&2
 	status=1
 fi
 
