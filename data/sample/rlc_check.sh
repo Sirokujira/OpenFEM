@@ -48,6 +48,9 @@
 #                    1 次元厳密解と比較する (Ldc / Rs / R(f) / L(f)、許容 0.2%)
 #   anisotropic mu : 面内の異方性 ν が **B に掛かる** こと (grad(Az) ではなく)。
 #                    等方性では一致するので等方性ケースでは検出できない
+#   off-diagonal mu : 格子と材料テンソルを同じ角だけ面内で回すと答えが一致する
+#                    こと (合同な離散問題なので厳密)。非対角成分を検査できるのは
+#                    斜めに回した非対称断面だけ
 #   bar_eddy       : 3 次元渦電流 (A-φ)。Z = γL/(2σW tanh(γt/2)) と比較
 #                    (1e2 / 1e4 / 1e5 Hz、許容 0.5% / 0.5% / 2%)
 #                    + gauge = 1 で Z が変わらないこと (ゲージ不変性)
@@ -467,6 +470,37 @@ aniso_mu "2-D mesh, mu_zz = 5 (across B)"    plate2d_dc "anisomur = 2 1.0 1.0 5.
 # (実測: c_pp を壊す変異が回転前の格子だけでは素通りした)
 aniso_mu "rotated mesh, mu_zz = 5 (along B)"  plate2d_rot "anisomur = 2 1.0 1.0 5.0" 1.298525e-06
 aniso_mu "rotated mesh, mu_yy = 5 (across B)" plate2d_rot "anisomur = 2 1.0 5.0 1.0" 2.932153e-07
+
+# 非対角成分 (ν_pq) はここでしか検査できない。
+#
+# 1 次元解では ∂Az/∂p = 0 なので非対角項が効かず、同軸は回転対称なので
+# テンソルを回しても答えが変わらない (符号を反転してもビット単位で同じ結果に
+# なることを確認済み)。**斜めに回した非対称断面**だけが効く。
+#
+# plate2d_r30.msh は plate2d.msh を面内に 30 度回しただけで位相は同一なので、
+# 材料テンソルも同じ 30 度回せば**元と合同な離散問題**になり、答えは一致する
+# はずである (実測で全桁一致)。これが恒等式になる。
+#
+#   mu = diag(5, 1) を 30 度回す:
+#     mu_yy = 5c^2 + 1s^2 = 4,  mu_zz = 5s^2 + 1c^2 = 2,
+#     mu_yz = (5-1) c s = 1.7320508075688772
+#
+# 非対角を落とすと L が -32.0%、符号を反転すると回転でなく鏡映になるので
+# やはりずれる
+echo "[off-diagonal mu] rotate the mesh and the tensor by the same angle"
+run_case plate2d_r30
+compare "rotated 30deg, isotropic Ldc [H/m]" "$(value_of Ldc)" 2.932153e-07 0.002
+aniso_mu "rotated 30deg mesh + tensor" plate2d_r30 \
+	"anisomur = 2 1.0 4.0 2.0 0.0 1.732050807568877 0.0" 1.298525e-06
+# 対照 : 非対角を落とすと合同でなくなるので必ずずれること
+sed 's/^region = 1 2/region = 1 2\nanisomur = 2 1.0 4.0 2.0 0.0 0.0 0.0/' \
+    "$SRC/plate2d_r30.ofe" > "$WORK/amu0.ofe"
+(cd "$WORK" && "$OFE" -n 2 amu0.ofe > /dev/null && "$OFE_POST" > /dev/null)
+res=$(awk -v v="$(value_of Ldc)" -v e=1.298525e-06 \
+	'BEGIN{ d = (v - e) / e; if (d < 0) d = -d
+	        printf "%s (%.1f%% off)", ((d > 0.1) ? "OK" : "NG"), 100 * d }')
+echo "  dropping mu_yz must change the answer : $res"
+case "$res" in NG*) status=1 ;; esac
 # 構造格子側は geometry で間隙に材料 2 を割り当てる
 mkaniso() {
 	sed -e "s/^conductorsigma = 0 5.8e7/material = 1.0 0\ngeometry = 2 1 0 1e-3 0.05e-3 0.25e-3 0 1e-4\n$1\nconductorsigma = 0 5.8e7/" \
@@ -811,7 +845,7 @@ lint_expect "analysis=L alone"             lint_l_only.ofe    yes
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
-         box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac; do
+         box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

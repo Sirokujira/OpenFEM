@@ -17,6 +17,7 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
          20 = A_t = 0 の面 (z=0, z=lz, x=0, x=lx)
 
   plate2d : 平行平板線路の**断面 2 次元**格子 (三角形が体積要素、M / F 用)。
+         -swap 1 で面内 2 軸を入れ替え、-rot <度> で面内に任意角だけ回す。
          伝送線路軸は x。物理タグ 1 = 真空、2 = 導体の材料、
          10 = 導体 0 の断面、11 = 導体 1 の断面
 
@@ -190,7 +191,7 @@ def make_coax(nr=16, nt=48, ra=0.5e-3, rb=1.5e-3, lz=0.1e-3):
     return nodes, tets, tris
 
 
-def make_plate2d(nw=40, nt=12, ng=8, w=1e-3, t=0.05e-3, d=0.2e-3, swap=0):
+def make_plate2d(nw=40, nt=12, ng=8, w=1e-3, t=0.05e-3, d=0.2e-3, swap=0, rot=0):
     """平行平板線路の**断面 2 次元**格子 (三角形が体積要素、M / F 用)
 
     構造格子版 plate_line_dc / plate_line_ac と同じ形状を y-z 断面で切る
@@ -208,6 +209,12 @@ def make_plate2d(nw=40, nt=12, ng=8, w=1e-3, t=0.05e-3, d=0.2e-3, swap=0):
     答えは変わらないが、Az が変化する向きが p 軸から q 軸に移る。1 次元解では
     面内勾配の片方しか立たないので、**両方の格子を回さないと面内テンソルの
     片側の成分が一度も検査されない** (実測: c_pp を壊す変異が素通りした)。
+
+    rot = <度> で面内に任意角だけ回す。**格子の位相は変えないので、回した格子は
+    元の格子と合同な離散問題そのもの**になる。材料テンソルも同じ角で回せば
+    答えは変わらないはずで、これが非対角成分を検査する唯一の手掛かりになる
+    (1 次元解では ∂Az/∂p = 0 なので非対角項が効かず、同軸は回転対称なので
+    テンソルを回しても答えが変わらない。斜めに回した非対称断面だけが効く)。
 
     物理タグ : 1 = 真空、2 = 導体の材料、10 = 導体 0 の断面、11 = 導体 1 の断面
     """
@@ -241,10 +248,13 @@ def make_plate2d(nw=40, nt=12, ng=8, w=1e-3, t=0.05e-3, d=0.2e-3, swap=0):
     nzt = len(zs) - 1
 
     nodes, idx = [], {}
+    th = math.radians(rot)
+    cs, sn = math.cos(th), math.sin(th)
     for j in range(nw + 1):
         for k in range(nzt + 1):
             idx[(j, k)] = len(nodes)
-            nodes.append((0.0, zs[k], ys[j]) if swap else (0.0, ys[j], zs[k]))
+            a1, a2 = (zs[k], ys[j]) if swap else (ys[j], zs[k])
+            nodes.append((0.0, (a1 * cs) - (a2 * sn), (a1 * sn) + (a2 * cs)))
 
     tris = []
     for j in range(nw):
