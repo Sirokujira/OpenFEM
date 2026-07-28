@@ -178,6 +178,14 @@ EXTERN int NTri;				// 三角形数 (電極面の指定に使う)
 EXTERN int32_t *Tri;			// [3*NTri]
 EXTERN int *TriTag;				// [NTri] 物理タグ
 
+// 格子の次元 (3 : 四面体、2 : 断面 2 次元の三角形)。2 のときは三角形が
+// 体積要素になり、M / F (断面 2 次元の定式化) を非構造格子で解ける。
+// 面は伝送線路軸 Tline に垂直で、その軸の座標は一定でなければならない
+EXTERN int MeshDim;
+EXTERN unsigned char *TriMat;	// [NTri] 材料番号 (2 次元格子)
+EXTERN signed char *TriCond;	// [NTri] 導体番号 (2 次元格子、-1 = 導体でない)
+EXTERN double *TriArea;			// [NTri] 面積 [m^2]
+
 // 物理タグ -> 材料 / 導体の対応
 #define MAXTAGMAP (64)
 EXTERN int NRegion, RegionTag[MAXTAGMAP], RegionMat[MAXTAGMAP];

@@ -16,6 +16,10 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
          物理タグ 1 = 体積、10 = x=0 面 (電極 0)、11 = x=lx 面 (電極 1)、
          20 = A_t = 0 の面 (z=0, z=lz, x=0, x=lx)
 
+  plate2d : 平行平板線路の**断面 2 次元**格子 (三角形が体積要素、M / F 用)。
+         伝送線路軸は x。物理タグ 1 = 真空、2 = 導体の材料、
+         10 = 導体 0 の断面、11 = 導体 1 の断面
+
   bar_air : bar に非導電層 (空気) を載せたもの。解は 1 次元のままで
          閉形式が残るので、空気を含む系の検証に使える。
          物理タグ 1 = 導体、2 = 空気、10/11 = 導体断面の電極、20 = A_t = 0
@@ -186,6 +190,76 @@ def make_coax(nr=16, nt=48, ra=0.5e-3, rb=1.5e-3, lz=0.1e-3):
     return nodes, tets, tris
 
 
+def make_plate2d(nw=40, nt=12, ng=8, w=1e-3, t=0.05e-3, d=0.2e-3, swap=0):
+    """平行平板線路の**断面 2 次元**格子 (三角形が体積要素、M / F 用)
+
+    構造格子版 plate_line_dc / plate_line_ac と同じ形状を y-z 断面で切る
+    (伝送線路軸は x)。1 次元厳密解がそのまま使えるので、非構造格子の
+    M / F をそこに突き合わせられる。
+
+      導体 1 : z = d .. d+t     (幅 W)
+      導体 0 : z = -t .. 0      (幅 W、帰路)
+      その間 (z = 0 .. d) は真空
+
+    z 方向は導体内を nt 分割、間隙を ng 分割。表皮効果を刻めるよう
+    導体内は両面に向けて等比に細かくする。
+
+    swap = 1 で面内の 2 軸 (y, z) を入れ替える。形状を面内で 90 度回すだけなので
+    答えは変わらないが、Az が変化する向きが p 軸から q 軸に移る。1 次元解では
+    面内勾配の片方しか立たないので、**両方の格子を回さないと面内テンソルの
+    片側の成分が一度も検査されない** (実測: c_pp を壊す変異が素通りした)。
+
+    物理タグ : 1 = 真空、2 = 導体の材料、10 = 導体 0 の断面、11 = 導体 1 の断面
+    """
+    def graded(z0, z1, n, ratio=1.35):
+        # 両端に向けて細かくする対称分割
+        h = n // 2
+        wts = [ratio ** i for i in range(h)]
+        wts = wts + wts[::-1] if (n % 2 == 0) else wts + [ratio ** h] + wts[::-1]
+        s = sum(wts)
+        out, acc = [z0], 0.0
+        for wt in wts:
+            acc += wt
+            out.append(z0 + (z1 - z0) * acc / s)
+        out[-1] = z1
+        return out
+
+    # z の分割点と、各層の (材料タグ, 導体タグ)
+    zs, lay = [], []
+    for (a0, b0, n, tag, cnd) in ((-t, 0.0, nt, 2, 10),
+                                  (0.0, d, ng, 1, None),
+                                  (d, d + t, nt, 2, 11)):
+        g = graded(a0, b0, n)
+        if zs:
+            g = g[1:]
+        zs += g
+        lay += [(tag, cnd)] * (len(g) if not lay else len(g))
+    # lay は層 (区間) 毎なので長さを合わせ直す
+    lay = ([ (2, 10) ] * nt) + ([ (1, None) ] * ng) + ([ (2, 11) ] * nt)
+
+    ys = [(-w / 2) + (w * j / nw) for j in range(nw + 1)]
+    nzt = len(zs) - 1
+
+    nodes, idx = [], {}
+    for j in range(nw + 1):
+        for k in range(nzt + 1):
+            idx[(j, k)] = len(nodes)
+            nodes.append((0.0, zs[k], ys[j]) if swap else (0.0, ys[j], zs[k]))
+
+    tris = []
+    for j in range(nw):
+        for k in range(nzt):
+            mtag, ctag = lay[k]
+            tag = ctag if ctag is not None else mtag
+            a = idx[(j, k)]
+            b = idx[(j + 1, k)]
+            c = idx[(j + 1, k + 1)]
+            e = idx[(j, k + 1)]
+            tris.append((tag, [a, b, c]))
+            tris.append((tag, [a, c, e]))
+    return nodes, [], tris
+
+
 def make_bar(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, grade=1.0):
     """導体棒 (3 次元渦電流 A-φ の検証)
 
@@ -345,6 +419,8 @@ def main():
         nodes, tets, tris = make_bar(**opt)
     elif kind == "bar_air":
         nodes, tets, tris = make_bar_air(**opt)
+    elif kind == "plate2d":
+        nodes, tets, tris = make_plate2d(**opt)
     else:
         print("unknown mesh kind: %s" % kind)
         return 1

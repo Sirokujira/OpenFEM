@@ -33,6 +33,12 @@ void assemble_tet(crs_t *, int);
 int tet10_element(int, const double [6], double [10][10], double *);
 int tet_grad_center(int, double [10][3], int *);
 int solve_nodal_test(FILE *);
+void tri_axes(int *, int *);
+int tri_grad(const int32_t [3], double [3][2], double *);
+int64_t crs_find_tri(const crs_t *, int32_t, int32_t);
+void crs_alloc_tri(crs_t *);
+void assemble_nu_tri(crs_t *, const double *);
+void assemble_mass_tri(crs_t *);
 
 // edge.c
 void edge_build(void);

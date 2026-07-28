@@ -102,6 +102,30 @@ void material_coef_pub(int m, int mode, double c[6])
 			nu[3] = nu[4] = nu[5] = 0;
 		}
 		for (int d = 0; d < 6; d++) c[d] = nu[d];
+
+		// mode 4 : 断面 2 次元の Az 定式化で使う「∇Az の基底での ν」
+		//
+		// エネルギーは ∫ B^T ν B / 2 で、B = ∇×(Az ê_t) は
+		//   B_p = +∂Az/∂q,  B_q = -∂Az/∂p
+		// なので ∇Az の基底では **面内の 2 成分が入れ替わり、非対角の符号が反転**する:
+		//   c_pp = ν_qq,  c_qq = ν_pp,  c_pq = -ν_pq
+		// ν をそのまま ∇Az に掛けると μ_p と μ_q を取り違える (実測: μ を
+		// (3,2,5) にした平行平板線路で L が +138%)。等方性では一致するので
+		// 等方性のケースだけでは絶対に検出できない。
+		if (mode == 4) {
+			const int t = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
+			const int p = (t + 1) % 3, q = (t + 2) % 3;
+			// 6 成分の並び : 0=xx 1=yy 2=zz 3=xy 4=yz 5=zx
+			static const int off[3][3] = {{0, 3, 5}, {3, 1, 4}, {5, 4, 2}};
+			const double npp = nu[off[p][p]], nqq = nu[off[q][q]], npq = nu[off[p][q]];
+			for (int d = 0; d < 6; d++) c[d] = 0;
+			c[off[p][p]] = nqq;
+			c[off[q][q]] = npp;
+			c[off[p][q]] = -npq;
+			// 軸方向は Az が一様なので効かないが、行列が特異にならないよう
+			// 面内の代表値を入れておく (構造格子は軸方向にも節点を持つ)
+			c[off[t][t]] = ((npp + nqq) / 2);
+		}
 	}
 }
 
@@ -619,5 +643,6 @@ void assemble(crs_t *A, int mode)
 // 静磁場の行列をセル毎の ν で作る (非線形 B-H 反復)
 void assemble_nu(crs_t *A, const double *nucell)
 {
-	assemble_core(A, 3, nucell);
+	// nucell が無いときは異方性テンソルを ∇Az の基底で使う (mode 4)
+	assemble_core(A, ((nucell != NULL) ? 3 : 4), nucell);
 }

@@ -15,6 +15,53 @@ solve.c
 #include "fem.h"
 #include "fem_prototype.h"
 
+// ---- 要素の走査 (M / F の断面 2 次元定式化を格子の種類で分けずに書く) ----
+//
+// M / F は「導体要素を走査して節点に重みを配る」形の処理が 4 か所あり
+// (∫σdV、右辺 ∫σN V'、電流 ∫σAz dV、場の出力)、構造格子と 2 次元三角形で
+// 書き分けると必ずどこかが食い違う。要素の情報だけ 1 か所に集める。
+//
+// **「体積」は 2 次元格子では面積**。単位長あたりで扱う (TlineLength = 1) ので、
+// 出てくる R [Ω/m]・L [H/m] は構造格子と同じ意味になる。
+typedef struct {
+	int nen;					// 節点数 (構造格子 8、三角形 3)
+	int64_t nd[8];				// 節点番号
+	double vol;					// 体積 [m^3] または面積 [m^2]
+	int cond;					// 導体番号 (-1 = 導体でない)
+	int mat;					// 材料番号
+} elem_t;
+
+
+static int64_t elem_count(void)
+{
+	return ((MeshMode && (MeshDim == 2)) ? (int64_t)NTri : ((int64_t)Nx * Ny * Nz));
+}
+
+
+static void elem_get(int64_t e, elem_t *el)
+{
+	if (MeshMode && (MeshDim == 2)) {
+		el->nen = 3;
+		for (int l = 0; l < 3; l++) el->nd[l] = Tri[(e * 3) + l];
+		el->vol = TriArea[e];
+		el->cond = TriCond[e];
+		el->mat = TriMat[e];
+		return;
+	}
+
+	const int k = (int)(e % Nz);
+	const int j = (int)((e / Nz) % Ny);
+	const int i = (int)(e / ((int64_t)Ny * Nz));
+	el->nen = 8;
+	for (int l = 0; l < 8; l++) {
+		el->nd[l] = node_index(i + ((l >> 2) & 1), j + ((l >> 1) & 1), k + (l & 1));
+	}
+	el->vol = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]);
+	el->cond = CellConductor[e];
+	el->mat = CellMaterial[e];
+}
+
+
 // 1 ポート励振の求解 -> 各導体の反作用 q[0..NPort]
 static int solve_port(const crs_t *A, const unsigned char *fix, int kport,
 	double *phi, double *work, double *q, double *energy,
@@ -138,18 +185,25 @@ static int solve_magnetostatic(FILE *fp_log)
 	crs_t A;
 	crs_alloc(&A);
 
-	// セル毎の磁気抵抗率 ν。非線形材料 (B-H) があると反復で更新する
-	const int64_t ncell = (int64_t)Nx * Ny * Nz;
+	// 要素毎の磁気抵抗率 ν。非線形材料 (B-H) があると反復で更新する
+	const int tri2d = (MeshMode && (MeshDim == 2));
+	const int64_t ncell = elem_count();
 	int nonlinear = 0;
 	for (int m = 0; m < NMaterial; m++) {
 		if (Material[m].nbh[0] > 0) nonlinear = 1;
 	}
 	double *nucell = (double *)malloc((size_t)ncell * sizeof(double));
 	for (int64_t c = 0; c < ncell; c++) {
-		const material_t *mt = &Material[CellMaterial[c]];
+		elem_t el;
+		elem_get(c, &el);
+		const material_t *mt = &Material[el.mat];
 		nucell[c] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0) : (1 / (MU0 * mt->mu6[0])));
 	}
-	assemble_nu(&A, nucell);
+	// 2 次元格子では異方性テンソルを面内 2x2 で使えるので nucell は渡さない
+	// 線形なら異方性テンソルを使う (nucell は等方性なので非線形反復専用)
+	if (tri2d)          assemble_nu_tri(&A, NULL);
+	else if (nonlinear) assemble_nu(&A, nucell);
+	else                assemble(&A, 4);
 
 	// 定数分の不定性を除くために 1 節点だけ固定する
 	unsigned char *fix = (unsigned char *)malloc(n * sizeof(unsigned char));
@@ -161,21 +215,15 @@ static int solve_magnetostatic(FILE *fp_log)
 	for (int k = 1; k <= np; k++) {
 		double *bk = (double *)malloc(n * sizeof(double));
 		memset(bk, 0, n * sizeof(double));
-		for (int i = 0; i < Nx; i++) {
-		for (int j = 0; j < Ny; j++) {
-		for (int m = 0; m < Nz; m++) {
-			const int id = CellConductor[((int64_t)i * Ny + j) * Nz + m];
+		for (int64_t e = 0; e < ncell; e++) {
+			elem_t el;
+			elem_get(e, &el);
 			double jz = 0;
-			if      (id == k) jz = +Curr / CondArea[k];
-			else if (id == 0) jz = -Curr / CondArea[0];
+			if      (el.cond == k) jz = +Curr / CondArea[k];
+			else if (el.cond == 0) jz = -Curr / CondArea[0];
 			else continue;
-			const double vol = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[m + 1] - Zn[m]);
-			const double w = jz * vol / 8;
-			for (int l = 0; l < 8; l++) {
-				bk[node_index(i + ((l >> 2) & 1), j + ((l >> 1) & 1), m + (l & 1))] += w;
-			}
-		}
-		}
+			const double w = jz * el.vol / el.nen;
+			for (int l = 0; l < el.nen; l++) bk[el.nd[l]] += w;
 		}
 		b[k - 1] = bk;
 	}
@@ -512,6 +560,23 @@ static int solve_eddy(FILE *fp_log)
 
 	// 表皮深さを格子で刻めているか確認する (刻めていないと R(f) を過小評価する)
 	double hmax = 0;
+	if (MeshMode && (MeshDim == 2)) {
+		// 三角形では辺の最大長を要素寸法とする
+		int pa, qa;
+		tri_axes(&pa, &qa);
+		const double *cp = ((pa == 0) ? Xp : (pa == 1) ? Yp : Zp);
+		const double *cq = ((qa == 0) ? Xp : (qa == 1) ? Yp : Zp);
+		for (int e = 0; e < NTri; e++) {
+			if (TriCond[e] < 0) continue;
+			for (int l = 0; l < 3; l++) {
+				const int32_t a = Tri[(e * 3) + l], bb = Tri[(e * 3) + ((l + 1) % 3)];
+				const double dp = cp[bb] - cp[a], dq = cq[bb] - cq[a];
+				const double len = sqrt((dp * dp) + (dq * dq));
+				if (len > hmax) hmax = len;
+			}
+		}
+	}
+	else {
 	for (int i = 0; i < Nx; i++) {
 	for (int j = 0; j < Ny; j++) {
 	for (int k = 0; k < Nz; k++) {
@@ -519,6 +584,7 @@ static int solve_eddy(FILE *fp_log)
 		if ((Tline != 'X') && ((Xn[i + 1] - Xn[i]) > hmax)) hmax = Xn[i + 1] - Xn[i];
 		if ((Tline != 'Y') && ((Yn[j + 1] - Yn[j]) > hmax)) hmax = Yn[j + 1] - Yn[j];
 		if ((Tline != 'Z') && ((Zn[k + 1] - Zn[k]) > hmax)) hmax = Zn[k + 1] - Zn[k];
+	}
 	}
 	}
 	}
@@ -532,27 +598,31 @@ static int solve_eddy(FILE *fp_log)
 	fprintf(fp_log, "  %-10s %8s %13s\n", "excite", "iter", "residual");
 	fflush(fp_log);
 
+	const int tri2d = (MeshMode && (MeshDim == 2));
 	crs_t K, M;
 	crs_alloc(&K);
-	assemble(&K, 3);				// ν = 1/(μ0 μr)
 	crs_alloc(&M);
-	assemble_mass(&M);				// σ
+	if (tri2d) {
+		assemble_nu_tri(&K, NULL);	// ν = 1/(μ0 μr)
+		assemble_mass_tri(&M);		// σ
+	}
+	else {
+		assemble(&K, 4);			// ν を ∇Az の基底で使う
+		assemble_mass(&M);
+	}
 
 	// 自然境界条件 (磁気壁) なので固定節点は無い
 	unsigned char *fix = (unsigned char *)malloc(n * sizeof(unsigned char));
 	memset(fix, 0, n * sizeof(unsigned char));
 
 	// 導体毎の ∫σ dV
+	const int64_t nel = elem_count();
 	double *svol = (double *)calloc((size_t)nc, sizeof(double));
-	for (int i = 0; i < Nx; i++) {
-	for (int j = 0; j < Ny; j++) {
-	for (int k = 0; k < Nz; k++) {
-		const int id = CellConductor[((int64_t)i * Ny + j) * Nz + k];
-		if (id < 0) continue;
-		svol[id] += CondSigma[id]
-			* (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]);
-	}
-	}
+	for (int64_t e = 0; e < nel; e++) {
+		elem_t el;
+		elem_get(e, &el);
+		if (el.cond < 0) continue;
+		svol[el.cond] += CondSigma[el.cond] * el.vol;
 	}
 
 	double *br = (double *)malloc(n * sizeof(double));
@@ -568,17 +638,12 @@ static int solve_eddy(FILE *fp_log)
 		// b_i = ∫ σ N_i V' dV  (V' = 1 [V/m] を導体 jc にのみ与える)
 		memset(br, 0, n * sizeof(double));
 		memset(bi, 0, n * sizeof(double));
-		for (int i = 0; i < Nx; i++) {
-		for (int j = 0; j < Ny; j++) {
-		for (int k = 0; k < Nz; k++) {
-			if (CellConductor[((int64_t)i * Ny + j) * Nz + k] != jc) continue;
-			const double vol = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]);
-			const double w = CondSigma[jc] * vol / 8;
-			for (int l = 0; l < 8; l++) {
-				br[node_index(i + ((l >> 2) & 1), j + ((l >> 1) & 1), k + (l & 1))] += w;
-			}
-		}
-		}
+		for (int64_t e = 0; e < nel; e++) {
+			elem_t el;
+			elem_get(e, &el);
+			if (el.cond != jc) continue;
+			const double w = CondSigma[jc] * el.vol / el.nen;
+			for (int l = 0; l < el.nen; l++) br[el.nd[l]] += w;
 		}
 		for (int i = 0; i < n; i++) {
 			if (fix[i]) br[i] = 0;
@@ -606,29 +671,23 @@ static int solve_eddy(FILE *fp_log)
 			const int taxis = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
 			double *jvr = (double *)calloc((size_t)ncell * 3, sizeof(double));
 			double *jvi = (double *)calloc((size_t)ncell * 3, sizeof(double));
-			for (int i = 0; i < Nx; i++) {
-			for (int j = 0; j < Ny; j++) {
-			for (int k = 0; k < Nz; k++) {
-				const int64_t c = (((int64_t)i * Ny) + j) * Nz + k;
-				const int id = CellConductor[c];
-				if (id < 0) continue;
-				// セル中心の Az は 8 節点の平均 (3 重線形補間の中心値)
+			for (int64_t c = 0; c < ncell; c++) {
+				elem_t el;
+				elem_get(c, &el);
+				if (el.cond < 0) continue;
+				// 要素中心の Az は節点の平均 (3 重線形 / 1 次三角形の重心値)
 				double zr8 = 0, zi8 = 0;
-				for (int l = 0; l < 8; l++) {
-					const int64_t nd = node_index(i + ((l >> 2) & 1),
-						j + ((l >> 1) & 1), k + (l & 1));
-					zr8 += ar[nd];
-					zi8 += ai[nd];
+				for (int l = 0; l < el.nen; l++) {
+					zr8 += ar[el.nd[l]];
+					zi8 += ai[el.nd[l]];
 				}
-				zr8 /= 8;
-				zi8 /= 8;
-				const double sg = CondSigma[id];
-				const double vp = ((id == jc) ? 1.0 : 0.0);
+				zr8 /= el.nen;
+				zi8 /= el.nen;
+				const double sg = CondSigma[el.cond];
+				const double vp = ((el.cond == jc) ? 1.0 : 0.0);
 				// -jω(zr8 + j zi8) = ω zi8 - j ω zr8
 				jvr[(c * 3) + taxis] = sg * (vp + (omega * zi8));
 				jvi[(c * 3) + taxis] = sg * (-omega * zr8);
-			}
-			}
 			}
 			sprintf(nm, "J_F_re_port%d", jc);  field_add_cellvec(nm, jvr);
 			sprintf(nm, "J_F_im_port%d", jc);  field_add_cellvec(nm, jvi);
@@ -639,20 +698,15 @@ static int solve_eddy(FILE *fp_log)
 		// I_k = (1/t) [ V'_k ∫_k σ dV - jω ∫_k σ Az dV ]
 		double *qr = (double *)calloc((size_t)nc, sizeof(double));
 		double *qi = (double *)calloc((size_t)nc, sizeof(double));
-		for (int i = 0; i < Nx; i++) {
-		for (int j = 0; j < Ny; j++) {
-		for (int k = 0; k < Nz; k++) {
-			const int id = CellConductor[((int64_t)i * Ny + j) * Nz + k];
-			if (id < 0) continue;
-			const double vol = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]);
-			const double w = CondSigma[id] * vol / 8;
-			for (int l = 0; l < 8; l++) {
-				const int64_t nd = node_index(i + ((l >> 2) & 1), j + ((l >> 1) & 1), k + (l & 1));
-				qr[id] += w * ar[nd];
-				qi[id] += w * ai[nd];
+		for (int64_t e = 0; e < nel; e++) {
+			elem_t el;
+			elem_get(e, &el);
+			if (el.cond < 0) continue;
+			const double w = CondSigma[el.cond] * el.vol / el.nen;
+			for (int l = 0; l < el.nen; l++) {
+				qr[el.cond] += w * ar[el.nd[l]];
+				qi[el.cond] += w * ai[el.nd[l]];
 			}
-		}
-		}
 		}
 		for (int kc = 1; kc <= np; kc++) {
 			// I = (V' ∫σdV - jω ∫σAz dV) / t、 -jω(qr + j qi) = ω qi - jω qr

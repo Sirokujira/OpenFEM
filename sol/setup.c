@@ -48,6 +48,130 @@ static void alloc_matrices(void)
 }
 
 
+// 断面 2 次元の非構造格子 (三角形) のセットアップ
+//
+// M / F は伝送線路軸 t に垂直な断面での 2 次元問題なので、四面体ではなく
+// 三角形で切った格子に載る。三角形が体積要素になり、`region` が材料、
+// `electrode` が**導体断面**の物理タグを指す (3 次元格子の「電極面」に
+// あたるものは 2 次元では存在しない)。
+//
+// 単位長あたりの量として扱うので TlineLength = 1 とし、以降の
+// 「体積」はすべて面積になる。
+static int setup_tri2d(void)
+{
+	// 断面 2 次元の格子で解けるのは M / F だけ
+	if (Analysis & ~(ANALYSIS_M | ANALYSIS_F)) {
+		printf("%s\n", "*** a 2-D (cross-section) mesh supports only analysis M and F "
+			"(C / L / R / E / A / P need a 3-D tetrahedral mesh)");
+		return 1;
+	}
+	// 面は伝送線路軸に垂直でなければならない (その軸の座標が一定)
+	if (!Tline) {
+		printf("%s\n", "*** a 2-D (cross-section) mesh needs the tline key");
+		return 1;
+	}
+	// 非線形 (B-H) とヒステリシス (J-A) は Gauss 点毎の状態を構造格子の
+	// セル配列で持っているので、2 次元格子では使えない
+	for (int m = 0; m < NMaterial; m++) {
+		if ((Material[m].nbh[0] > 0) || Material[m].ja.on) {
+			printf("%s\n", "*** nonlinear (bh) and hysteresis (ja) materials are "
+				"available only on a structured mesh");
+			return 1;
+		}
+	}
+	{
+		const double *c = ((Tline == 'X') ? Xp : (Tline == 'Y') ? Yp : Zp);
+		double lo = c[0], hi = c[0], span = 0;
+		for (int i = 1; i < NNode; i++) {
+			if (c[i] < lo) lo = c[i];
+			if (c[i] > hi) hi = c[i];
+		}
+		int p, q;
+		tri_axes(&p, &q);
+		const double *cp = ((p == 0) ? Xp : (p == 1) ? Yp : Zp);
+		const double *cq = ((q == 0) ? Xp : (q == 1) ? Yp : Zp);
+		double plo = cp[0], phi = cp[0], qlo = cq[0], qhi = cq[0];
+		for (int i = 1; i < NNode; i++) {
+			if (cp[i] < plo) plo = cp[i];
+			if (cp[i] > phi) phi = cp[i];
+			if (cq[i] < qlo) qlo = cq[i];
+			if (cq[i] > qhi) qhi = cq[i];
+		}
+		span = (phi - plo) + (qhi - qlo);
+		if ((hi - lo) > (EPS * span)) {
+			printf("*** a 2-D mesh must lie in a plane normal to tline = %c "
+				"(the %c coordinate spans %.4e [m])\n", Tline, Tline, hi - lo);
+			return 1;
+		}
+	}
+
+	// 物理タグ -> 材料番号 / 導体番号 (どちらも三角形のタグ)
+	TriMat = (unsigned char *)malloc((size_t)NTri * sizeof(unsigned char));
+	TriCond = (signed char *)malloc((size_t)NTri * sizeof(signed char));
+	TriArea = (double *)malloc((size_t)NTri * sizeof(double));
+	for (int e = 0; e < NTri; e++) {
+		int m = 0, id = -1;
+		for (int q = 0; q < NRegion; q++) {
+			if (TriTag[e] == RegionTag[q]) m = RegionMat[q];
+		}
+		for (int q = 0; q < NElectrode; q++) {
+			if (TriTag[e] == ElecTag[q]) id = ElecCond[q];
+		}
+		TriMat[e] = (unsigned char)m;
+		TriCond[e] = (signed char)id;
+
+		double g[3][2], area;
+		if (tri_grad(&Tri[e * 3], g, &area)) {
+			printf("*** triangle %d is degenerate (zero area)\n", e + 1);
+			return 1;
+		}
+		TriArea[e] = area;
+	}
+
+	// 導体の断面積。2 次元では線路長 1 m あたりで扱う
+	for (int p = 0; p < MAXPORT; p++) CondArea[p] = 0;
+	for (int e = 0; e < NTri; e++) {
+		const int id = TriCond[e];
+		if (id >= 0) CondArea[id] += TriArea[e];
+	}
+	for (int p = 0; p <= NPort; p++) {
+		if (CondArea[p] <= 0) {
+			printf("*** conductor %d has no triangle (check the physical tags)\n", p);
+			return 1;
+		}
+	}
+
+	// 節点の Dirichlet は使わない (M / F は自然境界条件)
+	NodeConductor = (signed char *)malloc((size_t)NNode * sizeof(signed char));
+	memset(NodeConductor, -1, (size_t)NNode * sizeof(signed char));
+
+	TlineLength = 1;
+	if (LineLength <= 0) LineLength = 1;
+
+	alloc_matrices();
+
+	// 導体の DC 直列抵抗 [ohm/m] (3 次元格子と同じ式。面積は単位長あたり)
+	{
+		int have = 0;
+		for (int p = 0; p <= NPort; p++) {
+			if (CondSigma[p] > 0) have = 1;
+		}
+		if (have) {
+			const double r0 = ((CondSigma[0] > 0) ? (1 / (CondSigma[0] * CondArea[0])) : 0);
+			for (int k = 1; k <= NPort; k++) {
+				const double rk = ((CondSigma[k] > 0) ? (1 / (CondSigma[k] * CondArea[k])) : 0);
+				for (int j = 1; j <= NPort; j++) {
+					Smat[((k - 1) * NPort) + (j - 1)] = r0 + ((k == j) ? rk : 0);
+				}
+			}
+			HaveS = 1;
+		}
+	}
+
+	return 0;
+}
+
+
 // 非構造格子のセットアップ
 static int setup_unstruct(void)
 {
@@ -61,6 +185,8 @@ static int setup_unstruct(void)
 			"(this mesh has 10-node tetrahedra)");
 		return 1;
 	}
+
+	if (MeshDim == 2) return setup_tri2d();
 
 	// 物理タグ -> 材料番号
 	TetMat = (unsigned char *)malloc((size_t)NTet * sizeof(unsigned char));
@@ -326,7 +452,7 @@ void memfree(void)
 	free(Conductor);
 	free(Xp); free(Yp); free(Zp);
 	free(Tet); free(TetTag); free(TetMat); free(Tet2);
-	free(Tri); free(TriTag); free(Tri2);
+	free(Tri); free(TriTag); free(Tri2); free(TriMat); free(TriCond); free(TriArea);
 	free(CellMaterial);
 	free(CellConductor);
 	free(NodeConductor);

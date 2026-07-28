@@ -24,7 +24,9 @@ fieldout.c
 
 int64_t num_cell(void)
 {
-	return (MeshMode ? (int64_t)NTet : ((int64_t)Nx * Ny * Nz));
+	if (MeshMode) return ((MeshDim == 2) ? (int64_t)NTri : (int64_t)NTet);
+
+	return ((int64_t)Nx * Ny * Nz);
 }
 
 
@@ -83,7 +85,23 @@ void field_add_grad(const char *name, const double *u, int kind)
 	const int64_t nc = num_cell();
 	double *v = (double *)malloc((size_t)nc * 3 * sizeof(double));
 
-	if (MeshMode) {
+	if (MeshMode && (MeshDim == 2)) {
+		// 断面 2 次元 : 面内 2 軸だけが微分に効く
+		int p, q;
+		tri_axes(&p, &q);
+		for (int e = 0; e < NTri; e++) {
+			const int32_t *nd = &Tri[e * 3];
+			double g[3][2], area, d[3] = {0, 0, 0};
+			if (!tri_grad(nd, g, &area)) {
+				for (int a = 0; a < 3; a++) {
+					d[p] += u[nd[a]] * g[a][0];
+					d[q] += u[nd[a]] * g[a][1];
+				}
+			}
+			for (int c = 0; c < 3; c++) v[(e * 3) + c] = -d[c];
+		}
+	}
+	else if (MeshMode) {
 		for (int e = 0; e < NTet; e++) {
 			double gn[10][3], d[3] = {0, 0, 0};
 			int nen = 0;
@@ -158,7 +176,20 @@ void field_free(void)
 
 static void write_grid(FILE *fp)
 {
-	if (MeshMode) {
+	if (MeshMode && (MeshDim == 2)) {
+		fprintf(fp, "DATASET UNSTRUCTURED_GRID\n");
+		fprintf(fp, "POINTS %d double\n", NNode);
+		for (int i = 0; i < NNode; i++) {
+			fprintf(fp, "%.9e %.9e %.9e\n", Xp[i], Yp[i], Zp[i]);
+		}
+		fprintf(fp, "\nCELLS %d %d\n", NTri, 4 * NTri);
+		for (int e = 0; e < NTri; e++) {
+			fprintf(fp, "3 %d %d %d\n", Tri[e * 3], Tri[(e * 3) + 1], Tri[(e * 3) + 2]);
+		}
+		fprintf(fp, "\nCELL_TYPES %d\n", NTri);
+		for (int e = 0; e < NTri; e++) fprintf(fp, "5\n");	// VTK_TRIANGLE
+	}
+	else if (MeshMode) {
 		fprintf(fp, "DATASET UNSTRUCTURED_GRID\n");
 		fprintf(fp, "POINTS %d double\n", NNode);
 		for (int i = 0; i < NNode; i++) {
@@ -218,7 +249,8 @@ static void write_cell_vec(FILE *fp, const char *name, const double *v)
 {
 	fprintf(fp, "VECTORS %s double\n", name);
 	if (MeshMode) {
-		for (int e = 0; e < NTet; e++) {
+		const int64_t ne = num_cell();
+		for (int64_t e = 0; e < ne; e++) {
 			fprintf(fp, "%.9e %.9e %.9e\n", v[e * 3], v[(e * 3) + 1], v[(e * 3) + 2]);
 		}
 	}
@@ -238,7 +270,13 @@ static void write_cell_vec(FILE *fp, const char *name, const double *v)
 static void write_cell_int(FILE *fp, const char *name, int structured_from_cell)
 {
 	fprintf(fp, "SCALARS %s int 1\nLOOKUP_TABLE default\n", name);
-	if (MeshMode) {
+	if (MeshMode && (MeshDim == 2)) {
+		// 2 次元格子では導体番号も要素データとして持っている
+		for (int e = 0; e < NTri; e++) {
+			fprintf(fp, "%d\n", (structured_from_cell ? (int)TriCond[e] : (int)TriMat[e]));
+		}
+	}
+	else if (MeshMode) {
 		for (int e = 0; e < NTet; e++) fprintf(fp, "%d\n", (int)TetMat[e]);
 	}
 	else {
@@ -284,7 +322,7 @@ int field_write(FILE *fp_log)
 
 	fprintf(fp, "\nCELL_DATA %lld\n", (long long)num_cell());
 	write_cell_int(fp, "material", 0);
-	if (!MeshMode && (CellConductor != NULL)) {
+	if (MeshMode ? (MeshDim == 2) : (CellConductor != NULL)) {
 		write_cell_int(fp, "conductor", 1);
 	}
 	for (int i = 0; i < NFieldC; i++) {

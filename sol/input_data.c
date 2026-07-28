@@ -1015,8 +1015,12 @@ int input_data(FILE *fp)
 				return 1;
 			}
 		}
-		if (Analysis & (ANALYSIS_M | ANALYSIS_F)) {
-			printf("%s\n", "*** analysis M / F are available only on a structured mesh");
+		// M / F は断面 2 次元の定式化なので、非構造格子では三角形で切った
+		// 断面の格子 (四面体を含まない .msh) でしか解けない。格子の次元は
+		// 読み込むまで分からないので、ここでは弾かず setup() で判定する
+		if ((Analysis & (ANALYSIS_M | ANALYSIS_F)) && (Analysis & ~(ANALYSIS_M | ANALYSIS_F))) {
+			printf("%s\n", "*** on an unstructured mesh, analysis M / F cannot be "
+				"combined with other analyses (M / F need a 2-D cross-section mesh)");
 			return 1;
 		}
 		// A 解析 (3 次元渦電流) は周波数と導電材料が要る

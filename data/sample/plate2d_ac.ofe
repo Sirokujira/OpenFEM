@@ -1,0 +1,34 @@
+OpenFEM 1 0
+title = parallel plate line (eddy current) on a 2-D triangular mesh
+#
+# 断面 2 次元の非構造格子 (三角形が体積要素) で静磁場を解く。形状は構造格子版
+# plate_line_dc.ofe と同じ (W=1mm, d=0.2mm, t=0.05mm) なので 1 次元厳密解が
+# そのまま使える:
+#
+#   L'dc = mu0 (d + 2t/3) / W = 2.932153e-07 [H/m]
+#   Rs'  = 2 / (sigma W t)    = 6.896552e-01 [ohm/m]
+#
+# 伝送線路軸は x (構造格子版は z)。軸が変わっても面内 2 軸の取り方が正しければ
+# 同じ値になるので、tri_axes() の取り違えはここで落ちる。
+#
+# 外側境界は自然境界条件 (∂Az/∂n = 0)。板の外面と側面をそのまま境界にすると
+#   z = -t, d+t で B_y = 0、y = ±W/2 で B_z = 0
+# となり、これは 1 次元解が厳密に満たす条件そのものになる。
+#
+# 物理タグ : 1 = 間隙 (材料 2)、10 = 導体 0 の断面、11 = 導体 1 の断面
+#
+mesh = plate2d.msh
+material = 1.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+conductorsigma = 0 5.8e7
+conductorsigma = 1 5.8e7
+
+analysis = F
+frequency = 1e3
+tline = X
+
+solver = 200000 5000 1e-11
+end

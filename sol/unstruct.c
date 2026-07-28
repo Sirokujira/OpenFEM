@@ -168,9 +168,22 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		}
 	}
 
-	if (NTet < 1) {
-		printf("%s\n", "*** mesh : no tetrahedron found");
-		return 1;
+	// 四面体が 1 つも無ければ断面 2 次元の格子として扱う (三角形が体積要素)。
+	// M / F は断面 2 次元の定式化なので、この形でしか非構造格子に載らない
+	MeshDim = ((NTet > 0) ? 3 : 2);
+	if (MeshDim == 2) {
+		if (NTri < 1) {
+			printf("%s\n", "*** mesh : no tetrahedron and no triangle found");
+			return 1;
+		}
+		TetOrder = 1;			// 2 次元格子の 2 次要素は未対応
+		for (int t = 0; t < NTri; t++) {
+			if (Tri2[(t * 3)] != Tri[(t * 3)]) {
+				printf("%s\n", "*** mesh : a 2-D (cross-section) mesh must use "
+					"3-node triangles (second-order elements are 3-D only)");
+				return 1;
+			}
+		}
 	}
 
 	// 三角形の次数が四面体と食い違うと電極面の中間節点が固定されず、
@@ -920,4 +933,203 @@ int solve_nodal_test(FILE *fp_log)
 	fprintf(fp_log, "  result : %s\n", (ierr ? "FAILED" : "passed"));
 
 	return ierr;
+}
+
+
+// ---- 断面 2 次元の三角形要素 (MeshDim == 2) ----
+//
+// M / F は「伝送線路軸 t に垂直な断面での 2 次元問題」なので、四面体ではなく
+// 三角形で切った格子に載る。未知数は Az (軸方向のベクトルポテンシャル成分) の
+// 節点値で、面内の 2 軸 (p, q) だけが微分に効く。
+//
+// 1 次三角形は ∇λ が要素内一定なので、剛性は面積を掛けるだけで厳密:
+//   K_ij = ν S (∇λ_i・∇λ_j)
+// 質量は ∫λ_iλ_j dS = S(1+δ_ij)/12 で厳密:
+//   M_ij = σ S (1 + δ_ij)/12
+//
+// 単位長あたりの量として扱うので「体積」は面積そのもの (線路長 1 m 相当)。
+
+// 面内の 2 軸 (伝送線路軸 t の次の 2 つ)
+void tri_axes(int *p, int *q)
+{
+	const int t = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
+
+	*p = (t + 1) % 3;
+	*q = (t + 2) % 3;
+}
+
+
+// 三角形の面内勾配 ∇λ (要素内一定) と面積。戻り値 : 0 = 正常、1 = 退化
+int tri_grad(const int32_t nd[3], double g[3][2], double *area)
+{
+	int p, q;
+	tri_axes(&p, &q);
+	const double *cp = ((p == 0) ? Xp : (p == 1) ? Yp : Zp);
+	const double *cq = ((q == 0) ? Xp : (q == 1) ? Yp : Zp);
+
+	const double p0 = cp[nd[0]], q0 = cq[nd[0]];
+	const double p1 = cp[nd[1]] - p0, q1 = cq[nd[1]] - q0;
+	const double p2 = cp[nd[2]] - p0, q2 = cq[nd[2]] - q0;
+
+	const double det = (p1 * q2) - (p2 * q1);
+	if (det == 0) return 1;
+
+	// ∇λ1, ∇λ2 は J^-1 の行、∇λ0 = -(∇λ1 + ∇λ2)
+	g[1][0] =  q2 / det;  g[1][1] = -p2 / det;
+	g[2][0] = -q1 / det;  g[2][1] =  p1 / det;
+	g[0][0] = -(g[1][0] + g[2][0]);
+	g[0][1] = -(g[1][1] + g[2][1]);
+	*area = fabs(det) / 2;
+
+	return 0;
+}
+
+
+// 行 row の中で列 col の位置 (crs_find の公開版)
+int64_t crs_find_tri(const crs_t *A, int32_t row, int32_t col)
+{
+	return crs_find(A, row, col);
+}
+
+
+// 三角形の連結から節点の隣接関係を作る
+void crs_alloc_tri(crs_t *A)
+{
+	const int n = NNode;
+
+	int *cnt = (int *)malloc((size_t)n * sizeof(int));
+	memset(cnt, 0, (size_t)n * sizeof(int));
+	for (int e = 0; e < NTri; e++) {
+		for (int l = 0; l < 3; l++) cnt[Tri[(e * 3) + l]]++;
+	}
+	int64_t *nptr = (int64_t *)malloc(((size_t)n + 1) * sizeof(int64_t));
+	nptr[0] = 0;
+	for (int i = 0; i < n; i++) nptr[i + 1] = nptr[i] + cnt[i];
+	int32_t *nlist = (int32_t *)malloc((size_t)nptr[n] * sizeof(int32_t));
+	memset(cnt, 0, (size_t)n * sizeof(int));
+	for (int e = 0; e < NTri; e++) {
+		for (int l = 0; l < 3; l++) {
+			const int32_t i = Tri[(e * 3) + l];
+			nlist[nptr[i] + cnt[i]] = (int32_t)e;
+			cnt[i]++;
+		}
+	}
+
+	A->n = n;
+	A->rowptr = (int64_t *)malloc(((size_t)n + 1) * sizeof(int64_t));
+	int cap = 64;
+	int32_t *work = (int32_t *)malloc((size_t)cap * sizeof(int32_t));
+	int *rown = (int *)malloc((size_t)n * sizeof(int));
+
+	for (int pass = 0; pass < 2; pass++) {
+		if (pass == 1) {
+			A->rowptr[0] = 0;
+			for (int i = 0; i < n; i++) A->rowptr[i + 1] = A->rowptr[i] + rown[i];
+			A->nnz = A->rowptr[n];
+			A->col = (int32_t *)malloc((size_t)A->nnz * sizeof(int32_t));
+			A->val = (double *)malloc((size_t)A->nnz * sizeof(double));
+		}
+		for (int i = 0; i < n; i++) {
+			const int64_t p0 = nptr[i], p1 = nptr[i + 1];
+			const int need = (int)(p1 - p0) * 3;
+			if (need > cap) {
+				cap = need;
+				work = (int32_t *)realloc(work, (size_t)cap * sizeof(int32_t));
+			}
+			int m = 0;
+			for (int64_t p = p0; p < p1; p++) {
+				for (int l = 0; l < 3; l++) work[m++] = Tri[(nlist[p] * 3) + l];
+			}
+			qsort(work, (size_t)m, sizeof(int32_t), cmp_int32);
+			if (pass == 0) {
+				int u = 0;
+				for (int q = 0; q < m; q++) {
+					if ((q == 0) || (work[q] != work[q - 1])) u++;
+				}
+				rown[i] = u;
+			}
+			else {
+				int64_t w = A->rowptr[i];
+				for (int q = 0; q < m; q++) {
+					if ((q == 0) || (work[q] != work[q - 1])) A->col[w++] = work[q];
+				}
+			}
+		}
+	}
+
+	free(cnt);
+	free(nptr);
+	free(nlist);
+	free(work);
+	free(rown);
+
+	crs_zero(A);
+}
+
+
+// 剛性行列 K_ij = ∫ ν ∇λ_i・∇λ_j dS  (面内の異方性テンソルも扱う)
+// nucell が非 NULL なら要素毎の ν を使う (等方性、非線形解析用)。
+void assemble_nu_tri(crs_t *A, const double *nucell)
+{
+	int p, q;
+	tri_axes(&p, &q);
+	crs_zero(A);
+
+	for (int e = 0; e < NTri; e++) {
+		const int32_t *nd = &Tri[e * 3];
+		double g[3][2], area;
+		if (tri_grad(nd, g, &area)) continue;
+
+		// 面内 2x2 の磁気抵抗率 [[cpp, cpq], [cpq, cqq]]
+		double cpp, cqq, cpq;
+		if (nucell != NULL) {
+			cpp = cqq = nucell[e];
+			cpq = 0;
+		}
+		else {
+			// mode 4 = 「∇Az の基底での ν」。B = ∇×(Az ê_t) なので
+			// 面内 2 成分の入れ替えと非対角の符号反転が要る (assemble.c 参照)
+			double c[6];
+			material_coef_pub(TriMat[e], 4, c);
+			const double cm[3][3] = {{c[0], c[3], c[5]},
+			                         {c[3], c[1], c[4]},
+			                         {c[5], c[4], c[2]}};
+			cpp = cm[p][p];
+			cqq = cm[q][q];
+			cpq = cm[p][q];
+		}
+
+		for (int l = 0; l < 3; l++) {
+			for (int m = 0; m < 3; m++) {
+				const double v = (cpp * g[l][0] * g[m][0])
+				               + (cqq * g[l][1] * g[m][1])
+				               + (cpq * ((g[l][0] * g[m][1]) + (g[l][1] * g[m][0])));
+				const int64_t s = crs_find(A, nd[l], nd[m]);
+				if (s >= 0) A->val[s] += v * area;
+			}
+		}
+	}
+}
+
+
+// 質量行列 M_ij = ∫ σ λ_i λ_j dS = σ S (1 + δ_ij)/12 (導体要素のみ)
+void assemble_mass_tri(crs_t *A)
+{
+	crs_zero(A);
+
+	for (int e = 0; e < NTri; e++) {
+		const int id = TriCond[e];
+		if (id < 0) continue;
+		const double sg = CondSigma[id];
+		if (sg <= 0) continue;
+
+		const int32_t *nd = &Tri[e * 3];
+		const double w = sg * TriArea[e] / 12;
+		for (int l = 0; l < 3; l++) {
+			for (int m = 0; m < 3; m++) {
+				const int64_t s = crs_find(A, nd[l], nd[m]);
+				if (s >= 0) A->val[s] += w * ((l == m) ? 2 : 1);
+			}
+		}
+	}
 }

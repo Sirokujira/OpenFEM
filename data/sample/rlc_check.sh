@@ -44,6 +44,10 @@
 #   coax_p2        : 粗い同軸 (nr=4, nt=12) を曲がった 2 次要素で (許容 0.3%)
 #                    + 同じ格子の 1 次要素より 10 倍以上良いこと
 #   mesh order     : 次数の混在・2 次格子への analysis=A・1 次三角形を弾くこと
+#   plate2d        : 断面 2 次元の三角形格子で M / F を解き、構造格子版と同じ
+#                    1 次元厳密解と比較する (Ldc / Rs / R(f) / L(f)、許容 0.2%)
+#   anisotropic mu : 面内の異方性 ν が **B に掛かる** こと (grad(Az) ではなく)。
+#                    等方性では一致するので等方性ケースでは検出できない
 #   bar_eddy       : 3 次元渦電流 (A-φ)。Z = γL/(2σW tanh(γt/2)) と比較
 #                    (1e2 / 1e4 / 1e5 Hz、許容 0.5% / 0.5% / 2%)
 #                    + gauge = 1 で Z が変わらないこと (ゲージ不変性)
@@ -415,6 +419,75 @@ awk '/^[0-9]+ 9 2 / { print $1, 2, 2, $4, $5, $6, $7, $8; next } { print }' \
 sed 's/^mesh = .*/mesh = tri1.msh/' "$SRC/box_p2.ofe" > "$WORK/p2_tri1.ofe"
 mesh_reject "order-2 tetrahedra with order-1 triangles" p2_tri1.ofe
 
+# 断面 2 次元の非構造格子 (三角形が体積要素) で M / F を解く。形状は構造格子版
+# plate_line_dc / plate_line_ac と同じなので同じ 1 次元厳密解が使える。
+# **伝送線路軸が違う** (構造格子は z、こちらは x) ので、面内 2 軸の取り方を
+# 取り違えるとここで落ちる
+echo "[plate2d] parallel plate line on a 2-D (cross-section) triangular mesh"
+run_case plate2d_dc
+compare "Ldc [H/m]" "$(value_of Ldc)" 2.932153e-07 0.002
+compare "Rs [ohm/m]" "$(value_of Rs)" 6.896552e-01 0.001
+
+echo "[plate2d_ac] the same cross-section with the eddy-current (F) analysis"
+cp "$SRC/plate2d_ac.ofe" "$WORK/"
+for m in "$SRC"/*.msh; do
+	[ -f "$m" ] && cp "$m" "$WORK/"
+done
+# freq  R[ohm/m]       L[H/m]         許容 (格子が表皮深さを刻めているので厳しい)
+for pair in "1e3 6.896552e-01 2.932153e-07" \
+            "1e7 1.624296e+00 2.780550e-07"; do
+	set -- $pair
+	sed "s/^frequency = .*/frequency = $1/" "$SRC/plate2d_ac.ofe" > "$WORK/plate2d_run.ofe"
+	(cd "$WORK" && "$OFE" -n 2 plate2d_run.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "R(f=$1) [ohm/m]" "$(value_of Rf)" "$2" 0.002
+	compare "L(f=$1) [H/m]" "$(value_of Lf)" "$3" 0.002
+done
+
+# 異方性の μ。**B は ∇Az を 90 度回したものなので、ν を ∇Az にそのまま掛けると
+# 面内 2 成分を取り違える。** 等方性では一致するので等方性ケースでは検出できない。
+# 1 次元解では B が p 軸を向くので、効くのは μ_pp だけ (μ_qq は L を変えない)。
+#   構造格子 : tline = Z -> p = x   (plate_line_dc の形状)
+#   2 次元格子 : tline = X -> p = y (plate2d の形状)
+echo "[plate2d_rot] the same cross-section rotated 90 degrees in the plane"
+run_case plate2d_rot
+# 面内で回しただけなので等方性の答えは変わらない (回転不変性)
+compare "rotated mesh, isotropic Ldc [H/m]" "$(value_of Ldc)" 2.932153e-07 0.002
+
+echo "[anisotropic mu] the in-plane tensor must act on B, not on grad(Az)"
+aniso_mu() {	# aniso_mu <ラベル> <ofe> <sed で入れる anisomur 行> <期待値>
+	sed "s/^region = 1 2/region = 1 2\n$3/" "$SRC/$2.ofe" > "$WORK/amu.ofe"
+	(cd "$WORK" && "$OFE" -n 2 amu.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "$1" "$(value_of Ldc)" "$4" 0.002
+}
+# L'dc = mu0 (mur_pp d + 2t/3) / W
+aniso_mu "2-D mesh, mu_yy = 5 (along B)"     plate2d_dc "anisomur = 2 1.0 5.0 1.0" 1.298525e-06
+aniso_mu "2-D mesh, mu_zz = 5 (across B)"    plate2d_dc "anisomur = 2 1.0 1.0 5.0" 2.932153e-07
+# **面内で 90 度回した格子も回すこと。** 1 次元解では面内勾配の片方しか立たない
+# ので、片方の格子だけだと面内テンソルの一方の成分が一度も検査されない
+# (実測: c_pp を壊す変異が回転前の格子だけでは素通りした)
+aniso_mu "rotated mesh, mu_zz = 5 (along B)"  plate2d_rot "anisomur = 2 1.0 1.0 5.0" 1.298525e-06
+aniso_mu "rotated mesh, mu_yy = 5 (across B)" plate2d_rot "anisomur = 2 1.0 5.0 1.0" 2.932153e-07
+# 構造格子側は geometry で間隙に材料 2 を割り当てる
+mkaniso() {
+	sed -e "s/^conductorsigma = 0 5.8e7/material = 1.0 0\ngeometry = 2 1 0 1e-3 0.05e-3 0.25e-3 0 1e-4\n$1\nconductorsigma = 0 5.8e7/" \
+	    "$SRC/plate_line_dc.ofe" > "$WORK/samu.ofe"
+	(cd "$WORK" && "$OFE" -n 2 samu.ofe > /dev/null && "$OFE_POST" > /dev/null)
+}
+mkaniso "anisomur = 2 5.0 1.0 1.0"
+compare "structured, mu_xx = 5 (along B)"  "$(value_of Ldc)" 1.298525e-06 0.002
+mkaniso "anisomur = 2 1.0 5.0 1.0"
+compare "structured, mu_yy = 5 (across B)" "$(value_of Ldc)" 2.932153e-07 0.002
+
+# 2 次元格子で弾くべき入力
+echo "[2-D mesh] inputs the solver must reject"
+sed 's/^analysis = M/analysis = C/' "$SRC/plate2d_dc.ofe" > "$WORK/t2d_c.ofe"
+mesh_reject "analysis C on a 2-D mesh" t2d_c.ofe
+sed 's/^tline = X/tline = Y/' "$SRC/plate2d_dc.ofe" > "$WORK/t2d_plane.ofe"
+mesh_reject "2-D mesh not normal to tline" t2d_plane.ofe
+sed 's/^region = 1 2/region = 1 2\nbh = 2 100 0.5\nbh = 2 1000 1.5/' \
+    "$SRC/plate2d_dc.ofe" > "$WORK/t2d_bh.ofe"
+mesh_reject "nonlinear (bh) on a 2-D mesh" t2d_bh.ofe
+
 # 3 次元渦電流 (A-φ、辺要素)。1 次元厳密解 Z = γL/(2σW tanh(γt/2)) と比較する。
 # ω→0 では R が DC 抵抗 L/(σWt) に厳密一致しなければならない (連成系全体の検査)
 echo "[bar_eddy] 3D eddy current (A-phi) vs the 1-D exact skin effect"
@@ -738,7 +811,7 @@ lint_expect "analysis=L alone"             lint_l_only.ofe    yes
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
-         box_p2 coax_p2 nodal_test_p2; do
+         box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 
