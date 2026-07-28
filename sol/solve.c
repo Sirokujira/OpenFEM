@@ -593,6 +593,49 @@ static int solve_eddy(FILE *fp_log)
 			ierr = 1;
 		}
 
+		// 場の出力 : 複素 Az と、そこから作る B = ∇×(Az ẑ_t) と J_z。
+		// J_z = σ (V'_k - jω Az)、V' は励振した導体のセルだけ 1 [V/m]
+		if (FieldOut) {
+			char nm[BUFSIZ];
+			sprintf(nm, "Az_F_re_port%d", jc);  field_add_node(nm, ar);
+			sprintf(nm, "Az_F_im_port%d", jc);  field_add_node(nm, ai);
+			sprintf(nm, "B_F_re_port%d", jc);   field_add_grad(nm, ar, 1);
+			sprintf(nm, "B_F_im_port%d", jc);   field_add_grad(nm, ai, 1);
+
+			const int64_t ncell = num_cell();
+			const int taxis = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
+			double *jvr = (double *)calloc((size_t)ncell * 3, sizeof(double));
+			double *jvi = (double *)calloc((size_t)ncell * 3, sizeof(double));
+			for (int i = 0; i < Nx; i++) {
+			for (int j = 0; j < Ny; j++) {
+			for (int k = 0; k < Nz; k++) {
+				const int64_t c = (((int64_t)i * Ny) + j) * Nz + k;
+				const int id = CellConductor[c];
+				if (id < 0) continue;
+				// セル中心の Az は 8 節点の平均 (3 重線形補間の中心値)
+				double zr8 = 0, zi8 = 0;
+				for (int l = 0; l < 8; l++) {
+					const int64_t nd = node_index(i + ((l >> 2) & 1),
+						j + ((l >> 1) & 1), k + (l & 1));
+					zr8 += ar[nd];
+					zi8 += ai[nd];
+				}
+				zr8 /= 8;
+				zi8 /= 8;
+				const double sg = CondSigma[id];
+				const double vp = ((id == jc) ? 1.0 : 0.0);
+				// -jω(zr8 + j zi8) = ω zi8 - j ω zr8
+				jvr[(c * 3) + taxis] = sg * (vp + (omega * zi8));
+				jvi[(c * 3) + taxis] = sg * (-omega * zr8);
+			}
+			}
+			}
+			sprintf(nm, "J_F_re_port%d", jc);  field_add_cellvec(nm, jvr);
+			sprintf(nm, "J_F_im_port%d", jc);  field_add_cellvec(nm, jvi);
+			free(jvr);
+			free(jvi);
+		}
+
 		// I_k = (1/t) [ V'_k ∫_k σ dV - jω ∫_k σ Az dV ]
 		double *qr = (double *)calloc((size_t)nc, sizeof(double));
 		double *qi = (double *)calloc((size_t)nc, sizeof(double));

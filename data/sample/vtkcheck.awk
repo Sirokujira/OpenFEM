@@ -14,7 +14,10 @@
 #   amax0  <max |v_x|>, amax1 <max |v_y|>, amax2 <max |v_z|>
 #   mean0/1/2  <体積加重平均の各成分>   … **符号**が効くので向きの誤りを捕まえる
 #   lo / hi    <xcut で切った両側の v_<axis> の体積加重平均>
+#   vlo / vhi  <両側の体積>、ilo / ihi <両側の ∫ v_<axis> dV>
 #              (-v axis=0|1|2 -v xcut=<座標> を与えたときだけ)
+#              積分する成分は -v comp=0|1|2 で別に指定できる (既定は axis)。
+#              分割軸と成分が違う場合 (例: y で切って z 成分を積分) に要る
 #              セルと座標の対応が崩れると値が入れ替わるので、
 #              VTK の並べ替え (i 最内) の誤りを検出できる
 #
@@ -22,7 +25,8 @@
 # どちらも扱う。VTK のセルの並びは i が最内なので、体積もその順に作る。
 
 BEGIN { mode = ""; nx = ny = nz = 0; np = 0; nc = 0; want = 0; got = 0
-        if (xcut == "") xcut = ""; if (axis == "") axis = 0 }
+        if (xcut == "") xcut = ""; if (axis == "") axis = 0
+        if (comp == "") comp = axis }
 
 /^DATASET/            { mode = $2; next }
 /^X_COORDINATES/      { rd = "x"; n = $2; k = 0; next }
@@ -111,7 +115,7 @@ END {
 		m0 += vx[e] * cv[e]; m1 += vy[e] * cv[e]; m2 += vz[e] * cv[e]
 		if (xcut != "") {
 			g = (axis == 0) ? gx[e] : ((axis == 1) ? gy[e] : gz[e])
-			c = (axis == 0) ? vx[e] : ((axis == 1) ? vy[e] : vz[e])
+			c = (comp == 0) ? vx[e] : ((comp == 1) ? vy[e] : vz[e])
 			if (g < xcut) { vlo += c * cv[e]; wlo += cv[e] }
 			else           { vhi += c * cv[e]; whi += cv[e] }
 		}
@@ -130,5 +134,9 @@ END {
 	if (xcut != "") {
 		printf "lo %.10e\n", ((wlo > 0) ? (vlo / wlo) : 0)
 		printf "hi %.10e\n", ((whi > 0) ? (vhi / whi) : 0)
+		printf "vlo %.10e\n", wlo		# 切断面より下側の体積
+		printf "vhi %.10e\n", whi		# 上側の体積 (積分 = lo*vlo, hi*vhi)
+		printf "ilo %.10e\n", vlo		# ∫ v_<axis> dV (下側)
+		printf "ihi %.10e\n", vhi		# ∫ v_<axis> dV (上側)
 	}
 }

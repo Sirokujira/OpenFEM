@@ -405,8 +405,8 @@ fi
 #   ∫ ½ε|E|² dV = ½CV²          (静電界)
 #   ∫ |J|²/(2σ) dV = ½Re(V I*)  (渦電流。J が一様な低周波では厳密)
 echo "[fieldout] the written field must reproduce the extracted lumped values"
-vtk() { awk -v arr="$2" -v axis="${3:-0}" -v xcut="${4:-}" -f "$SRC/vtkcheck.awk" \
-	"$WORK/ofe_field.vtk" | awk -v k="$1" '$1 == k { print $2 }'; }
+vtk() { awk -v arr="$2" -v axis="${3:-0}" -v xcut="${4:-}" -v comp="${5:-}" \
+	-f "$SRC/vtkcheck.awk" "$WORK/ofe_field.vtk" | awk -v k="$1" '$1 == k { print $2 }'; }
 
 # (0) 向き・分母・並べ替えの検査。直列 2 材料で E が区分一様になり、
 #     3 軸とも長さも分割数も違い、通電方向は不等間隔にしてある。
@@ -464,6 +464,51 @@ pf=$(awk -v r="$(vtk int2 J_A_re)" -v m="$(vtk int2 J_A_im)" \
 	'BEGIN{ printf "%.10e", (r + m) / (2 * 5.8e7) }')
 pt=$(awk '/port 1 : I =/{ printf "%.10e", 0.5 * $6 }' "$WORK/ofe.log")
 compare "ohmic loss from the field [W]" "$pf" "$pt" 1e-6
+
+# (4) 2 次元渦電流 (F) の場。オーム損が端子から見た ½Re(Y) と一致すること。
+#     F は V' = 1 [V/m] 励振なので Y = 1/Z より ½Re(Y) = ½R/(R²+X²)
+awk '/^analysis = /{print "fieldout = 1"} {print}' "$SRC/plate_line_ac.ofe" > "$WORK/fld_ac.ofe"
+(cd "$WORK" && "$OFE" -n 2 fld_ac.ofe > /dev/null && "$OFE_POST" > /dev/null)
+tl=$(awk '/Transmission line axis/ { for (i = 1; i <= NF; i++) if ($i == "=") l = $(i+1); print l }' \
+	"$WORK/ofe.log" | tail -1)
+pf=$(awk -v a="$(vtk int2 J_F_re_port1)" -v b="$(vtk int2 J_F_im_port1)" -v t="$tl" \
+	'BEGIN{ printf "%.10e", (a + b) / (2 * 5.8e7) / t }')
+pt=$(awk -v R="$(value_of Rf)" -v L="$(value_of Lf)" \
+	'BEGIN{ om = 2 * 3.14159265358979324 * 1e3; X = om * L
+	        printf "%.10e", 0.5 * R / ((R * R) + (X * X)) }')
+compare "ohmic loss from the field (F) [W/m]" "$pf" "$pt" 1e-6
+# 磁気エネルギーの恒等式 : ω∫|B|²/μ0 dA = X/(R²+X²)。
+# **B の実部と虚部の両方**が効くので、片方を取り違えると落ちる
+qf=$(awk -v a="$(vtk int2 B_F_re_port1)" -v b="$(vtk int2 B_F_im_port1)" -v t="$tl" \
+	'BEGIN{ om = 2 * 3.14159265358979324 * 1e3
+	        printf "%.10e", om * (a + b) / (4e-7 * 3.14159265358979324) / t }')
+qt=$(awk -v R="$(value_of Rf)" -v L="$(value_of Lf)" \
+	'BEGIN{ om = 2 * 3.14159265358979324 * 1e3; X = om * L
+	        printf "%.10e", X / ((R * R) + (X * X)) }')
+compare "magnetic energy from the field (F)" "$qf" "$qt" 1e-6
+# 導体毎の電流。|J|² は符号に無感なので、**符号つきで**端子アドミタンスと比べる。
+# 2 枚の板は y で分かれ、電流は tline 軸 (z) 向きなので分割軸と成分を分ける
+compare "Re(I) of the driven conductor" \
+	"$(awk -v v="$(vtk ihi J_F_re_port1 1 0.15e-3 2)" -v t="$tl" 'BEGIN{ printf "%.10e", v / t }')" \
+	"$(awk -v R="$(value_of Rf)" -v L="$(value_of Lf)" \
+		'BEGIN{ om = 2 * 3.14159265358979324 * 1e3; X = om * L
+		        printf "%.10e", R / ((R * R) + (X * X)) }')" 1e-6
+compare "Im(I) of the driven conductor" \
+	"$(awk -v v="$(vtk ihi J_F_im_port1 1 0.15e-3 2)" -v t="$tl" 'BEGIN{ printf "%.10e", v / t }')" \
+	"$(awk -v R="$(value_of Rf)" -v L="$(value_of Lf)" \
+		'BEGIN{ om = 2 * 3.14159265358979324 * 1e3; X = om * L
+		        printf "%.10e", -X / ((R * R) + (X * X)) }')" 1e-6
+# B の向き。板は x 方向に一様なので ∂Az/∂x = 0、B = ∇×(Az ẑ) は **x 向き**になる。
+# 回転を取らず -∇Az にすると同じ大きさで y 向きになるため、|B|² の恒等式では
+# 見えず、この成分比較でだけ落ちる
+res=$(awk -v bx="$(vtk amax0 B_F_re_port1)" -v by="$(vtk amax1 B_F_re_port1)" \
+	'BEGIN{ printf "%s", ((bx > 0) && (by < 1e-6 * bx)) ? "OK" : "NG" }')
+echo "  B_F is x-directed (curl, not gradient) : $res"
+case "$res" in NG*) status=1 ;; esac
+# 帰路の導体はちょうど符号が逆 (伝送線路の前提)
+compare "Re(I) of the return conductor" \
+	"$(awk -v v="$(vtk ilo J_F_re_port1 1 0.15e-3 2)" 'BEGIN{ printf "%.10e", -v }')" \
+	"$(vtk ihi J_F_re_port1 1 0.15e-3 2)" 1e-9
 
 # 非導電領域 (空気) を含む 3 次元渦電流。空気層は界面で Robin 条件に潰れるので
 # 1 次元の閉形式が残る。**空気が効いていることを見るには L を見る必要がある**
