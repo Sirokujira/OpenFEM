@@ -48,7 +48,8 @@ void monitor2(FILE *fp, int nthread)
 	fprintf(fp, "Title = %s\n", Title);
 	fprintf(fp, "Threads = %d\n", nthread);
 	if (MeshMode) {
-		fprintf(fp, "Mesh = %s (unstructured, tetrahedra)\n", MeshFile);
+		fprintf(fp, "Mesh = %s (unstructured, %s tetrahedra)\n", MeshFile,
+			((TetOrder >= 2) ? "10-node quadratic" : "4-node linear"));
 		fprintf(fp, "Nodes = %lld, Tetrahedra = %d, Triangles = %d\n",
 			(long long)nnode, NTet, NTri);
 	}
@@ -60,14 +61,15 @@ void monitor2(FILE *fp, int nthread)
 	fprintf(fp, "No. of Geometries = %d\n", NGeometry);
 	fprintf(fp, "No. of Conductors = %d (ports = %d)\n",
 		(MeshMode ? NElectrode : NConductor), NPort);
-	fprintf(fp, "Analysis =%s%s%s%s%s%s%s\n",
+	fprintf(fp, "Analysis =%s%s%s%s%s%s%s%s\n",
 		((Analysis & ANALYSIS_C) ? " C" : ""),
 		((Analysis & ANALYSIS_L) ? " L" : ""),
 		((Analysis & ANALYSIS_R) ? " R" : ""),
 		((Analysis & ANALYSIS_M) ? " M" : ""),
 		((Analysis & ANALYSIS_F) ? " F" : ""),
 		((Analysis & ANALYSIS_E) ? " E" : ""),
-		((Analysis & ANALYSIS_A) ? " A" : ""));
+		((Analysis & ANALYSIS_A) ? " A" : ""),
+		((Analysis & ANALYSIS_P) ? " P" : ""));
 	if (Freq > 0) {
 		fprintf(fp, "Frequency = %.6e [Hz]\n", Freq);
 	}

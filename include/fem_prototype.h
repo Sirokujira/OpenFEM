@@ -27,8 +27,12 @@ int ingeometry(double, double, double, int, const double *, double);
 
 // unstruct.c
 int mesh_read(const char *);
+int tet_nodes(int, int32_t [10]);
 void crs_alloc_tet(crs_t *);
 void assemble_tet(crs_t *, int);
+int tet10_element(int, const double [6], double [10][10], double *);
+int tet_grad_center(int, double [10][3], int *);
+int solve_nodal_test(FILE *);
 
 // edge.c
 void edge_build(void);

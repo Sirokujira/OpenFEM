@@ -1,7 +1,7 @@
 /*
 unstruct.c
 
-非構造格子 (4 節点四面体) の読み込み・CRS 構築・要素行列。
+非構造格子 (4 節点 / 10 節点四面体) の読み込み・CRS 構築・要素行列。
 
 格子は Gmsh ASCII 2.2 形式 (.msh) で与える。物理タグで領域と電極を指定し、
 `region` / `electrode` キーで材料番号・導体番号に対応づける。
@@ -10,6 +10,10 @@ unstruct.c
 反作用からの電荷抽出・反復解法は構造格子版をそのまま使える。
 現時点では静電系 (C / L / R) のみ対応する (M / F は断面 2 次元の定式化なので
 構造格子専用)。
+
+要素次数は格子ファイルから決める (Gmsh の要素型 4 / 2 なら 1 次、
+11 / 9 なら 2 次)。混在は受け付けない。2 次要素は等パラメトリックなので、
+辺上の中間節点を境界形状に載せれば曲面をそのまま表せる。
 */
 
 #include "fem.h"
@@ -80,6 +84,9 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 	TetTag = NULL;
 	Tri = NULL;
 	TriTag = NULL;
+	Tet2 = NULL;
+	Tri2 = NULL;
+	TetOrder = 0;			// 最初に出た四面体で決まる
 
 	for (int e = 0; e < ne; e++) {
 		if (fgets(line, sizeof(line), fp) == NULL) return 1;
@@ -101,41 +108,60 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		const int tag = ((ntag > 0) ? (int)v[3] : 0);
 		const int off = 3 + ntag;
 
-		if (type == 4) {
-			// 四面体
-			if (nv < off + 4) continue;
+		// 節点数 : 四面体 (型 4 / 11) と三角形 (型 2 / 9)
+		const int order = ((type == 11) || (type == 9)) ? 2 : 1;
+		const int nn = ((type == 4) ? 4 : (type == 11) ? 10
+		              : (type == 2) ? 3 : (type == 9) ? 6 : 0);
+		if (nn == 0) continue;			// 点・線分など、使わない要素型
+		if (nv < off + nn) continue;
+
+		// 節点番号を先に解決する (未解決なら打ち切り。ここで continue すると
+		// 配列の該当要素が未初期化のまま確定し、setup_unstruct() が
+		// それを添字に使って領域外書き込みになる)
+		int32_t nd[10];
+		for (int l = 0; l < nn; l++) {
+			const long g = v[off + l];
+			if ((g < 0) || (g > maxid) || (idmap[g] < 0)) {
+				printf("*** mesh : element %d refers to an unknown node %ld\n", e + 1, g);
+				return 1;
+			}
+			nd[l] = idmap[g];
+		}
+
+		if ((type == 4) || (type == 11)) {
+			// 四面体。次数は最初の 1 個で決め、以後は混在を許さない
+			if (TetOrder == 0) TetOrder = order;
+			if (TetOrder != order) {
+				printf("*** mesh : mixed element orders (element %d is order %d, "
+					"the mesh started as order %d)\n", e + 1, order, TetOrder);
+				return 1;
+			}
 			if (NTet % ARRAY_INC == 0) {
 				Tet = (int32_t *)realloc(Tet, (size_t)(NTet + ARRAY_INC) * 4 * sizeof(int32_t));
 				TetTag = (int *)realloc(TetTag, (size_t)(NTet + ARRAY_INC) * sizeof(int));
-			}
-			for (int l = 0; l < 4; l++) {
-				const long g = v[off + l];
-				if ((g < 0) || (g > maxid) || (idmap[g] < 0)) {
-					printf("*** mesh : element %d refers to an unknown node %ld\n", e + 1, g);
-					return 1;
+				if (order == 2) {
+					Tet2 = (int32_t *)realloc(Tet2, (size_t)(NTet + ARRAY_INC) * 6 * sizeof(int32_t));
 				}
-				Tet[(NTet * 4) + l] = idmap[g];
+			}
+			for (int l = 0; l < 4; l++) Tet[(NTet * 4) + l] = nd[l];
+			if (order == 2) {
+				for (int l = 0; l < 6; l++) Tet2[(NTet * 6) + l] = nd[4 + l];
 			}
 			TetTag[NTet] = tag;
 			NTet++;
 		}
-		else if (type == 2) {
-			// 三角形 (電極面の指定に使う)
-			if (nv < off + 3) continue;
+		else {
+			// 三角形 (電極面の指定に使う)。次数は四面体に合わせる
 			if (NTri % ARRAY_INC == 0) {
 				Tri = (int32_t *)realloc(Tri, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
 				TriTag = (int *)realloc(TriTag, (size_t)(NTri + ARRAY_INC) * sizeof(int));
+				Tri2 = (int32_t *)realloc(Tri2, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
 			}
-			// 四面体と同じく未解決の節点番号は打ち切る。ここで continue すると
-			// Tri[] の該当要素が未初期化のまま確定し、setup_unstruct() が
-			// それを添字に使って領域外書き込みになる
+			for (int l = 0; l < 3; l++) Tri[(NTri * 3) + l] = nd[l];
+			// 1 次の三角形では中間節点が無いので頂点で埋める (Dirichlet の
+			// 塗り分けは重複しても同じ値になるので無害)
 			for (int l = 0; l < 3; l++) {
-				const long g = v[off + l];
-				if ((g < 0) || (g > maxid) || (idmap[g] < 0)) {
-					printf("*** mesh : element %d refers to an unknown node %ld\n", e + 1, g);
-					return 1;
-				}
-				Tri[(NTri * 3) + l] = idmap[g];
+				Tri2[(NTri * 3) + l] = ((order == 2) ? nd[3 + l] : nd[l]);
 			}
 			TriTag[NTri] = tag;
 			NTri++;
@@ -145,6 +171,18 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 	if (NTet < 1) {
 		printf("%s\n", "*** mesh : no tetrahedron found");
 		return 1;
+	}
+
+	// 三角形の次数が四面体と食い違うと電極面の中間節点が固定されず、
+	// 電極が「穴だらけ」になる (収束はするが Q が合わない) ので弾く
+	if ((TetOrder == 2) && (NTri > 0)) {
+		for (int t = 0; t < NTri; t++) {
+			if (Tri2[(t * 3)] == Tri[(t * 3)]) {
+				printf("%s\n", "*** mesh : the tetrahedra are order 2 but the "
+					"triangles are order 1 (regenerate the mesh with -order 2)");
+				return 1;
+			}
+		}
 	}
 
 	return 0;
@@ -214,16 +252,31 @@ static int cmp_int32(const void *a, const void *b)
 }
 
 
+// 要素 e の局所節点をまとめて取り出す。戻り値は節点数 (1 次 4、2 次 10)。
+// 並びは Gmsh の tet10 と同じ (頂点 4 個のあと辺上の中間節点 6 個)
+int tet_nodes(int e, int32_t nd[10])
+{
+	for (int l = 0; l < 4; l++) nd[l] = Tet[(e * 4) + l];
+	if (TetOrder < 2) return 4;
+	for (int l = 0; l < 6; l++) nd[4 + l] = Tet2[(e * 6) + l];
+
+	return 10;
+}
+
+
 // 四面体の連結から節点の隣接関係を作る (対角成分を含む)
 void crs_alloc_tet(crs_t *A)
 {
 	const int n = NNode;
+	const int nen = ((TetOrder >= 2) ? 10 : 4);		// 要素あたりの節点数
 
 	// 節点毎の要素数を数える
 	int *cnt = (int *)malloc((size_t)n * sizeof(int));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < NTet; e++) {
-		for (int l = 0; l < 4; l++) cnt[Tet[(e * 4) + l]]++;
+		int32_t nd[10];
+		tet_nodes(e, nd);
+		for (int l = 0; l < nen; l++) cnt[nd[l]]++;
 	}
 	int64_t *nptr = (int64_t *)malloc(((size_t)n + 1) * sizeof(int64_t));
 	nptr[0] = 0;
@@ -231,10 +284,12 @@ void crs_alloc_tet(crs_t *A)
 	int32_t *nlist = (int32_t *)malloc((size_t)nptr[n] * sizeof(int32_t));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < NTet; e++) {
-		for (int l = 0; l < 4; l++) {
-			const int32_t nd = Tet[(e * 4) + l];
-			nlist[nptr[nd] + cnt[nd]] = (int32_t)e;
-			cnt[nd]++;
+		int32_t nd[10];
+		tet_nodes(e, nd);
+		for (int l = 0; l < nen; l++) {
+			const int32_t i = nd[l];
+			nlist[nptr[i] + cnt[i]] = (int32_t)e;
+			cnt[i]++;
 		}
 	}
 
@@ -248,15 +303,16 @@ void crs_alloc_tet(crs_t *A)
 
 	for (int i = 0; i < n; i++) {
 		const int64_t p0 = nptr[i], p1 = nptr[i + 1];
-		const int need = (int)(p1 - p0) * 4;
+		const int need = (int)(p1 - p0) * nen;
 		if (need > cap) {
 			cap = need;
 			work = (int32_t *)realloc(work, (size_t)cap * sizeof(int32_t));
 		}
 		int m = 0;
 		for (int64_t p = p0; p < p1; p++) {
-			const int32_t e = nlist[p];
-			for (int l = 0; l < 4; l++) work[m++] = Tet[(e * 4) + l];
+			int32_t nd[10];
+			tet_nodes(nlist[p], nd);
+			for (int l = 0; l < nen; l++) work[m++] = nd[l];
 		}
 		qsort(work, (size_t)m, sizeof(int32_t), cmp_int32);
 		int u = 0;
@@ -276,8 +332,9 @@ void crs_alloc_tet(crs_t *A)
 		const int64_t p0 = nptr[i], p1 = nptr[i + 1];
 		int m = 0;
 		for (int64_t p = p0; p < p1; p++) {
-			const int32_t e = nlist[p];
-			for (int l = 0; l < 4; l++) work[m++] = Tet[(e * 4) + l];
+			int32_t nd[10];
+			tet_nodes(nlist[p], nd);
+			for (int l = 0; l < nen; l++) work[m++] = nd[l];
 		}
 		qsort(work, (size_t)m, sizeof(int32_t), cmp_int32);
 		int64_t w = A->rowptr[i];
@@ -354,20 +411,212 @@ int tet_grad_pub(const int32_t nd[4], double g[4][3], double *vol)
 }
 
 
+// ---- 2 次四面体 (10 節点、等パラメトリック) ----
+//
+// 積分則は Duffy 変換 + 各方向 3 点 Gauss-Legendre (27 点)。
+//
+//   λ1 = u, λ2 = v(1-u), λ3 = w(1-u)(1-v),  λ0 = 1 - λ1 - λ2 - λ3
+//   dλ1 dλ2 dλ3 = (1-u)^2 (1-v) du dv dw
+//
+// これを選んだ理由は「重みが全部正で、正しさを手で追える」から。四面体の
+// 少点数則 (Keast 等) は次数が上がると負の重みが出るうえ、係数を暗記に頼ると
+// 検算できない。Duffy は 1 次元 Gauss の積で書けるので導出が閉じている。
+// 被積分関数 ∇N・∇N は λ について 2 次なので (1-u) の因子を含めても u で 4 次、
+// 3 点則 (5 次まで厳密) で直線要素なら厳密。曲がった要素では有理式になるので
+// 厳密ではないが、27 点あれば形状誤差より十分小さい。
+#define NQTET (27)
+
+// 積分点 (バリセントリック λ[4]) と重み (∫ f dλ1dλ2dλ3 の重み、合計 1/6)
+static void tet_quad(double lam[NQTET][4], double wq[NQTET])
+{
+	// [0,1] の 3 点 Gauss-Legendre
+	const double gp[3] = {0.5 - (0.5 * 0.77459666924148337704),
+	                      0.5,
+	                      0.5 + (0.5 * 0.77459666924148337704)};
+	const double gw[3] = {5.0 / 18, 8.0 / 18, 5.0 / 18};
+
+	int q = 0;
+	for (int a = 0; a < 3; a++) {
+	for (int b = 0; b < 3; b++) {
+	for (int c = 0; c < 3; c++) {
+		const double u = gp[a], v = gp[b], w = gp[c];
+		lam[q][1] = u;
+		lam[q][2] = v * (1 - u);
+		lam[q][3] = w * (1 - u) * (1 - v);
+		lam[q][0] = 1 - lam[q][1] - lam[q][2] - lam[q][3];
+		wq[q] = gw[a] * gw[b] * gw[c] * (1 - u) * (1 - u) * (1 - v);
+		q++;
+	}
+	}
+	}
+}
+
+
+// 10 節点四面体の形状関数の λ 微分 dl[i][a] = ∂N_i/∂λ_a
+static void tet10_dlam(const double lam[4], double dl[10][4])
+{
+	// 辺 (Gmsh の tet10 の並び)
+	static const int ed[6][2] = {{0, 1}, {1, 2}, {2, 0}, {3, 0}, {3, 2}, {3, 1}};
+
+	memset(dl, 0, sizeof(double) * 10 * 4);
+	for (int a = 0; a < 4; a++) {
+		dl[a][a] = (4 * lam[a]) - 1;			// N_a = λ_a (2λ_a - 1)
+	}
+	for (int l = 0; l < 6; l++) {
+		const int a = ed[l][0], b = ed[l][1];	// N = 4 λ_a λ_b
+		dl[4 + l][a] = 4 * lam[b];
+		dl[4 + l][b] = 4 * lam[a];
+	}
+}
+
+
+// 積分点 1 点での物理座標勾配 ∇N_i とヤコビアン行列式。
+// 戻り値 : 0 = 正常、1 = 退化 (det <= 0)
+static int tet10_grad(const int32_t nd[10], const double lam[4],
+	double gn[10][3], double *det)
+{
+	double dl[10][4];
+	tet10_dlam(lam, dl);
+
+	// 参照座標 ξ = (λ1, λ2, λ3) についての微分 (λ0 = 1 - λ1 - λ2 - λ3)
+	double dx[10][3];
+	for (int i = 0; i < 10; i++) {
+		for (int k = 0; k < 3; k++) dx[i][k] = dl[i][k + 1] - dl[i][0];
+	}
+
+	// J[r][k] = Σ_i x_i[r] dN_i/dξ_k
+	double j[3][3];
+	for (int r = 0; r < 3; r++) {
+		const double *p = ((r == 0) ? Xp : (r == 1) ? Yp : Zp);
+		for (int k = 0; k < 3; k++) {
+			double s = 0;
+			for (int i = 0; i < 10; i++) s += p[nd[i]] * dx[i][k];
+			j[r][k] = s;
+		}
+	}
+
+	const double d = (j[0][0] * ((j[1][1] * j[2][2]) - (j[1][2] * j[2][1])))
+	               - (j[0][1] * ((j[1][0] * j[2][2]) - (j[1][2] * j[2][0])))
+	               + (j[0][2] * ((j[1][0] * j[2][1]) - (j[1][1] * j[2][0])));
+	// 符号は節点の並び順で決まるので絶対値で潰さず、そのまま返して
+	// 呼び出し側で「要素内で符号が一定か」を見る (曲がった要素の裏返り検出)
+	if (d == 0) return 1;
+
+	// Jinv[k][r] = ∂ξ_k/∂x_r
+	const double ji[3][3] = {
+		{ ((j[1][1] * j[2][2]) - (j[1][2] * j[2][1])) / d,
+		 -((j[0][1] * j[2][2]) - (j[0][2] * j[2][1])) / d,
+		  ((j[0][1] * j[1][2]) - (j[0][2] * j[1][1])) / d},
+		{-((j[1][0] * j[2][2]) - (j[1][2] * j[2][0])) / d,
+		  ((j[0][0] * j[2][2]) - (j[0][2] * j[2][0])) / d,
+		 -((j[0][0] * j[1][2]) - (j[0][2] * j[1][0])) / d},
+		{ ((j[1][0] * j[2][1]) - (j[1][1] * j[2][0])) / d,
+		 -((j[0][0] * j[2][1]) - (j[0][1] * j[2][0])) / d,
+		  ((j[0][0] * j[1][1]) - (j[0][1] * j[1][0])) / d}
+	};
+
+	for (int i = 0; i < 10; i++) {
+		for (int r = 0; r < 3; r++) {
+			gn[i][r] = (dx[i][0] * ji[0][r]) + (dx[i][1] * ji[1][r]) + (dx[i][2] * ji[2][r]);
+		}
+	}
+	*det = d;
+
+	return 0;
+}
+
+
+// 要素 e の 10 節点要素行列 ke[10][10] と体積。戻り値 : 0 = 正常、1 = 退化
+int tet10_element(int e, const double c[6], double ke[10][10], double *vol)
+{
+	int32_t nd[10];
+	if (tet_nodes(e, nd) != 10) return 1;
+
+	double lam[NQTET][4], wq[NQTET];
+	tet_quad(lam, wq);
+
+	memset(ke, 0, sizeof(double) * 10 * 10);
+	double v = 0, sgn = 0;
+	for (int q = 0; q < NQTET; q++) {
+		double gn[10][3], det;
+		if (tet10_grad(nd, lam[q], gn, &det)) return 1;
+		// 節点の並びで det の符号は変わる。要素内で一定なら向きが揃っている
+		if (sgn == 0) sgn = ((det > 0) ? 1 : -1);
+		else if (det * sgn <= 0) return 1;		// 曲がりすぎて裏返っている
+		const double dw = wq[q] * fabs(det);
+		v += dw;
+		for (int l = 0; l < 10; l++) {
+			for (int m = 0; m < 10; m++) {
+				ke[l][m] += dw * ((c[0] * gn[l][0] * gn[m][0])
+				                + (c[1] * gn[l][1] * gn[m][1])
+				                + (c[2] * gn[l][2] * gn[m][2])
+				                + (c[3] * ((gn[l][0] * gn[m][1]) + (gn[l][1] * gn[m][0])))
+				                + (c[4] * ((gn[l][1] * gn[m][2]) + (gn[l][2] * gn[m][1])))
+				                + (c[5] * ((gn[l][2] * gn[m][0]) + (gn[l][0] * gn[m][2]))));
+			}
+		}
+	}
+	*vol = v;
+
+	return 0;
+}
+
+
+// 要素の重心での ∇N_i (場の出力に使う。1 次では要素内一定なので同じ値)
+int tet_grad_center(int e, double gn[10][3], int *nen)
+{
+	int32_t nd[10];
+	const int n = tet_nodes(e, nd);
+
+	*nen = n;
+	if (n == 4) {
+		double g[4][3], vol;
+		if (tet_grad_pub(nd, g, &vol)) return 1;
+		for (int i = 0; i < 4; i++) {
+			for (int r = 0; r < 3; r++) gn[i][r] = g[i][r];
+		}
+		return 0;
+	}
+
+	const double lam[4] = {0.25, 0.25, 0.25, 0.25};
+	double det;
+
+	return tet10_grad(nd, lam, gn, &det);
+}
+
+
 // 全体行列の作成 (非構造格子)
-//   K_ij = V (∇N_i)^T C (∇N_j)   1 次四面体では被積分関数が一定なので厳密
+//   K_ij = ∫ (∇N_i)^T C (∇N_j) dV
+// 1 次四面体では被積分関数が一定なので体積を掛けるだけで厳密。
+// 2 次四面体は Gauss 積分 (tet10_element)。
 void assemble_tet(crs_t *A, int mode)
 {
 	crs_zero(A);
 
-	for (int e = 0; e < NTet; e++) {
-		const int32_t *nd = &Tet[e * 4];
-		double g[4][3], vol;
-		if (tet_grad_pub(nd, g, &vol)) continue;
+	const int p2 = (TetOrder >= 2);
 
+	for (int e = 0; e < NTet; e++) {
 		double c[6];
 		material_coef_pub(TetMat[e], mode, c);
 		if ((c[0] <= 0) && (c[1] <= 0) && (c[2] <= 0)) continue;
+
+		if (p2) {
+			int32_t nd[10];
+			double ke[10][10], vol;
+			tet_nodes(e, nd);
+			if (tet10_element(e, c, ke, &vol)) continue;
+			for (int l = 0; l < 10; l++) {
+				for (int m = 0; m < 10; m++) {
+					const int64_t p = crs_find(A, nd[l], nd[m]);
+					if (p >= 0) A->val[p] += ke[l][m];
+				}
+			}
+			continue;
+		}
+
+		const int32_t *nd = &Tet[e * 4];
+		double g[4][3], vol;
+		if (tet_grad_pub(nd, g, &vol)) continue;
 
 		for (int l = 0; l < 4; l++) {
 			for (int m = 0; m < 4; m++) {
@@ -382,4 +631,293 @@ void assemble_tet(crs_t *A, int mode)
 			}
 		}
 	}
+}
+
+
+// ---- 節点要素 (P1 / P2) の自己検証 (analysis = P) ----
+//
+// 剛性行列を組んで、多項式の再現性を厳密な恒等式で検査する。
+//
+//   φ(r) = a・r + (1/2) r^T B r   (B は対称)
+//   ∇φ = a + B r  (r について 1 次)
+//   φ^T K φ = ∫ (∇φ)^T C (∇φ) dV
+//
+// 右辺は要素毎に閉形式で書ける。r が 1 次なので被積分関数は 2 次で、
+//   ∫ r_k dV = V (Σ_a p_a,k)/4
+//   ∫ r_k r_l dV = (V/20)[(Σ_a p_a,k)(Σ_b p_b,l) + Σ_a p_a,k p_a,l]
+// (∫λ_aλ_b dV = V(1+δ_ab)/20 と r = Σ λ_a p_a から)。組み立てとは独立に
+// 計算するので、形状関数・数値積分・組み立てのどれが壊れても落ちる。
+//
+// **検査の効き方**
+//  ・1 次要素は φ が 1 次のときだけ補間が厳密。2 次の φ は落ちて当然なので
+//    次数に応じて実行する検査を変える。
+//  ・1 次の φ では ∇φ が要素内で一定になり、どんな数値積分でも厳密になる。
+//    積分則の誤り (点数不足・重みの誤り) を捕まえるのは 2 次の φ だけ。
+//  ・材料は異方性にすること。等方性だけだと C の非対角成分が死ぬ。
+//  ・中間節点が辺の中点に無い (曲がった) 格子では 2 次の φ の補間が厳密で
+//    なくなるので、その検査は飛ばして体積だけ見る。曲面の等パラメトリック
+//    写像は「積分した体積が解析値と合うか」で別に検証する。
+int solve_nodal_test(FILE *fp_log)
+{
+	int ierr = 0;
+
+	fprintf(fp_log, "\n=== nodal element (P%d) self test ===\n", TetOrder);
+	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, nodes per element = %d\n",
+		NNode, NTet, ((TetOrder >= 2) ? 10 : 4));
+
+	// 中間節点が辺の中点からどれだけずれているか (曲がった格子の判定)
+	double curve = 0;
+	if (TetOrder >= 2) {
+		static const int ed[6][2] = {{0, 1}, {1, 2}, {2, 0}, {3, 0}, {3, 2}, {3, 1}};
+		for (int e = 0; e < NTet; e++) {
+			int32_t nd[10];
+			tet_nodes(e, nd);
+			double h = 0;
+			for (int l = 0; l < 6; l++) {
+				const int32_t a = nd[ed[l][0]], b = nd[ed[l][1]];
+				const double dx = Xp[b] - Xp[a], dy = Yp[b] - Yp[a], dz = Zp[b] - Zp[a];
+				const double len = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+				if (len > h) h = len;
+			}
+			if (h <= 0) continue;
+			for (int l = 0; l < 6; l++) {
+				const int32_t a = nd[ed[l][0]], b = nd[ed[l][1]], c = nd[4 + l];
+				const double dx = Xp[c] - ((Xp[a] + Xp[b]) / 2);
+				const double dy = Yp[c] - ((Yp[a] + Yp[b]) / 2);
+				const double dz = Zp[c] - ((Zp[a] + Zp[b]) / 2);
+				const double d = sqrt((dx * dx) + (dy * dy) + (dz * dz)) / h;
+				if (d > curve) curve = d;
+			}
+		}
+		fprintf(fp_log, "  mid-node offset = %.3e (relative to the edge length)\n", curve);
+	}
+	const int straight = (curve < 1e-9);
+
+	// 積分した体積 (2 次では等パラメトリック写像のヤコビアンの検証になる)
+	double vsum = 0;
+	double *vole = (double *)malloc((size_t)NTet * sizeof(double));
+	{
+		const double c1[6] = {1, 1, 1, 0, 0, 0};
+		for (int e = 0; e < NTet; e++) {
+			double vol = 0;
+			if (TetOrder >= 2) {
+				double ke[10][10];
+				if (tet10_element(e, c1, ke, &vol)) {
+					fprintf(fp_log, "*** tetrahedron %d is degenerate or inverted\n", e + 1);
+					free(vole);
+					return 1;
+				}
+			}
+			else {
+				double g[4][3];
+				if (tet_grad_pub(&Tet[e * 4], g, &vol)) vol = 0;
+			}
+			vole[e] = vol;
+			vsum += vol;
+		}
+	}
+	fprintf(fp_log, "  integrated volume = %.10e [m^3]\n", vsum);
+
+	crs_t A;
+	crs_alloc_tet(&A);
+	assemble_tet(&A, 0);			// 誘電率テンソル (材料に anisotropy を持たせること)
+	fprintf(fp_log, "  matrix : %lld nonzeros (%.1f per row)\n",
+		(long long)A.nnz, (double)A.nnz / ((NNode > 0) ? NNode : 1));
+	fflush(fp_log);
+
+	const int n = NNode;
+	double *phi = (double *)malloc((size_t)n * sizeof(double));
+	double *y = (double *)malloc((size_t)n * sizeof(double));
+
+	double dmax = 0;
+	for (int i = 0; i < n; i++) {
+		for (int64_t p = A.rowptr[i]; p < A.rowptr[i + 1]; p++) {
+			if ((A.col[p] == i) && (fabs(A.val[p]) > dmax)) dmax = fabs(A.val[p]);
+		}
+	}
+
+	// (a) 定数の零空間 : K 1 = 0 (どんな格子・次数でも成り立つ)
+	{
+		for (int i = 0; i < n; i++) phi[i] = 1;
+		crs_spmv(&A, phi, y, NULL);
+		double amax = 0;
+		for (int i = 0; i < n; i++) {
+			if (fabs(y[i]) > amax) amax = fabs(y[i]);
+		}
+		const double rel = amax / ((dmax > 0) ? dmax : 1);
+		fprintf(fp_log, "  (a) constant null space : max|K 1| / max|Kii| = %.3e\n", rel);
+		if (rel > 1e-10) {
+			fprintf(fp_log, "*** the stiffness matrix does not annihilate constants\n");
+			ierr = 1;
+		}
+	}
+
+	// (b) 1 次の φ、(c) 2 次の φ
+	// 軸に平行でない向き・非対角成分の入った B を選ぶ (テンソルの成分順序や
+	// 係数 2 の誤りを見逃さないため)
+	const double av[3] = {0.7, -1.3, 2.1};
+	const double bm[3][3] = {{ 3.0, -1.1,  0.6},
+	                         {-1.1,  2.2,  1.7},
+	                         { 0.6,  1.7, -0.9}};
+
+	for (int cs = 0; cs < 2; cs++) {
+		const int quad = cs;			// 0 : φ は 1 次、1 : φ は 2 次
+		if (quad && ((TetOrder < 2) || !straight)) continue;
+
+		// 節点値
+		for (int i = 0; i < n; i++) {
+			const double r[3] = {Xp[i], Yp[i], Zp[i]};
+			double f = (av[0] * r[0]) + (av[1] * r[1]) + (av[2] * r[2]);
+			if (quad) {
+				for (int k = 0; k < 3; k++) {
+					for (int l = 0; l < 3; l++) f += bm[k][l] * r[k] * r[l] / 2;
+				}
+			}
+			phi[i] = f;
+		}
+
+		// 厳密値 Σ_e ∫ (∇φ)^T C (∇φ) dV
+		//
+		// 体積は「直線要素の閉形式」を使う。こうすると 1 次の φ の検査でも
+		// 数値積分の体積が独立に検証される。曲がった格子ではその閉形式が
+		// 内接多角形の体積になってしまう (実測 -4.5%) ので、そこだけは
+		// 数値積分の体積を使い、検査の意味を「∇N が定数場を再現するか」に
+		// 絞る (曲がった写像の体積は解析値との比較で別に見る)
+		double exact = 0;
+		for (int e = 0; e < NTet; e++) {
+			const int32_t *nd = &Tet[e * 4];
+			double g[4][3], vol;
+			if (tet_grad_pub(nd, g, &vol)) continue;
+			if (!straight) vol = vole[e];
+			double cf[6];
+			material_coef_pub(TetMat[e], 0, cf);
+			const double cm[3][3] = {{cf[0], cf[3], cf[5]},
+			                         {cf[3], cf[1], cf[4]},
+			                         {cf[5], cf[4], cf[2]}};
+
+			// 座標のモーメント
+			double s[3] = {0, 0, 0}, sq[3][3];
+			for (int k = 0; k < 3; k++) {
+				for (int a = 0; a < 4; a++) {
+					const double *p = ((k == 0) ? Xp : (k == 1) ? Yp : Zp);
+					s[k] += p[nd[a]];
+				}
+			}
+			for (int k = 0; k < 3; k++) {
+				for (int l = 0; l < 3; l++) {
+					const double *pk = ((k == 0) ? Xp : (k == 1) ? Yp : Zp);
+					const double *pl = ((l == 0) ? Xp : (l == 1) ? Yp : Zp);
+					double t = 0;
+					for (int a = 0; a < 4; a++) t += pk[nd[a]] * pl[nd[a]];
+					sq[k][l] = ((s[k] * s[l]) + t) / 20;		// ∫ r_k r_l dV / V
+				}
+			}
+			// ∫ g_k g_l dV / V  (g = a + B r、2 次の φ でないときは B = 0)
+			for (int k = 0; k < 3; k++) {
+				for (int l = 0; l < 3; l++) {
+					double gg = av[k] * av[l];
+					if (quad) {
+						for (int p = 0; p < 3; p++) {
+							gg += ((av[k] * bm[l][p]) + (av[l] * bm[k][p])) * s[p] / 4;
+							for (int q = 0; q < 3; q++) {
+								gg += bm[k][p] * bm[l][q] * sq[p][q];
+							}
+						}
+					}
+					exact += cm[k][l] * gg * vol;
+				}
+			}
+		}
+
+		crs_spmv(&A, phi, y, NULL);
+		double q = 0;
+		for (int i = 0; i < n; i++) q += phi[i] * y[i];
+		const double rel = fabs(q - exact) / ((exact != 0) ? fabs(exact) : 1);
+		fprintf(fp_log, "  (%c) %s field : phi^T K phi = %.10e, exact = %.10e, err = %.3e\n",
+			(quad ? 'c' : 'b'), (quad ? "quadratic" : "linear   "), q, exact, rel);
+		if (rel > 1e-10) {
+			fprintf(fp_log, "*** the %s stiffness matrix is wrong\n",
+				((TetOrder >= 2) ? "P2" : "P1"));
+			ierr = 1;
+		}
+
+		// (e) 重心での勾配 (場の出力が使う経路)
+		//
+		// 場の出力は要素あたり 1 本のベクトルなので重心で評価する。この評価点は
+		// **一様な場では検証できない** (要素内のどこで取っても同じ値になる)。
+		// 実測 : 平行平板の場の出力だけでは、評価点を頂点にずらす変異が素通りした。
+		// 2 次の φ なら ∇φ = a + B r が場所で変わるので、重心以外を選ぶと落ちる。
+		// 直線要素では重心の物理座標が頂点の平均に一致する (形状関数の重みが
+		// 頂点 -1/8、中間節点 +1/4 で、中間節点が中点にあるとき Σ = 平均になる)
+		{
+			double gmax = 0, amax2 = 0;
+			for (int e = 0; e < NTet; e++) {
+				double gn[10][3];
+				int nen = 0;
+				if (tet_grad_center(e, gn, &nen)) continue;
+				int32_t nd[10];
+				tet_nodes(e, nd);
+
+				double rc[3] = {0, 0, 0};
+				for (int a = 0; a < 4; a++) {
+					rc[0] += Xp[nd[a]] / 4;
+					rc[1] += Yp[nd[a]] / 4;
+					rc[2] += Zp[nd[a]] / 4;
+				}
+				for (int k = 0; k < 3; k++) {
+					double gh = 0;
+					for (int a = 0; a < nen; a++) gh += phi[nd[a]] * gn[a][k];
+					double ge = av[k];
+					if (quad) {
+						for (int l = 0; l < 3; l++) ge += bm[k][l] * rc[l];
+					}
+					if (fabs(gh - ge) > gmax) gmax = fabs(gh - ge);
+					if (fabs(ge) > amax2) amax2 = fabs(ge);
+				}
+			}
+			const double relg = gmax / ((amax2 > 0) ? amax2 : 1);
+			fprintf(fp_log, "  (e) centroid gradient (%s field) : max err = %.3e\n",
+				(quad ? "quadratic" : "linear"), relg);
+			if (relg > 1e-10) {
+				fprintf(fp_log, "*** the element-centre gradient is wrong "
+					"(this is what fieldout writes)\n");
+				ierr = 1;
+			}
+		}
+	}
+
+	if ((TetOrder >= 2) && !straight) {
+		fprintf(fp_log, "  (c) quadratic field : skipped (the mesh is curved, so the "
+			"P2 interpolant of a quadratic is not exact)\n");
+	}
+
+	// (d) 対称性
+	{
+		double amax = 0, adif = 0;
+		for (int i = 0; i < n; i++) {
+			for (int64_t p = A.rowptr[i]; p < A.rowptr[i + 1]; p++) {
+				const int32_t j = A.col[p];
+				const int64_t pj = crs_find(&A, j, (int32_t)i);
+				if (pj < 0) continue;
+				if (fabs(A.val[p]) > amax) amax = fabs(A.val[p]);
+				const double d = fabs(A.val[p] - A.val[pj]);
+				if (d > adif) adif = d;
+			}
+		}
+		const double rel = adif / ((amax > 0) ? amax : 1);
+		fprintf(fp_log, "  (d) symmetry : max|Kij - Kji| / max|Kij| = %.3e\n", rel);
+		if (rel > 1e-12) {
+			fprintf(fp_log, "*** the stiffness matrix is not symmetric\n");
+			ierr = 1;
+		}
+	}
+
+	free(phi);
+	free(y);
+	free(vole);
+	crs_free(&A);
+
+	fprintf(fp_log, "  result : %s\n", (ierr ? "FAILED" : "passed"));
+
+	return ierr;
 }

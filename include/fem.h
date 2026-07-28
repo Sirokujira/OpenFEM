@@ -60,6 +60,7 @@ extern "C" {
 #define ANALYSIS_F (1 << 4)		// 時間調和渦電流 -> 表皮効果を含む R(f), L(f)
 #define ANALYSIS_E (1 << 5)		// 辺要素 (Nedelec) の自己検証 (3 次元渦電流の基盤)
 #define ANALYSIS_A (1 << 6)		// 3 次元渦電流 (A-φ、辺要素) -> R(f), L(f)
+#define ANALYSIS_P (1 << 7)		// 節点要素 (P1/P2) の自己検証 (多項式再現の恒等式)
 
 #define MAXPORT (16)			// 導体 (基準導体 + ポート) の最大数
 #define MAXBH   (64)			// B-H 曲線の点数の最大数
@@ -155,9 +156,16 @@ EXTERN char MeshFile[BUFSIZ];
 EXTERN int NNode;				// 節点数
 EXTERN double *Xp, *Yp, *Zp;	// 節点座標
 EXTERN int NTet;				// 四面体数
-EXTERN int32_t *Tet;			// [4*NTet] 節点番号
+EXTERN int32_t *Tet;			// [4*NTet] 頂点の節点番号
 EXTERN int *TetTag;				// [NTet] 物理タグ
 EXTERN unsigned char *TetMat;	// [NTet] 材料番号
+// 要素次数 (1 : 4 節点四面体 / 2 : 10 節点四面体)。2 次のとき Tet2 / Tri2 に
+// 辺上の中間節点が入る。局所の辺の並びは Gmsh の tet10 / tri6 と同じ
+//   Tet2 : (0,1) (1,2) (2,0) (3,0) (3,2) (3,1)
+//   Tri2 : (0,1) (1,2) (2,0)
+EXTERN int TetOrder;
+EXTERN int32_t *Tet2;			// [6*NTet] 2 次のときのみ (1 次では NULL)
+EXTERN int32_t *Tri2;			// [3*NTri] 2 次のときのみ (1 次では NULL)
 // 辺 (3 次元渦電流の辺要素で使う)。辺は節点番号の小さい方から大きい方へ向ける
 EXTERN int NEdge;
 EXTERN int64_t *EdgePtr;		// [NNode+1] 節点 i を始点とする辺の範囲

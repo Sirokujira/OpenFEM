@@ -53,6 +53,15 @@ static int setup_unstruct(void)
 {
 	if (mesh_read(MeshFile)) return 1;
 
+	// 辺要素 (E / A) は 1 次四面体の Whitney 形状関数に基づくので、2 次格子を
+	// 渡されると辺上の中間節点がどの要素にも現れず、節点ブロックが特異になる。
+	// 黙って誤答を出すより弾く
+	if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
+		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh "
+			"(this mesh has 10-node tetrahedra)");
+		return 1;
+	}
+
 	// 物理タグ -> 材料番号
 	TetMat = (unsigned char *)malloc((size_t)NTet * sizeof(unsigned char));
 	for (int e = 0; e < NTet; e++) {
@@ -64,6 +73,8 @@ static int setup_unstruct(void)
 	}
 
 	// 物理タグ -> 電極 (三角形の節点を Dirichlet にする)
+	// 2 次格子では辺上の中間節点も固定する。1 次では Tri2 に頂点が入っているので
+	// 同じ値を二度塗るだけになり無害
 	NodeConductor = (signed char *)malloc((size_t)NNode * sizeof(signed char));
 	memset(NodeConductor, -1, (size_t)NNode * sizeof(signed char));
 	for (int t = 0; t < NTri; t++) {
@@ -71,6 +82,7 @@ static int setup_unstruct(void)
 			if (TriTag[t] != ElecTag[q]) continue;
 			for (int l = 0; l < 3; l++) {
 				NodeConductor[Tri[(t * 3) + l]] = (signed char)ElecCond[q];
+				NodeConductor[Tri2[(t * 3) + l]] = (signed char)ElecCond[q];
 			}
 		}
 	}
@@ -313,8 +325,8 @@ void memfree(void)
 	free(Geometry);
 	free(Conductor);
 	free(Xp); free(Yp); free(Zp);
-	free(Tet); free(TetTag); free(TetMat);
-	free(Tri); free(TriTag);
+	free(Tet); free(TetTag); free(TetMat); free(Tet2);
+	free(Tri); free(TriTag); free(Tri2);
 	free(CellMaterial);
 	free(CellConductor);
 	free(NodeConductor);

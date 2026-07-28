@@ -1,0 +1,23 @@
+OpenFEM 1 0
+title = parallel plate capacitor on a second-order tetrahedral mesh
+#
+# 2 次要素 (10 節点四面体) を通した求解の一式 (組み立て -> Dirichlet ->
+# 反作用からの電荷抽出) が動くことの検証。電極面は 6 節点三角形なので、
+# 辺上の中間節点まで固定できていないと Q が合わない。
+#
+#   C = eps0 * 4.0 * (1e-3 * 1e-3) / 0.2e-3 = 1.770838e-13 [F]
+#
+# 電界が 1 次元なので値そのものは 1 次要素でも厳密。ここで見るのは
+# 「2 次要素にしても厳密なまま」であること (中間節点の扱いを間違えると崩れる)。
+#
+# 物理タグ : 1 = 体積、10 = z 下面 (基準電極)、11 = z 上面 (ポート 1)
+#
+mesh = box_p2.msh
+material = 4.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = C
+solver = 50000 2000 1e-13
+end

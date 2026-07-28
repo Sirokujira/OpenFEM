@@ -1,0 +1,21 @@
+OpenFEM 1 0
+title = coax on the same coarse mesh with first-order elements
+#
+# coax_p2.ofe の対照。分割 (半径 4、周 12) も材料も同じで、要素だけ 1 次に
+# 落としたもの。2 次要素が「実際に効いている」ことを示すために置く。
+# これが無いと、2 次の経路が黙って 1 次に退行しても閉形式との比較が
+# 通ってしまう (粗い格子でも許容を緩めれば両方通るため)。
+#
+#   C' = 2 pi eps0 epsr / ln(b/a) = 1.063417e-10 [F/m]
+#   実測 : +2.99% (2 次 + 等パラメトリックでは +0.087%)
+#
+mesh = coax_p1c.msh
+material = 2.1 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = C L
+tline = Z
+solver = 50000 2000 1e-13
+end

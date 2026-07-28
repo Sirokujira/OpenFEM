@@ -85,11 +85,14 @@ void field_add_grad(const char *name, const double *u, int kind)
 
 	if (MeshMode) {
 		for (int e = 0; e < NTet; e++) {
-			double g[4][3], vol, d[3] = {0, 0, 0};
-			if (!tet_grad_pub(&Tet[e * 4], g, &vol)) {
-				for (int a = 0; a < 4; a++) {
-					const double ua = u[Tet[(e * 4) + a]];
-					for (int c = 0; c < 3; c++) d[c] += ua * g[a][c];
+			double gn[10][3], d[3] = {0, 0, 0};
+			int nen = 0;
+			if (!tet_grad_center(e, gn, &nen)) {
+				int32_t nd[10];
+				tet_nodes(e, nd);
+				for (int a = 0; a < nen; a++) {
+					const double ua = u[nd[a]];
+					for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
 				}
 			}
 			for (int c = 0; c < 3; c++) v[(e * 3) + c] = -d[c];
@@ -161,13 +164,23 @@ static void write_grid(FILE *fp)
 		for (int i = 0; i < NNode; i++) {
 			fprintf(fp, "%.9e %.9e %.9e\n", Xp[i], Yp[i], Zp[i]);
 		}
-		fprintf(fp, "\nCELLS %d %d\n", NTet, 5 * NTet);
+		// VTK_QUADRATIC_TETRA (24) の中間節点の並びは Gmsh の tet10 と違う。
+		//   VTK  : (0,1) (1,2) (0,2) (0,3) (1,3) (2,3)
+		//   Gmsh : (0,1) (1,2) (2,0) (3,0) (3,2) (3,1)
+		// 頂点からの並べ替えは最後の 2 つの入れ替えになる
+		static const int g2v[6] = {0, 1, 2, 3, 5, 4};
+		const int nen = ((TetOrder >= 2) ? 10 : 4);
+		fprintf(fp, "\nCELLS %d %d\n", NTet, (nen + 1) * NTet);
 		for (int e = 0; e < NTet; e++) {
-			fprintf(fp, "4 %d %d %d %d\n", Tet[e * 4], Tet[(e * 4) + 1],
-				Tet[(e * 4) + 2], Tet[(e * 4) + 3]);
+			int32_t nd[10];
+			tet_nodes(e, nd);
+			fprintf(fp, "%d %d %d %d %d", nen, nd[0], nd[1], nd[2], nd[3]);
+			for (int l = 4; l < nen; l++) fprintf(fp, " %d", nd[4 + g2v[l - 4]]);
+			fprintf(fp, "\n");
 		}
 		fprintf(fp, "\nCELL_TYPES %d\n", NTet);
-		for (int e = 0; e < NTet; e++) fprintf(fp, "10\n");	// VTK_TETRA
+		// VTK_TETRA = 10, VTK_QUADRATIC_TETRA = 24
+		for (int e = 0; e < NTet; e++) fprintf(fp, "%d\n", ((nen == 10) ? 24 : 10));
 	}
 	else {
 		fprintf(fp, "DATASET RECTILINEAR_GRID\n");

@@ -25,6 +25,12 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
   python3 mkmesh.py coax coax_tet.msh
   python3 mkmesh.py bar  bar_tet.msh
   python3 mkmesh.py bar_air bar_air.msh
+
+  -order 2 を付けると 2 次要素 (tet10 / tri6) にする。coax では中間節点を
+  円筒面に載せるので、境界が折れ線でなく円になる (等パラメトリック要素):
+  python3 mkmesh.py coax coax_p2.msh -order 2 -nr 4 -nt 12
+
+  分割数は -<キーワード引数> <値> で上書きできる (例 -nt 12 -nr 4)。
 """
 
 import math
@@ -32,23 +38,72 @@ import sys
 
 
 def write_msh(path, nodes, tets, tris):
+    """要素の節点数から次数を決めて書く (4/3 なら 1 次、10/6 なら 2 次)"""
+    ttype = {4: 4, 10: 11}
+    stype = {3: 2, 6: 9}
     with open(path, "w") as f:
         f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n")
         f.write("$Nodes\n%d\n" % len(nodes))
         for i, (x, y, z) in enumerate(nodes):
-            f.write("%d %.10g %.10g %.10g\n" % (i + 1, x, y, z))
+            f.write("%d %.16g %.16g %.16g\n" % (i + 1, x, y, z))
         f.write("$EndNodes\n")
         f.write("$Elements\n%d\n" % (len(tets) + len(tris)))
         e = 0
-        for tag, n in tris:
-            e += 1
-            f.write("%d 2 2 %d %d %d %d %d\n" % (e, tag, tag,
-                                                 n[0] + 1, n[1] + 1, n[2] + 1))
-        for tag, n in tets:
-            e += 1
-            f.write("%d 4 2 %d %d %d %d %d %d\n" % (e, tag, tag,
-                                                    n[0] + 1, n[1] + 1, n[2] + 1, n[3] + 1))
+        for lst, tmap in ((tris, stype), (tets, ttype)):
+            for tag, n in lst:
+                e += 1
+                f.write("%d %d 2 %d %d %s\n" % (e, tmap[len(n)], tag, tag,
+                                                " ".join(str(v + 1) for v in n)))
         f.write("$EndElements\n")
+
+
+# 2 次要素の辺の並び (Gmsh の tet10 / tri6)
+TET_EDGE = ((0, 1), (1, 2), (2, 0), (3, 0), (3, 2), (3, 1))
+TRI_EDGE = ((0, 1), (1, 2), (2, 0))
+
+
+def to_order2(nodes, tets, tris, snap=None):
+    """1 次の格子を 2 次 (tet10 / tri6) に上げる
+
+    共有される辺には同じ中間節点を割り当てる (辺を節点番号の組で識別する)。
+    既定では辺の中点に置くので要素は直線のままになる。snap(pa, pb, mid) を
+    渡すとその戻り値を中間節点の座標に使えるので、境界を曲面に載せられる
+    (等パラメトリック要素)。
+    """
+    nodes = list(nodes)
+    mid = {}
+
+    def midnode(ia, ib):
+        key = (ia, ib) if ia < ib else (ib, ia)
+        if key not in mid:
+            pa, pb = nodes[ia], nodes[ib]
+            p = tuple((pa[d] + pb[d]) / 2 for d in range(3))
+            if snap is not None:
+                p = snap(pa, pb, p)
+            mid[key] = len(nodes)
+            nodes.append(p)
+        return mid[key]
+
+    tets2 = [(tag, list(n) + [midnode(n[a], n[b]) for a, b in TET_EDGE])
+             for tag, n in tets]
+    tris2 = [(tag, list(n) + [midnode(n[a], n[b]) for a, b in TRI_EDGE])
+             for tag, n in tris]
+    return nodes, tets2, tris2
+
+
+def snap_cylinder(pa, pb, p):
+    """円柱面に載せる : 両端の半径が等しい辺だけ、中点をその半径まで押し出す
+
+    半径方向の辺 (両端の半径が違う) と軸方向の辺は中点のままにする。
+    """
+    ra = math.hypot(pa[0], pa[1])
+    rb = math.hypot(pb[0], pb[1])
+    if (ra <= 0) or (abs(ra - rb) > 1e-12 * ra):
+        return p
+    rm = math.hypot(p[0], p[1])
+    if rm <= 0:
+        return p
+    return (p[0] * ra / rm, p[1] * ra / rm, p[2])
 
 
 # 六面体 (節点 8 個) を 6 四面体に分割する定型分割
@@ -272,19 +327,32 @@ def main():
         print(__doc__)
         return 1
     kind, path = sys.argv[1], sys.argv[2]
+    # 追加引数 : -order 2 で 2 次要素、-nt / -nr で同軸の分割数
+    opt = {}
+    a = 3
+    while a + 1 < len(sys.argv):
+        opt[sys.argv[a].lstrip("-")] = int(sys.argv[a + 1])
+        a += 2
+    order = opt.pop("order", 1)
+
+    snap = None
     if kind == "box":
-        nodes, tets, tris = make_box()
+        nodes, tets, tris = make_box(**opt)
     elif kind == "coax":
-        nodes, tets, tris = make_coax()
+        nodes, tets, tris = make_coax(**opt)
+        snap = snap_cylinder			# 2 次にするとき円筒面に載せる
     elif kind == "bar":
-        nodes, tets, tris = make_bar()
+        nodes, tets, tris = make_bar(**opt)
     elif kind == "bar_air":
-        nodes, tets, tris = make_bar_air()
+        nodes, tets, tris = make_bar_air(**opt)
     else:
         print("unknown mesh kind: %s" % kind)
         return 1
+    if order == 2:
+        nodes, tets, tris = to_order2(nodes, tets, tris, snap)
     write_msh(path, nodes, tets, tris)
-    print("%s : %d nodes, %d tets, %d tris" % (path, len(nodes), len(tets), len(tris)))
+    print("%s : order %d, %d nodes, %d tets, %d tris"
+          % (path, order, len(nodes), len(tets), len(tris)))
     return 0
 
 

@@ -704,6 +704,12 @@ static int solve_one(FILE *fp_log)
 		if (Analysis == ANALYSIS_E) return ierr;
 	}
 
+	// 節点要素 (P1 / P2) の自己検証。多項式再現の恒等式なので機械精度で合う
+	if (Analysis & ANALYSIS_P) {
+		ierr |= solve_nodal_test(fp_log);
+		if (Analysis == ANALYSIS_P) return ierr;
+	}
+
 	crs_t A;
 	crs_alloc(&A);
 

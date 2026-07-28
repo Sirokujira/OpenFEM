@@ -1,0 +1,16 @@
+OpenFEM 1 0
+title = nodal element (P1) self test, anisotropic epsilon
+#
+# nodal_test_p2.ofe と同じ検証を 1 次要素で行う対照。1 次要素は φ が 1 次の
+# ときだけ補間が厳密なので、実行されるのは (a) (b) (d) の 3 つ。
+# 2 次要素を足したときに 1 次の経路が壊れていないことを見るための組。
+#
+mesh = box_tet.msh
+material = 1.0 0.0
+anisoepsr = 2 5.0 3.5 2.5 0.8 0.6 1.3
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end

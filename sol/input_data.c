@@ -826,6 +826,7 @@ int input_data(FILE *fp)
 				else if (c == 'F') Analysis |= ANALYSIS_F;
 				else if (c == 'E') Analysis |= ANALYSIS_E;
 				else if (c == 'A') Analysis |= ANALYSIS_A;
+				else if (c == 'P') Analysis |= ANALYSIS_P;
 				else {
 					printf(errfmt2, strkey);
 					return 1;
@@ -1107,6 +1108,11 @@ int input_data(FILE *fp)
 	}
 	if ((Analysis & ANALYSIS_A) && !MeshMode) {
 		printf("%s\n", "*** analysis A (3D eddy current) requires an unstructured mesh");
+		return 1;
+	}
+	// P 解析 (節点要素の自己検証) も非構造格子専用
+	if ((Analysis & ANALYSIS_P) && !MeshMode) {
+		printf("%s\n", "*** analysis P (nodal element self test) requires an unstructured mesh");
 		return 1;
 	}
 
