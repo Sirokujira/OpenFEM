@@ -71,13 +71,10 @@ static int read_nodes(FILE *fp, int32_t **idmap, int32_t *maxid)
 }
 
 
-static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
+// 要素の格納は 2.2 と 4.1 で共通 (読み方だけが違う)
+
+static void elem_reset(void)
 {
-	char line[BUFSIZ];
-
-	if (fgets(line, sizeof(line), fp) == NULL) return 1;
-	const int ne = atoi(line);
-
 	NTet = 0;
 	NTri = 0;
 	Tet = NULL;
@@ -87,6 +84,102 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 	Tet2 = NULL;
 	Tri2 = NULL;
 	TetOrder = 0;			// 最初に出た四面体で決まる
+}
+
+
+// 要素 1 個を格納する。type は Gmsh の要素型 (4/11 = 四面体、2/9 = 三角形)
+static int elem_store(int type, int tag, const int32_t *nd)
+{
+	const int order = ((type == 11) || (type == 9)) ? 2 : 1;
+
+	if ((type == 4) || (type == 11)) {
+		// 四面体。次数は最初の 1 個で決め、以後は混在を許さない
+		if (TetOrder == 0) TetOrder = order;
+		if (TetOrder != order) {
+			printf("*** mesh : mixed element orders (order %d after order %d)\n",
+				order, TetOrder);
+			return 1;
+		}
+		if (NTet % ARRAY_INC == 0) {
+			Tet = (int32_t *)realloc(Tet, (size_t)(NTet + ARRAY_INC) * 4 * sizeof(int32_t));
+			TetTag = (int *)realloc(TetTag, (size_t)(NTet + ARRAY_INC) * sizeof(int));
+			if (order == 2) {
+				Tet2 = (int32_t *)realloc(Tet2, (size_t)(NTet + ARRAY_INC) * 6 * sizeof(int32_t));
+			}
+		}
+		for (int l = 0; l < 4; l++) Tet[(NTet * 4) + l] = nd[l];
+		if (order == 2) {
+			for (int l = 0; l < 6; l++) Tet2[(NTet * 6) + l] = nd[4 + l];
+		}
+		TetTag[NTet] = tag;
+		NTet++;
+	}
+	else {
+		if (NTri % ARRAY_INC == 0) {
+			Tri = (int32_t *)realloc(Tri, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
+			TriTag = (int *)realloc(TriTag, (size_t)(NTri + ARRAY_INC) * sizeof(int));
+			Tri2 = (int32_t *)realloc(Tri2, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
+		}
+		for (int l = 0; l < 3; l++) Tri[(NTri * 3) + l] = nd[l];
+		// 1 次の三角形では中間節点が無いので頂点で埋める (Dirichlet の
+		// 塗り分けは重複しても同じ値になるので無害)
+		for (int l = 0; l < 3; l++) {
+			Tri2[(NTri * 3) + l] = ((order == 2) ? nd[3 + l] : nd[l]);
+		}
+		TriTag[NTri] = tag;
+		NTri++;
+	}
+
+	return 0;
+}
+
+
+// 全要素を読んだあとの整合性検査 (格子の次元と次数)
+static int elem_finish(void)
+{
+	// 四面体が 1 つも無ければ断面 2 次元の格子として扱う (三角形が体積要素)。
+	// M / F は断面 2 次元の定式化なので、この形でしか非構造格子に載らない
+	MeshDim = ((NTet > 0) ? 3 : 2);
+	if (MeshDim == 2) {
+		if (NTri < 1) {
+			printf("%s\n", "*** mesh : no tetrahedron and no triangle found");
+			return 1;
+		}
+		// 三角形の次数は「中間節点が頂点と違うか」で決まる (1 次では頂点で埋めてある)
+		TetOrder = ((Tri2[0] != Tri[0]) ? 2 : 1);
+		for (int t = 0; t < NTri; t++) {
+			const int o = ((Tri2[(t * 3)] != Tri[(t * 3)]) ? 2 : 1);
+			if (o != TetOrder) {
+				printf("%s\n", "*** mesh : mixed triangle orders in a 2-D mesh");
+				return 1;
+			}
+		}
+	}
+
+	// 三角形の次数が四面体と食い違うと電極面の中間節点が固定されず、
+	// 電極が「穴だらけ」になる (収束はするが Q が合わない) ので弾く
+	if ((MeshDim == 3) && (TetOrder == 2) && (NTri > 0)) {
+		for (int t = 0; t < NTri; t++) {
+			if (Tri2[(t * 3)] == Tri[(t * 3)]) {
+				printf("%s\n", "*** mesh : the tetrahedra are order 2 but the "
+					"triangles are order 1 (regenerate the mesh with -order 2)");
+				return 1;
+			}
+		}
+	}
+
+	return 0;
+}
+
+
+static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
+{
+	char line[BUFSIZ];
+
+	if (fgets(line, sizeof(line), fp) == NULL) return 1;
+	const int ne = atoi(line);
+
+	elem_reset();
 
 	for (int e = 0; e < ne; e++) {
 		if (fgets(line, sizeof(line), fp) == NULL) return 1;
@@ -109,7 +202,6 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		const int off = 3 + ntag;
 
 		// 節点数 : 四面体 (型 4 / 11) と三角形 (型 2 / 9)
-		const int order = ((type == 11) || (type == 9)) ? 2 : 1;
 		const int nn = ((type == 4) ? 4 : (type == 11) ? 10
 		              : (type == 2) ? 3 : (type == 9) ? 6 : 0);
 		if (nn == 0) continue;			// 点・線分など、使わない要素型
@@ -128,78 +220,190 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 			nd[l] = idmap[g];
 		}
 
-		if ((type == 4) || (type == 11)) {
-			// 四面体。次数は最初の 1 個で決め、以後は混在を許さない
-			if (TetOrder == 0) TetOrder = order;
-			if (TetOrder != order) {
-				printf("*** mesh : mixed element orders (element %d is order %d, "
-					"the mesh started as order %d)\n", e + 1, order, TetOrder);
-				return 1;
+		if (elem_store(type, tag, nd)) return 1;
+	}
+
+	return elem_finish();
+}
+
+
+// ---- Gmsh ASCII 4.1 の読み込み ----
+//
+// 2.2 との違いは 2 つ:
+//   ・節点も要素も「エンティティのブロック」に分かれる (ブロック内は同じ型)
+//   ・**要素の行に物理タグが無い**。物理タグはエンティティに付いているので、
+//     $Entities を読んで (次元, エンティティ番号) -> 物理タグ の表を作る
+// この 2 つ目が要点で、$Entities を無視すると全要素の物理タグが 0 になり、
+// 材料も電極も割り当たらないまま「電極に節点が無い」で落ちる。
+
+#define MAXENT (4096)
+
+typedef struct {
+	int dim;
+	long tag;
+	int phys;			// 物理タグ (無ければ 0)
+} entity_t;
+
+static entity_t Ent[MAXENT];
+static int NEnt;
+
+static int ent_phys(int dim, long tag)
+{
+	for (int i = 0; i < NEnt; i++) {
+		if ((Ent[i].dim == dim) && (Ent[i].tag == tag)) return Ent[i].phys;
+	}
+
+	return 0;
+}
+
+
+static int read_entities_v41(FILE *fp)
+{
+	long n[4];
+
+	NEnt = 0;
+	for (int d = 0; d < 4; d++) {
+		if (fscanf(fp, "%ld", &n[d]) != 1) return 1;
+	}
+	for (int d = 0; d < 4; d++) {
+		for (long e = 0; e < n[d]; e++) {
+			long tag = 0;
+			double b[6];
+			if (fscanf(fp, "%ld", &tag) != 1) return 1;
+			// 点は座標 3 個、それ以外は外接直方体 6 個
+			const int nb = ((d == 0) ? 3 : 6);
+			for (int i = 0; i < nb; i++) {
+				if (fscanf(fp, "%lf", &b[i]) != 1) return 1;
 			}
-			if (NTet % ARRAY_INC == 0) {
-				Tet = (int32_t *)realloc(Tet, (size_t)(NTet + ARRAY_INC) * 4 * sizeof(int32_t));
-				TetTag = (int *)realloc(TetTag, (size_t)(NTet + ARRAY_INC) * sizeof(int));
-				if (order == 2) {
-					Tet2 = (int32_t *)realloc(Tet2, (size_t)(NTet + ARRAY_INC) * 6 * sizeof(int32_t));
+			long np = 0;
+			if (fscanf(fp, "%ld", &np) != 1) return 1;
+			int phys = 0;
+			for (long i = 0; i < np; i++) {
+				long pt = 0;
+				if (fscanf(fp, "%ld", &pt) != 1) return 1;
+				if (i == 0) phys = (int)pt;		// 複数あれば最初のものを使う
+			}
+			// 境界エンティティの並び (点エンティティには無い)
+			if (d > 0) {
+				long nbd = 0;
+				if (fscanf(fp, "%ld", &nbd) != 1) return 1;
+				for (long i = 0; i < nbd; i++) {
+					long dummy = 0;
+					if (fscanf(fp, "%ld", &dummy) != 1) return 1;
 				}
 			}
-			for (int l = 0; l < 4; l++) Tet[(NTet * 4) + l] = nd[l];
-			if (order == 2) {
-				for (int l = 0; l < 6; l++) Tet2[(NTet * 6) + l] = nd[4 + l];
-			}
-			TetTag[NTet] = tag;
-			NTet++;
-		}
-		else {
-			// 三角形 (電極面の指定に使う)。次数は四面体に合わせる
-			if (NTri % ARRAY_INC == 0) {
-				Tri = (int32_t *)realloc(Tri, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
-				TriTag = (int *)realloc(TriTag, (size_t)(NTri + ARRAY_INC) * sizeof(int));
-				Tri2 = (int32_t *)realloc(Tri2, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
-			}
-			for (int l = 0; l < 3; l++) Tri[(NTri * 3) + l] = nd[l];
-			// 1 次の三角形では中間節点が無いので頂点で埋める (Dirichlet の
-			// 塗り分けは重複しても同じ値になるので無害)
-			for (int l = 0; l < 3; l++) {
-				Tri2[(NTri * 3) + l] = ((order == 2) ? nd[3 + l] : nd[l]);
-			}
-			TriTag[NTri] = tag;
-			NTri++;
-		}
-	}
-
-	// 四面体が 1 つも無ければ断面 2 次元の格子として扱う (三角形が体積要素)。
-	// M / F は断面 2 次元の定式化なので、この形でしか非構造格子に載らない
-	MeshDim = ((NTet > 0) ? 3 : 2);
-	if (MeshDim == 2) {
-		if (NTri < 1) {
-			printf("%s\n", "*** mesh : no tetrahedron and no triangle found");
-			return 1;
-		}
-		// 三角形の次数は「中間節点が頂点と違うか」で決まる (1 次では頂点で埋めてある)
-		TetOrder = ((Tri2[0] != Tri[0]) ? 2 : 1);
-		for (int t = 0; t < NTri; t++) {
-			const int o = ((Tri2[(t * 3)] != Tri[(t * 3)]) ? 2 : 1);
-			if (o != TetOrder) {
-				printf("%s\n", "*** mesh : mixed triangle orders in a 2-D mesh");
-				return 1;
-			}
-		}
-	}
-
-	// 三角形の次数が四面体と食い違うと電極面の中間節点が固定されず、
-	// 電極が「穴だらけ」になる (収束はするが Q が合わない) ので弾く
-	if ((TetOrder == 2) && (NTri > 0)) {
-		for (int t = 0; t < NTri; t++) {
-			if (Tri2[(t * 3)] == Tri[(t * 3)]) {
-				printf("%s\n", "*** mesh : the tetrahedra are order 2 but the "
-					"triangles are order 1 (regenerate the mesh with -order 2)");
-				return 1;
+			if (NEnt < MAXENT) {
+				Ent[NEnt].dim = d;
+				Ent[NEnt].tag = tag;
+				Ent[NEnt].phys = phys;
+				NEnt++;
 			}
 		}
 	}
 
 	return 0;
+}
+
+
+static int read_nodes_v41(FILE *fp, int32_t **idmap, int32_t *maxid)
+{
+	long nblk = 0, nn = 0, mn = 0, mx = 0;
+
+	if (fscanf(fp, "%ld %ld %ld %ld", &nblk, &nn, &mn, &mx) != 4) return 1;
+	if ((nn < 4) || (mx < 1)) {
+		printf("*** mesh : too few nodes (%ld)\n", nn);
+		return 1;
+	}
+
+	NNode = (int)nn;
+	Xp = (double *)malloc((size_t)nn * sizeof(double));
+	Yp = (double *)malloc((size_t)nn * sizeof(double));
+	Zp = (double *)malloc((size_t)nn * sizeof(double));
+	int32_t *map = (int32_t *)malloc(((size_t)mx + 1) * sizeof(int32_t));
+	for (int32_t i = 0; i <= (int32_t)mx; i++) map[i] = -1;
+
+	long *tags = (long *)malloc((size_t)nn * sizeof(long));
+	int k = 0;
+	for (long b = 0; b < nblk; b++) {
+		long dim = 0, tag = 0, par = 0, cnt = 0;
+		if (fscanf(fp, "%ld %ld %ld %ld", &dim, &tag, &par, &cnt) != 4) {
+			free(map); free(tags); return 1;
+		}
+		// ブロック内は「節点番号がまとめて、そのあと座標がまとめて」
+		if (k + cnt > nn) { free(map); free(tags); return 1; }
+		for (long i = 0; i < cnt; i++) {
+			if (fscanf(fp, "%ld", &tags[k + i]) != 1) { free(map); free(tags); return 1; }
+		}
+		for (long i = 0; i < cnt; i++) {
+			if (fscanf(fp, "%lf %lf %lf", &Xp[k + i], &Yp[k + i], &Zp[k + i]) != 3) {
+				free(map); free(tags); return 1;
+			}
+		}
+		k += (int)cnt;
+	}
+	if (k != nn) { free(map); free(tags); return 1; }
+
+	for (int i = 0; i < NNode; i++) {
+		const long g = tags[i];
+		if ((g < 1) || (g > mx)) { free(map); free(tags); return 1; }
+		map[g] = i;
+	}
+	free(tags);
+
+	*idmap = map;
+	*maxid = (int32_t)mx;
+
+	return 0;
+}
+
+
+static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
+{
+	long nblk = 0, ne = 0, mn = 0, mx = 0;
+
+	if (fscanf(fp, "%ld %ld %ld %ld", &nblk, &ne, &mn, &mx) != 4) return 1;
+
+	elem_reset();
+
+	for (long b = 0; b < nblk; b++) {
+		long dim = 0, tag = 0, type = 0, cnt = 0;
+		if (fscanf(fp, "%ld %ld %ld %ld", &dim, &tag, &type, &cnt) != 4) return 1;
+
+		const int nn = ((type == 4) ? 4 : (type == 11) ? 10
+		              : (type == 2) ? 3 : (type == 9) ? 6 : 0);
+		// 物理タグはエンティティ側にある (2.2 と違い要素の行には無い)
+		const int phys = ent_phys((int)dim, tag);
+
+		for (long e = 0; e < cnt; e++) {
+			long etag = 0;
+			if (fscanf(fp, "%ld", &etag) != 1) return 1;
+			if (nn == 0) {
+				// 使わない要素型 (点・線分など)。節点数が分からないので
+				// 行末まで読み飛ばす
+				int c;
+				while (((c = fgetc(fp)) != EOF) && (c != '\n')) ;
+				continue;
+			}
+			int32_t nd[10];
+			for (int l = 0; l < nn; l++) {
+				long g = 0;
+				if (fscanf(fp, "%ld", &g) != 1) return 1;
+				if ((g < 0) || (g > maxid) || (idmap[g] < 0)) {
+					printf("*** mesh : element %ld refers to an unknown node %ld\n", etag, g);
+					return 1;
+				}
+				nd[l] = idmap[g];
+			}
+			if (elem_store((int)type, phys, nd)) return 1;
+		}
+	}
+
+	if ((NTet < 1) && (NTri < 1)) {
+		printf("%s\n", "*** mesh : no tetrahedron and no triangle found");
+		return 1;
+	}
+
+	return elem_finish();
 }
 
 
@@ -210,6 +414,9 @@ int mesh_read(const char *fname)
 	int32_t maxid = 0;
 	int ierr = 0;
 	int have_nodes = 0, have_elements = 0;
+	int v41 = 0;
+
+	NEnt = 0;
 
 	FILE *fp = fopen(fname, "r");
 	if (fp == NULL) {
@@ -220,14 +427,37 @@ int mesh_read(const char *fname)
 	while (fgets(line, sizeof(line), fp) != NULL) {
 		if      (!strncmp(line, "$MeshFormat", 11)) {
 			if (fgets(line, sizeof(line), fp) == NULL) break;
-			if (line[0] != '2') {
-				printf("*** mesh : only Gmsh ASCII format 2.x is supported (got %s)", line);
+			if      (line[0] == '2') v41 = 0;
+			else if (line[0] == '4') v41 = 1;
+			else {
+				printf("*** mesh : only Gmsh ASCII format 2.x / 4.x is supported (got %s)", line);
 				ierr = 1;
+				break;
+			}
+			// バイナリは 2 番目の数字が 1 (ASCII は 0)
+			{
+				double ver = 0;
+				long bin = 0, sz = 0;
+				if (sscanf(line, "%lf %ld %ld", &ver, &bin, &sz) >= 2) {
+					if (bin != 0) {
+						printf("%s\n", "*** mesh : binary Gmsh files are not supported "
+							"(save as ASCII)");
+						ierr = 1;
+						break;
+					}
+				}
+			}
+		}
+		else if (!strncmp(line, "$Entities", 9)) {
+			ierr = read_entities_v41(fp);
+			if (ierr) {
+				printf("%s\n", "*** mesh : cannot parse $Entities");
 				break;
 			}
 		}
 		else if (!strncmp(line, "$Nodes", 6)) {
-			ierr = read_nodes(fp, &idmap, &maxid);
+			ierr = (v41 ? read_nodes_v41(fp, &idmap, &maxid)
+			            : read_nodes(fp, &idmap, &maxid));
 			if (ierr) break;
 			have_nodes = 1;
 		}
@@ -237,7 +467,8 @@ int mesh_read(const char *fname)
 				ierr = 1;
 				break;
 			}
-			ierr = read_elements(fp, idmap, maxid);
+			ierr = (v41 ? read_elements_v41(fp, idmap, maxid)
+			            : read_elements(fp, idmap, maxid));
 			if (ierr) break;
 			have_elements = 1;
 		}

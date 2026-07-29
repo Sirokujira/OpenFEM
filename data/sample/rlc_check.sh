@@ -44,6 +44,8 @@
 #   coax_p2        : 粗い同軸 (nr=4, nt=12) を曲がった 2 次要素で (許容 0.3%)
 #                    + 同じ格子の 1 次要素より 10 倍以上良いこと
 #   mesh order     : 次数の混在・2 次格子への analysis=A・1 次三角形を弾くこと
+#   gmsh 4.1       : 同じ形状を Gmsh 2.2 と 4.1 で書いた結果が完全一致すること
+#                    (+ $Entities 欠落とバイナリを弾くこと)
 #   plate2d_p2     : 断面 2 次元の 2 次要素 (6 節点三角形)。導体内の Az が厳密に
 #                    2 次なので内部インダクタンスまで厳密に出る (1 次は -0.045%)
 #   plate2d        : 断面 2 次元の三角形格子で M / F を解き、構造格子版と同じ
@@ -460,6 +462,37 @@ for pair in "1e3 6.896552e-01 2.932153e-07" \
 	compare "R(f=$1) [ohm/m]" "$(value_of Rf)" "$2" 0.002
 	compare "L(f=$1) [H/m]" "$(value_of Lf)" "$3" 0.002
 done
+
+# Gmsh ASCII 4.1 形式の読み込み。**同じ形状を 2.2 と 4.1 で書いた結果が
+# 完全に一致すること**を恒等式に使う (閉形式は要らないうえ、これ以上厳密な
+# 検査は無い)。4.1 は要素の行に物理タグが無く $Entities に付くので、
+# そこを読み落とすと全要素のタグが 0 になって材料も電極も割り当たらない
+echo "[gmsh 4.1] the same mesh in 2.2 and 4.1 must give identical results"
+same_mesh() {	# same_mesh <ラベル> <ofe(2.2)> <ofe(4.1)>
+	run_case "$2"; cp "$WORK/rlc.csv" "$WORK/a.csv"
+	run_case "$3"; cp "$WORK/rlc.csv" "$WORK/b.csv"
+	# title 行だけはファイル名由来で違うので外す
+	grep -v '^title' "$WORK/a.csv" > "$WORK/a2.csv"
+	grep -v '^title' "$WORK/b.csv" > "$WORK/b2.csv"
+	if cmp -s "$WORK/a2.csv" "$WORK/b2.csv"; then
+		echo "  $1 : identical -> OK"
+	else
+		echo "  $1 : differ -> NG" >&2
+		diff "$WORK/a2.csv" "$WORK/b2.csv" | head -4 >&2
+		status=1
+	fi
+}
+same_mesh "3-D tetrahedral mesh (box_tet)" box_tet box_tet_41
+same_mesh "2-D triangular mesh (plate2d)" plate2d_dc plate2d_41
+# $Entities を落とすと物理タグが全部 0 になる。黙って解かずに落ちること
+awk '/^\$Entities/ { skip = 1 } /^\$EndEntities/ { skip = 0; next } !skip { print }' \
+    "$SRC/box_tet_41.msh" > "$WORK/noent.msh"
+sed 's/^mesh = .*/mesh = noent.msh/' "$SRC/box_tet_41.ofe" > "$WORK/noent.ofe"
+mesh_reject "Gmsh 4.1 without \$Entities" noent.ofe
+# バイナリは弾くこと (読めない形式を黙って誤読しない)
+sed 's/^4.1 0 8$/4.1 1 8/' "$SRC/box_tet_41.msh" > "$WORK/bin.msh"
+sed 's/^mesh = .*/mesh = bin.msh/' "$SRC/box_tet_41.ofe" > "$WORK/bin.ofe"
+mesh_reject "binary Gmsh file" bin.ofe
 
 # 断面 2 次元の 2 次要素 (6 節点三角形)。**導体内の Az は電流密度が一様なとき
 # 厳密に 2 次**なので、内部インダクタンス 2t/3 を P2 は厳密に表せる。
@@ -1125,7 +1158,8 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
-         bertotti_core temp_material temp_mur hn_plate plate2d_p2; do
+         bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
+         box_tet_41 plate2d_41; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

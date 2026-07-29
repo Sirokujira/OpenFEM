@@ -36,6 +36,9 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
   python3 mkmesh.py coax coax_p2.msh -order 2 -nr 4 -nt 12
 
   分割数は -<キーワード引数> <値> で上書きできる (例 -nt 12 -nr 4)。
+
+  -v41 1 を付けると Gmsh ASCII **4.1** 形式で書く (読み込みの検証用)。
+  同じ形状を 2.2 と 4.1 で書いて結果が完全に一致することを rlc_check.sh で見る。
 """
 
 import math
@@ -59,6 +62,64 @@ def write_msh(path, nodes, tets, tris):
                 e += 1
                 f.write("%d %d 2 %d %d %s\n" % (e, tmap[len(n)], tag, tag,
                                                 " ".join(str(v + 1) for v in n)))
+        f.write("$EndElements\n")
+
+
+def write_msh41(path, nodes, tets, tris):
+    """同じ格子を Gmsh ASCII 4.1 形式で書く (読み込みの検証用)
+
+    4.1 では要素の行に物理タグが無く、**エンティティに付く**。そこで物理タグ
+    ごとに 1 つのエンティティを作り、そのエンティティのブロックに要素を入れる。
+    節点は 1 ブロックにまとめる (4.1 はブロック内で「番号がまとめて、そのあと
+    座標がまとめて」の並びになる点が 2.2 と違う)。
+    """
+    ttype = {4: 4, 10: 11}
+    stype = {3: 2, 6: 9}
+    # 物理タグ -> (次元, エンティティ番号)。次元は三角形が 2、四面体が 3
+    ent = {}
+    for tag, n in tris:
+        ent.setdefault((2, tag), len(ent) + 1)
+    for tag, n in tets:
+        ent.setdefault((3, tag), len(ent) + 1)
+
+    with open(path, "w") as f:
+        f.write("$MeshFormat\n4.1 0 8\n$EndMeshFormat\n")
+        # $Entities : 点 0、曲線 0、面は三角形のタグ、体積は四面体のタグ
+        surf = [(t, e) for (d, t), e in ent.items() if d == 2]
+        vol = [(t, e) for (d, t), e in ent.items() if d == 3]
+        # 点エンティティも書く。実際の Gmsh 出力には必ずあり、**点は座標 3 個、
+        # それ以外は外接直方体 6 個**と項目数が違うので、読み手の分岐がここで
+        # しか実行されない (点を省くとその分岐が死んだコードになる)
+        f.write("$Entities\n2 0 %d %d\n" % (len(surf), len(vol)))
+        f.write("1 0 0 0 0\n")
+        f.write("2 0 0 0 0\n")
+        for tag, e in surf:
+            f.write("%d 0 0 0 0 0 0 1 %d 0\n" % (e, tag))
+        for tag, e in vol:
+            f.write("%d 0 0 0 0 0 0 1 %d 0\n" % (e, tag))
+        f.write("$EndEntities\n")
+
+        f.write("$Nodes\n1 %d 1 %d\n" % (len(nodes), len(nodes)))
+        f.write("0 1 0 %d\n" % len(nodes))
+        for i in range(len(nodes)):
+            f.write("%d\n" % (i + 1))
+        for (x, y, z) in nodes:
+            f.write("%.16g %.16g %.16g\n" % (x, y, z))
+        f.write("$EndNodes\n")
+
+        # 要素は (次元, タグ, 型) ごとにブロックにまとめる
+        blocks = {}
+        for lst, dim, tmap in ((tris, 2, stype), (tets, 3, ttype)):
+            for tag, n in lst:
+                blocks.setdefault((dim, tag, tmap[len(n)]), []).append(n)
+        ne = sum(len(v) for v in blocks.values())
+        f.write("$Elements\n%d %d 1 %d\n" % (len(blocks), ne, ne))
+        eid = 0
+        for (dim, tag, ty), lst in blocks.items():
+            f.write("%d %d %d %d\n" % (dim, ent[(dim, tag)], ty, len(lst)))
+            for n in lst:
+                eid += 1
+                f.write("%d %s\n" % (eid, " ".join(str(v + 1) for v in n)))
         f.write("$EndElements\n")
 
 
@@ -418,6 +479,7 @@ def main():
         opt[sys.argv[a].lstrip("-")] = int(sys.argv[a + 1])
         a += 2
     order = opt.pop("order", 1)
+    opt41 = opt.pop("v41", 0)			# -v41 1 で Gmsh 4.1 形式で書く
 
     snap = None
     if kind == "box":
@@ -436,7 +498,10 @@ def main():
         return 1
     if order == 2:
         nodes, tets, tris = to_order2(nodes, tets, tris, snap)
-    write_msh(path, nodes, tets, tris)
+    if opt41:
+        write_msh41(path, nodes, tets, tris)
+    else:
+        write_msh(path, nodes, tets, tris)
     print("%s : order %d, %d nodes, %d tets, %d tris"
           % (path, order, len(nodes), len(tets), len(tris)))
     return 0
