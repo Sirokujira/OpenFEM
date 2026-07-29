@@ -18,11 +18,13 @@ ofe.out を読み、回路パラメータを CSV と SPICE サブサーキット
 #define FN_out   "ofe.out"
 #define FN_csv   "rlc.csv"
 #define FN_spice "ofe_circuit.sp"
-#define OUT_MAGIC "OFEOUT04"
+#define OUT_MAGIC "OFEOUT05"
 
 typedef struct {
 	int32_t np;
 	int32_t haveC, haveL, haveR, nsection, haveM, haveS, haveF, havePfe;
+	int32_t nsweep;			// 周波数掃引の点数 (0 : 掃引なし)
+	double  fsweep0, fsweep1;
 	int32_t tline;
 	double  length, volt, freq;
 	char    title[256];
@@ -43,17 +45,17 @@ static int readout(const char *fname, result_t *res)
 	}
 
 	int ierr = 0;
-	int32_t flag[8];
-	double dval[3];
+	int32_t flag[9];
+	double dval[5];
 	if ((fread(magic, 1, 8, fp) != 8) || memcmp(magic, OUT_MAGIC, 8)) {
 		printf("*** %s is not an %s output file.\n", fname, "OpenFEM");
 		ierr = 1;
 	}
 	if (!ierr) {
 		if ((fread(&res->np, sizeof(int32_t), 1, fp) != 1) ||
-		    (fread(flag, sizeof(int32_t), 8, fp) != 8) ||
+		    (fread(flag, sizeof(int32_t), 9, fp) != 9) ||
 		    (fread(&res->tline, sizeof(int32_t), 1, fp) != 1) ||
-		    (fread(dval, sizeof(double), 3, fp) != 3) ||
+		    (fread(dval, sizeof(double), 5, fp) != 5) ||
 		    (fread(res->title, 1, sizeof(res->title), fp) != sizeof(res->title))) {
 			printf("*** %s is broken.\n", fname);
 			ierr = 1;
@@ -68,9 +70,12 @@ static int readout(const char *fname, result_t *res)
 		res->haveS   = flag[5];
 		res->haveF   = flag[6];
 		res->havePfe = flag[7];
+		res->nsweep  = flag[8];
 		res->length  = dval[0];
 		res->volt    = dval[1];
 		res->freq    = dval[2];
+		res->fsweep0 = dval[3];
+		res->fsweep1 = dval[4];
 		res->title[sizeof(res->title) - 1] = '\0';
 
 		const size_t nn = (size_t)res->np * res->np;
@@ -149,6 +154,14 @@ static void write_csv(const result_t *res)
 	fprintf(fp, "ports,%d\n", np);
 	fprintf(fp, "per unit length,%s\n", (pul ? "yes" : "no"));
 	if (pul) fprintf(fp, "line length (equivalent circuit) [m],%.8e\n", res->length);
+	// 周波数掃引したときは、この CSV が**最後の 1 点**であることを明記する。
+	// 黙って 1 点だけ出すと「掃引の結果」と誤読される
+	if (res->nsweep > 0) {
+		fprintf(fp, "frequency sweep points,%d\n", res->nsweep);
+		fprintf(fp, "sweep range [Hz],%.8e,%.8e\n", res->fsweep0, res->fsweep1);
+		fprintf(fp, "note,the matrices below are the LAST sweep point (f = %.8e Hz); "
+			"see ofe_sweep.csv for all points\n", res->freq);
+	}
 	fprintf(fp, "\n");
 
 	if (res->haveC) {
@@ -197,6 +210,11 @@ static void write_csv(const result_t *res)
 
 	fclose(fp);
 	printf("output : %s\n", FN_csv);
+	if (res->nsweep > 0) {
+		printf("note   : frequency sweep of %d points; %s holds the LAST point "
+			"(f = %.4e Hz). All points are in ofe_sweep.csv\n",
+			res->nsweep, FN_csv, res->freq);
+	}
 }
 
 

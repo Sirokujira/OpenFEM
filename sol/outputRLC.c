@@ -7,7 +7,7 @@ outputRLC.c
 #include "fem.h"
 #include "fem_prototype.h"
 
-#define OUT_MAGIC "OFEOUT04"
+#define OUT_MAGIC "OFEOUT05"
 
 static void print_matrix(FILE *fp, const char *name, const char *unit, const double *m, int np)
 {
@@ -128,15 +128,19 @@ void writeout(FILE *fp)
 	const size_t tlen = strlen(Title);
 	memcpy(title, Title, ((tlen < sizeof(title) - 1) ? tlen : sizeof(title) - 1));
 
-	const int32_t flag[8] = {HaveC, HaveL, HaveR, NSection, HaveM, HaveS, HaveF, HavePfe};
+	const int32_t flag[9] = {HaveC, HaveL, HaveR, NSection, HaveM, HaveS, HaveF, HavePfe,
+		NFreqSweep};
 	const int32_t tline = (int32_t)Tline;
-	const double dval[3] = {LineLength, Volt, Freq};
+	// 掃引したときの端の周波数も渡す (ofe_post が「これは最後の点」と言えるように)
+	const double dval[5] = {LineLength, Volt, Freq,
+		((NFreqSweep > 0) ? FreqSweep[0] : 0),
+		((NFreqSweep > 0) ? FreqSweep[NFreqSweep - 1] : 0)};
 
 	fwrite(OUT_MAGIC, 1, 8, fp);
 	fwrite(&np, sizeof(int32_t), 1, fp);
-	fwrite(flag, sizeof(int32_t), 8, fp);
+	fwrite(flag, sizeof(int32_t), 9, fp);
 	fwrite(&tline, sizeof(int32_t), 1, fp);
-	fwrite(dval, sizeof(double), 3, fp);
+	fwrite(dval, sizeof(double), 5, fp);
 	fwrite(title, 1, sizeof(title), fp);
 
 	const size_t nn = (size_t)np * np;

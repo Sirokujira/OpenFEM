@@ -48,6 +48,8 @@
 #                    1 次元厳密解と比較する (Ldc / Rs / R(f) / L(f)、許容 0.2%)
 #   anisotropic mu : 面内の異方性 ν が **B に掛かる** こと (grad(Az) ではなく)。
 #                    等方性では一致するので等方性ケースでは検出できない
+#   post sweep     : rlc.csv が「掃引の最後の 1 点」であることを明記すること
+#                    (掃引していないときは出ないことも見る)
 #   hn_plate       : Havriliak-Negami 分散。β=1 で Cole-Cole、α=0 で Cole-Davidson、
 #                    両方で Debye に厳密一致すること (極限が恒等式になる)
 #   temp_material  : εr(T) で C が厳密に比例すること (4 温度)
@@ -528,6 +530,27 @@ mesh_reject "2-D mesh not normal to tline" t2d_plane.ofe
 sed 's/^region = 1 2/region = 1 2\nbh = 2 100 0.5\nbh = 2 1000 1.5/' \
     "$SRC/plate2d_dc.ofe" > "$WORK/t2d_bh.ofe"
 mesh_reject "nonlinear (bh) on a 2-D mesh" t2d_bh.ofe
+
+# ofe_post が掃引を認識すること。rlc.csv は掃引の**最後の 1 点**しか持たないので、
+# 黙って出すと「掃引の結果」と誤読される。点数・範囲・注記を出すこと。
+# **誤検知も同じくらい悪い**ので、掃引していないケースで出ないことも見る
+echo "[post sweep] rlc.csv must say it holds only the last sweep point"
+run_case sweep_plate
+if grep -q "^frequency sweep points,5$" "$WORK/rlc.csv" \
+   && grep -q "^sweep range \[Hz\],1.00000000e+08,1.00000000e+10$" "$WORK/rlc.csv" \
+   && grep -q "LAST sweep point" "$WORK/rlc.csv"; then
+	echo "  sweep note in rlc.csv : OK"
+else
+	echo "  sweep note in rlc.csv : NG" >&2
+	status=1
+fi
+run_case parallel_plate
+if grep -q "sweep" "$WORK/rlc.csv"; then
+	echo "  no sweep note without a sweep : NG" >&2
+	status=1
+else
+	echo "  no sweep note without a sweep : OK"
+fi
 
 # Havriliak-Negami 分散。**3 つの極限がそのまま恒等式になる**ので、
 # 閉形式を別に用意しなくても厳密に検査できる:
