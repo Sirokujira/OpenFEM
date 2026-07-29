@@ -48,6 +48,8 @@
 #                    1 次元厳密解と比較する (Ldc / Rs / R(f) / L(f)、許容 0.2%)
 #   anisotropic mu : 面内の異方性 ν が **B に掛かる** こと (grad(Az) ではなく)。
 #                    等方性では一致するので等方性ケースでは検出できない
+#   bertotti_core  : 鉄損 (Bertotti の損失分離)。1 次元厳密な B に対する閉形式と
+#                    機械精度で一致すること + **3 項を指数で分離**して検査する
 #   off-diagonal mu : 格子と材料テンソルを同じ角だけ面内で回すと答えが一致する
 #                    こと (合同な離散問題なので厳密)。非対角成分を検査できるのは
 #                    斜めに回した非対称断面だけ
@@ -521,6 +523,63 @@ mesh_reject "2-D mesh not normal to tline" t2d_plane.ofe
 sed 's/^region = 1 2/region = 1 2\nbh = 2 100 0.5\nbh = 2 1000 1.5/' \
     "$SRC/plate2d_dc.ofe" > "$WORK/t2d_bh.ofe"
 mesh_reject "nonlinear (bh) on a 2-D mesh" t2d_bh.ofe
+
+# 鉄損 (Bertotti の損失分離)。板間を積層鉄心で埋めた平行平板線路で、
+# 磁束密度が厳密に 1 次元 (B = mu0 I/W) なので閉形式と機械精度で一致する
+echo "[bertotti_core] iron loss vs the closed form on a 1-D exact field"
+pfe_of() {	# pfe_of : rlc.csv の Pfe (ポート 1)
+	awk -F, '$1 == "Pfe" { f = 1; next } f && ($1 == "1") { print $2; exit }' "$WORK/rlc.csv"
+}
+run_case bertotti_core
+# B = mu0 I/W、V = d W (単位長あたり)
+exp_all=$(awk 'BEGIN{ pi = 3.14159265358979324; mu0 = 4 * pi * 1e-7
+	B = mu0 * 1 / 1e-3; V = 0.2e-3 * 1e-3; f = 50
+	ph = 200 * f * (B ^ 2) * V
+	pc = (pi * pi * 2e6 * (0.35e-3) ^ 2 / 6) * f * f * B * B * V
+	pe = 1.5 * ((f * B) ^ 1.5) * V
+	printf "%.10e", ph + pc + pe }')
+compare "Pfe (total) [W/m]" "$(pfe_of)" "$exp_all" 1e-9
+compare "max|B| in the core [T]" \
+	"$(awk '/max\|B\|/ { for (i = 1; i <= NF; i++) if ($i == "max|B|") print $(i+2) }' "$WORK/ofe.log")" \
+	1.2566370614e-3 1e-6
+
+# **3 項の分離は指数で検査する。** 係数だけ合わせても指数を取り違えると
+# 別の周波数・電流で必ずずれるので、1 項ずつ残して f と I を 2 倍にする:
+#   ヒステリシス f^1   B^alpha(=2) -> f x2、I x4
+#   古典渦電流   f^2   B^2         -> f x4、I x4
+#   異常 (過剰)  f^1.5 B^1.5       -> f x2.8284、I x2.8284
+bert_ratio() {	# bert_ratio <ラベル> <bertotti 行> <変える行> <期待比>
+	sed -e "s/^bertotti = .*/$2/" "$SRC/bertotti_core.ofe" > "$WORK/be0.ofe"
+	(cd "$WORK" && "$OFE" -n 2 be0.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	p0=$(pfe_of)
+	sed -e "s/^bertotti = .*/$2/" -e "$3" "$SRC/bertotti_core.ofe" > "$WORK/be1.ofe"
+	(cd "$WORK" && "$OFE" -n 2 be1.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	p1=$(pfe_of)
+	compare "$1" "$(awk -v a="$p1" -v b="$p0" 'BEGIN{ printf "%.10e", a / b }')" "$4" 1e-6
+}
+# ヒステリシス項だけ (ke = 0, d = 0)
+bert_ratio "hysteresis: f x2"  "bertotti = 2 200.0 2.0 0.0 0.0" "s/^frequency = .*/frequency = 100/" 2.0
+bert_ratio "hysteresis: I x2"  "bertotti = 2 200.0 2.0 0.0 0.0" "s/^current = .*/current = 2/"        4.0
+# 古典渦電流項だけ (kh = 0, ke = 0)
+bert_ratio "classical: f x2"   "bertotti = 2 0.0 2.0 0.0 0.35e-3" "s/^frequency = .*/frequency = 100/" 4.0
+bert_ratio "classical: I x2"   "bertotti = 2 0.0 2.0 0.0 0.35e-3" "s/^current = .*/current = 2/"       4.0
+# 異常 (過剰) 項だけ (kh = 0, d = 0)
+bert_ratio "excess: f x2"      "bertotti = 2 0.0 2.0 1.5 0.0" "s/^frequency = .*/frequency = 100/" 2.8284271247
+bert_ratio "excess: I x2"      "bertotti = 2 0.0 2.0 1.5 0.0" "s/^current = .*/current = 2/"       2.8284271247
+# alpha が実際に効くこと (alpha = 2 -> 3 で I x2 の比が 4 -> 8)
+bert_ratio "hysteresis: alpha = 3, I x2" "bertotti = 2 200.0 3.0 0.0 0.0" "s/^current = .*/current = 2/" 8.0
+
+# 積層厚だけ与えて sigma が無いと古典項が黙って 0 になるので警告すること
+sed -e 's/^material = 1.0 2e6/material = 1.0 0/' "$SRC/bertotti_core.ofe" > "$WORK/be_nosig.ofe"
+if (cd "$WORK" && "$OFE" -n 2 be_nosig.ofe 2>&1 | grep -q "classical eddy-current term is 0"); then
+	echo "  bertotti with sigma = 0 warns : OK"
+else
+	echo "  bertotti with sigma = 0 warns : NG" >&2
+	status=1
+fi
+# frequency 無しは弾くこと
+grep -v '^frequency = ' "$SRC/bertotti_core.ofe" > "$WORK/be_nofreq.ofe"
+mesh_reject "bertotti without frequency" be_nofreq.ofe
 
 # 3 次元渦電流 (A-φ、辺要素)。1 次元厳密解 Z = γL/(2σW tanh(γt/2)) と比較する。
 # ω→0 では R が DC 抵抗 L/(σWt) に厳密一致しなければならない (連成系全体の検査)

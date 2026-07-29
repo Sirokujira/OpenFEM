@@ -200,6 +200,10 @@ int input_data(FILE *fp)
 		Material[m].tand  = 0;
 		Material[m].npole = 0;
 		Material[m].einf  = 1;
+		Material[m].be_kh = 0;
+		Material[m].be_alpha = 2;
+		Material[m].be_ke = 0;
+		Material[m].be_d = 0;
 		Material[m].tempco = 0;
 		Material[m].temp0 = 20;
 		Material[m].eps6_given = 0;
@@ -580,6 +584,30 @@ int input_data(FILE *fp)
 				mt->nbh[ax]++;
 			}
 		}
+		else if (!strcmp(strkey, "bertotti")) {
+			// bertotti = <material_id> <kh> <alpha> <ke> [<d>]
+			//   鉄損の損失分離 (Bertotti)。analysis = M と frequency と併用する
+			//     P = kh f B^alpha + (pi^2 sigma d^2/6) f^2 B^2 + ke (f B)^1.5  [W/m^3]
+			//   d は積層厚 [m]。省略 (または 0) なら古典渦電流項を評価しない
+			if (nval < 4) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			if ((mid < 0) || (mid >= NMaterial)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			material_t *mt = &Material[mid];
+			mt->be_kh    = atof(token[3]);
+			mt->be_alpha = atof(token[4]);
+			mt->be_ke    = atof(token[5]);
+			mt->be_d     = ((nval >= 5) ? atof(token[6]) : 0);
+			if ((mt->be_kh < 0) || (mt->be_ke < 0) || (mt->be_d < 0) || (mt->be_alpha <= 0)) {
+				printf("*** bertotti : kh, ke, d must be >= 0 and alpha > 0 (material %d)\n", mid);
+				return 1;
+			}
+		}
 		else if (!strcmp(strkey, "mesh")) {
 			// mesh = <file.msh>  : 非構造格子 (Gmsh ASCII 2.2) を読む
 			strcpy(MeshFile, token[2]);
@@ -920,7 +948,15 @@ int input_data(FILE *fp)
 	// 取り違えても値が 0 になるだけで黙って通ってしまうので、明示的に警告する。
 	{
 		const int use_eps  = (Analysis & (ANALYSIS_C | ANALYSIS_R)) != 0;
-		const int use_matsig = (Analysis & (ANALYSIS_R | ANALYSIS_A | ANALYSIS_E)) != 0;
+		// bertotti の古典渦電流項は Material[].sigma を読む (analysis M で)
+		int use_bertotti_sigma = 0;
+		if (Analysis & ANALYSIS_M) {
+			for (int m = 0; m < NMaterial; m++) {
+				if (Material[m].be_d > 0) use_bertotti_sigma = 1;
+			}
+		}
+		const int use_matsig = ((Analysis & (ANALYSIS_R | ANALYSIS_A | ANALYSIS_E)) != 0)
+		                     || use_bertotti_sigma;
 		const int use_mu   = (Analysis & (ANALYSIS_M | ANALYSIS_F | ANALYSIS_A | ANALYSIS_E)) != 0;
 		int have_condsig = 0;
 		for (int p = 0; p < MAXPORT; p++) {
@@ -968,6 +1004,13 @@ int input_data(FILE *fp)
 			if ((CondTempco[p] != 0) && (CondSigma[p] <= 0)) {
 				input_warn("conductortempco (conductor %d) has no effect because "
 					"conductorsigma was not given for it", p);
+			}
+		}
+		// 積層厚だけ与えて σ が無いと古典渦電流項が黙って 0 になる
+		for (int m = 0; m < NMaterial; m++) {
+			if ((Material[m].be_d > 0) && (Material[m].sigma <= 0)) {
+				input_warn("bertotti (material %d) has a lamination thickness but "
+					"sigma = 0, so the classical eddy-current term is 0", m);
 			}
 		}
 		if (Analysis == ANALYSIS_L) {
@@ -1118,6 +1161,25 @@ int input_data(FILE *fp)
 	if ((Analysis & ANALYSIS_P) && !MeshMode) {
 		printf("%s\n", "*** analysis P (nodal element self test) requires an unstructured mesh");
 		return 1;
+	}
+
+	// 鉄損 (bertotti) は静磁場の B と周波数が要る
+	{
+		int havebe = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if ((Material[m].be_kh > 0) || (Material[m].be_ke > 0) || (Material[m].be_d > 0)) havebe = 1;
+		}
+		if (havebe) {
+			if (!(Analysis & ANALYSIS_M)) {
+				printf("%s\n", "*** bertotti (iron loss) requires analysis M "
+					"(the peak flux density comes from the magnetostatic solution)");
+				return 1;
+			}
+			if (Freq <= 0) {
+				printf("%s\n", "*** bertotti (iron loss) requires the frequency key");
+				return 1;
+			}
+		}
 	}
 
 	// M 解析 (静磁場) は断面 2 次元の定式化なので伝送線路軸が要る

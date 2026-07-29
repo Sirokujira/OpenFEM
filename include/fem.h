@@ -97,6 +97,10 @@ typedef struct {
 	double sigma;				// 導電率 [S/m]
 	double mur;					// 比透磁率 (静磁場解析で使う、既定 1)
 	double tand;				// 誘電正接 tanδ (frequency 指定時に G へ寄与、既定 0)
+	// 鉄損 (Bertotti の損失分離)。bertotti キーで与える。0 なら評価しない
+	//   P = kh f B^alpha  +  (pi^2 sigma d^2 / 6) f^2 B^2  +  ke (f B)^1.5   [W/m^3]
+	//        ヒステリシス            古典渦電流 (積層厚 d)        異常 (過剰)
+	double be_kh, be_alpha, be_ke, be_d;
 	int    npole;				// 分散極の数 (0 : 分散なし)
 	double einf;				// ε∞
 	pole_t pole[MAXPOLE];
@@ -282,6 +286,10 @@ EXTERN double *Smat;			// 直列抵抗行列 (導体の DC 抵抗) [ohm/m]
 EXTERN double *Rfmat;			// 直列抵抗行列 R(f) (渦電流、表皮効果込み) [ohm/m]
 EXTERN double *Lfmat;			// 直列インダクタンス行列 L(f) (渦電流) [H/m]
 EXTERN int HaveC, HaveL, HaveR, HaveM, HaveS, HaveF;	// 各行列が計算済みか
+// 鉄損 (bertotti)。ポート k を励振したときの損失を対角 [k][k] に入れる。
+// 鉄損は B の非線形関数なので重ね合わせが効かず、非対角は定義できない
+EXTERN double *Pfemat;			// 鉄損 [W/m] (単位長あたり) または [W]
+EXTERN int HavePfe;
 EXTERN double TlineLength;		// 伝送線路長 [m] (Tline 指定時)
 
 #ifdef __cplusplus

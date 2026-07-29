@@ -7,7 +7,7 @@ outputRLC.c
 #include "fem.h"
 #include "fem_prototype.h"
 
-#define OUT_MAGIC "OFEOUT03"
+#define OUT_MAGIC "OFEOUT04"
 
 static void print_matrix(FILE *fp, const char *name, const char *unit, const double *m, int np)
 {
@@ -57,6 +57,16 @@ void outputRLC(FILE *fp)
 
 	if (HaveL) {
 		print_matrix(fp, "Inductance matrix L (TEM, external only)", "H/m", Lmat, np);
+	}
+
+	if (HavePfe) {
+		// 鉄損は B の非線形関数なので重ね合わせが効かない。対角 [k][k] が
+		// 「ポート k だけを current で励振したときの損失」で、非対角は定義できない
+		fprintf(fp, "\n%s [%s]:\n", "Iron loss Pfe (Bertotti, per driven port)",
+			(pul ? "W/m" : "W"));
+		for (int i = 0; i < np; i++) {
+			fprintf(fp, "  port %d = %14.6e\n", i + 1, Pfemat[(i * np) + i]);
+		}
 	}
 
 	if (HaveM) {
@@ -118,13 +128,13 @@ void writeout(FILE *fp)
 	const size_t tlen = strlen(Title);
 	memcpy(title, Title, ((tlen < sizeof(title) - 1) ? tlen : sizeof(title) - 1));
 
-	const int32_t flag[7] = {HaveC, HaveL, HaveR, NSection, HaveM, HaveS, HaveF};
+	const int32_t flag[8] = {HaveC, HaveL, HaveR, NSection, HaveM, HaveS, HaveF, HavePfe};
 	const int32_t tline = (int32_t)Tline;
 	const double dval[3] = {LineLength, Volt, Freq};
 
 	fwrite(OUT_MAGIC, 1, 8, fp);
 	fwrite(&np, sizeof(int32_t), 1, fp);
-	fwrite(flag, sizeof(int32_t), 7, fp);
+	fwrite(flag, sizeof(int32_t), 8, fp);
 	fwrite(&tline, sizeof(int32_t), 1, fp);
 	fwrite(dval, sizeof(double), 3, fp);
 	fwrite(title, 1, sizeof(title), fp);
@@ -138,4 +148,5 @@ void writeout(FILE *fp)
 	fwrite(Smat, sizeof(double), nn, fp);
 	fwrite(Rfmat, sizeof(double), nn, fp);
 	fwrite(Lfmat, sizeof(double), nn, fp);
+	fwrite(Pfemat, sizeof(double), nn, fp);
 }

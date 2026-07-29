@@ -36,6 +36,7 @@ static void alloc_matrices(void)
 	Smat = (double *)malloc(msize);
 	Rfmat = (double *)malloc(msize);
 	Lfmat = (double *)malloc(msize);
+	Pfemat = (double *)malloc(msize);
 	memset(Cmat, 0, msize);
 	memset(Lmat, 0, msize);
 	memset(Gmat, 0, msize);
@@ -44,7 +45,8 @@ static void alloc_matrices(void)
 	memset(Smat, 0, msize);
 	memset(Rfmat, 0, msize);
 	memset(Lfmat, 0, msize);
-	HaveC = HaveL = HaveR = HaveM = HaveS = HaveF = 0;
+	memset(Pfemat, 0, msize);
+	HaveC = HaveL = HaveR = HaveM = HaveS = HaveF = HavePfe = 0;
 }
 
 
@@ -457,7 +459,7 @@ void memfree(void)
 	free(CellConductor);
 	free(NodeConductor);
 	free(Cmat); free(Lmat); free(Gmat); free(Rmat); free(Mmat); free(Smat);
-	free(Rfmat); free(Lfmat);
+	free(Rfmat); free(Lfmat); free(Pfemat);
 	free(JaB); free(JaH); free(JaM); free(JaBn); free(JaHn); free(JaMn);
 	free(JaD); free(JaDn);
 }

@@ -69,6 +69,7 @@ int64_t num_cell(void);
 void field_add_node(const char *, const double *);
 void field_add_cellvec(const char *, const double *);
 void field_add_grad(const char *, const double *, int);
+void field_cell_grad(const double *, int, double *);
 void field_free(void);
 int field_write(FILE *);
 

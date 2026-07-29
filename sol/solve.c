@@ -144,6 +144,63 @@ static void symmetrize(double *m, int np, FILE *fp_log, const char *name)
 }
 
 
+// 鉄損 (Bertotti の損失分離)
+//
+// 静磁場解析で得た要素毎の |B| を**正弦波励磁の波高値**とみなし、
+// 単位体積あたりの損失を 3 項に分けて積分する:
+//
+//   P = kh f B^alpha  +  (pi^2 sigma d^2 / 6) f^2 B^2  +  ke (f B)^1.5   [W/m^3]
+//        ヒステリシス       古典渦電流 (積層厚 d)          異常 (過剰)
+//
+// 古典項の係数 pi^2 sigma d^2/6 は、厚さ d の薄板を一様な正弦波磁束が貫くときの
+// 渦電流損の閉形式 (d << 表皮深さ)。異常項の指数 1.5 は Bertotti の統計理論による。
+//
+// **静磁場の解を波高値に使う**ので、渦電流による磁束の押し出し (表皮効果) は
+// 入らない。d << 表皮深さ という積層鉄心の前提で使うこと。
+//
+// 戻り値は単位長あたりの損失 [W/m] (Tline があるとき) または全損失 [W]。
+static double iron_loss(const double *az, FILE *fp_log, int kport)
+{
+	const int64_t ncell = elem_count();
+	double *bv = (double *)malloc((size_t)ncell * 3 * sizeof(double));
+	field_cell_grad(az, 1, bv);			// B = ∇×(Az ê_t)
+
+	double ph = 0, pc = 0, pe = 0, vsum = 0, bmax = 0;
+	for (int64_t c = 0; c < ncell; c++) {
+		elem_t el;
+		elem_get(c, &el);
+		const material_t *mt = &Material[el.mat];
+		if ((mt->be_kh <= 0) && (mt->be_ke <= 0) && (mt->be_d <= 0)) continue;
+
+		const double bx = bv[(c * 3)], by = bv[(c * 3) + 1], bz = bv[(c * 3) + 2];
+		const double b = sqrt((bx * bx) + (by * by) + (bz * bz));
+		if (b > bmax) bmax = b;
+		vsum += el.vol;
+
+		if (mt->be_kh > 0) ph += mt->be_kh * Freq * pow(b, mt->be_alpha) * el.vol;
+		if ((mt->be_d > 0) && (mt->sigma > 0)) {
+			pc += (PI * PI * mt->sigma * mt->be_d * mt->be_d / 6)
+			    * Freq * Freq * b * b * el.vol;
+		}
+		if (mt->be_ke > 0) pe += mt->be_ke * pow(Freq * b, 1.5) * el.vol;
+	}
+	free(bv);
+
+	const double scale = ((TlineLength > 0) ? (1 / TlineLength) : 1);
+	ph *= scale;
+	pc *= scale;
+	pe *= scale;
+
+	// max|B| は検証で閉形式と突き合わせるので有効桁を落とさない
+	fprintf(fp_log, "  iron loss (port %d) : volume = %.6e, max|B| = %.10e [T], "
+		"f = %.6e [Hz]\n", kport, vsum * scale, bmax, Freq);
+	fprintf(fp_log, "    hysteresis = %.6e, classical = %.6e, excess = %.6e, "
+		"total = %.6e [W/m]\n", ph, pc, pe, ph + pc + pe);
+
+	return ph + pc + pe;
+}
+
+
 // 静磁場解析 (断面 2 次元、ベクトルポテンシャル Az 定式化)
 //
 //   ∇・(ν ∇Az) = -Jz,  ν = 1/(μ0 μr)
@@ -184,6 +241,12 @@ static int solve_magnetostatic(FILE *fp_log)
 
 	crs_t A;
 	crs_alloc(&A);
+
+	// 鉄損 (bertotti) を評価する材料があるか
+	int havebe = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if ((Material[m].be_kh > 0) || (Material[m].be_ke > 0) || (Material[m].be_d > 0)) havebe = 1;
+	}
 
 	// 要素毎の磁気抵抗率 ν。非線形材料 (B-H) があると反復で更新する
 	const int tri2d = (MeshMode && (MeshDim == 2));
@@ -494,6 +557,12 @@ static int solve_magnetostatic(FILE *fp_log)
 			field_add_node(nm, az);
 			sprintf(nm, "B_M_port%d", k);
 			field_add_grad(nm, az, 1);
+		}
+
+		// 鉄損 (Bertotti の損失分離)。要素毎の |B| を波高値として使う
+		if (havebe) {
+			Pfemat[((k - 1) * np) + (k - 1)] = iron_loss(az, fp_log, k);
+			HavePfe = 1;
 		}
 	}
 

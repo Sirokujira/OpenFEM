@@ -18,15 +18,15 @@ ofe.out を読み、回路パラメータを CSV と SPICE サブサーキット
 #define FN_out   "ofe.out"
 #define FN_csv   "rlc.csv"
 #define FN_spice "ofe_circuit.sp"
-#define OUT_MAGIC "OFEOUT03"
+#define OUT_MAGIC "OFEOUT04"
 
 typedef struct {
 	int32_t np;
-	int32_t haveC, haveL, haveR, nsection, haveM, haveS, haveF;
+	int32_t haveC, haveL, haveR, nsection, haveM, haveS, haveF, havePfe;
 	int32_t tline;
 	double  length, volt, freq;
 	char    title[256];
-	double  *c, *l, *g, *r, *m, *s, *rf, *lf;
+	double  *c, *l, *g, *r, *m, *s, *rf, *lf, *pfe;
 	const double *lind;			// 等価回路に使う L
 	const double *rser;			// 等価回路に使う直列 R
 } result_t;
@@ -43,7 +43,7 @@ static int readout(const char *fname, result_t *res)
 	}
 
 	int ierr = 0;
-	int32_t flag[7];
+	int32_t flag[8];
 	double dval[3];
 	if ((fread(magic, 1, 8, fp) != 8) || memcmp(magic, OUT_MAGIC, 8)) {
 		printf("*** %s is not an %s output file.\n", fname, "OpenFEM");
@@ -51,7 +51,7 @@ static int readout(const char *fname, result_t *res)
 	}
 	if (!ierr) {
 		if ((fread(&res->np, sizeof(int32_t), 1, fp) != 1) ||
-		    (fread(flag, sizeof(int32_t), 7, fp) != 7) ||
+		    (fread(flag, sizeof(int32_t), 8, fp) != 8) ||
 		    (fread(&res->tline, sizeof(int32_t), 1, fp) != 1) ||
 		    (fread(dval, sizeof(double), 3, fp) != 3) ||
 		    (fread(res->title, 1, sizeof(res->title), fp) != sizeof(res->title))) {
@@ -67,6 +67,7 @@ static int readout(const char *fname, result_t *res)
 		res->haveM   = flag[4];
 		res->haveS   = flag[5];
 		res->haveF   = flag[6];
+		res->havePfe = flag[7];
 		res->length  = dval[0];
 		res->volt    = dval[1];
 		res->freq    = dval[2];
@@ -86,6 +87,7 @@ static int readout(const char *fname, result_t *res)
 			res->s  = (double *)malloc(nn * sizeof(double));
 			res->rf = (double *)malloc(nn * sizeof(double));
 			res->lf = (double *)malloc(nn * sizeof(double));
+			res->pfe = (double *)malloc(nn * sizeof(double));
 			if ((fread(res->c, sizeof(double), nn, fp) != nn) ||
 			    (fread(res->l, sizeof(double), nn, fp) != nn) ||
 			    (fread(res->g, sizeof(double), nn, fp) != nn) ||
@@ -93,7 +95,8 @@ static int readout(const char *fname, result_t *res)
 			    (fread(res->m, sizeof(double), nn, fp) != nn) ||
 			    (fread(res->s, sizeof(double), nn, fp) != nn) ||
 			    (fread(res->rf, sizeof(double), nn, fp) != nn) ||
-			    (fread(res->lf, sizeof(double), nn, fp) != nn)) {
+			    (fread(res->lf, sizeof(double), nn, fp) != nn) ||
+			    (fread(res->pfe, sizeof(double), nn, fp) != nn)) {
 				printf("*** %s is broken (matrix).\n", fname);
 				ierr = 1;
 			}
@@ -174,6 +177,14 @@ static void write_csv(const result_t *res)
 	if (res->haveF) {
 		write_matrix_csv(fp, "Rf", (pul ? "ohm/m" : "ohm"), res->rf, np);
 		write_matrix_csv(fp, "Lf", (pul ? "H/m" : "H"), res->lf, np);
+	}
+	if (res->havePfe) {
+		// 鉄損は重ね合わせが効かないので行列ではなく「駆動ポート毎の値」
+		fprintf(fp, "\nPfe,%s\n", (pul ? "W/m" : "W"));
+		fprintf(fp, "port,value\n");
+		for (int i = 0; i < np; i++) {
+			fprintf(fp, "%d,%.8e\n", i + 1, res->pfe[(i * np) + i]);
+		}
 	}
 
 	if (res->haveC && (res->haveL || res->haveM) && (np == 1)

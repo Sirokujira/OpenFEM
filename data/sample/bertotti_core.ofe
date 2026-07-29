@@ -1,0 +1,44 @@
+OpenFEM 1 0
+title = iron loss (Bertotti loss separation) on a 1-D exact field
+#
+# plate_line_dc.ofe と同じ平行平板線路の**板間を積層鉄心で埋めた**もの。
+# 磁界は厳密に 1 次元なので、鉄心内の磁束密度は閉形式で決まる:
+#
+#   B = mu0 mur I / W = 4pi*1e-7 * 1 / 1e-3 = 1.2566370614e-03 [T]   (I=1A, W=1mm)
+#   鉄心の体積 (単位長あたり) = d * W = 0.2e-3 * 1e-3 = 2.0e-07 [m^2]
+#
+# B が要素内で厳密に一定なので (Az が間隙で 1 次)、重心での評価も厳密になり、
+# 損失は次の閉形式と機械精度で一致しなければならない:
+#
+#   P = [ kh f B^alpha + (pi^2 sigma d_lam^2 / 6) f^2 B^2 + ke (f B)^1.5 ] * V
+#
+# パラメータは無方向性電磁鋼板を模した値 (kh=200, alpha=2, ke=1.5,
+# 積層厚 0.35mm, sigma=2e6 S/m) を 50 Hz で評価する。
+#
+# **3 項の分離は指数で検査する** (係数の取り違えは値だけ見ても分からない):
+#   ヒステリシス : f^1   B^alpha
+#   古典渦電流   : f^2   B^2
+#   異常 (過剰)  : f^1.5 B^1.5
+# rlc_check.sh では 1 項ずつ残して f と I を 2 倍にし、比が上の指数どおりに
+# なることを見る。指数や係数を取り違えると必ず落ちる。
+#
+# 古典項の係数 pi^2 sigma d^2/6 は「厚さ d の薄板を一様な正弦波磁束が貫くとき」
+# の閉形式なので、d << 表皮深さ が前提 (50Hz, sigma=2e6, mur=1 で
+# 表皮深さ = 50mm >> 0.35mm)。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 20 0.05e-3 20 0.25e-3 20 0.30e-3
+zmesh = 0 1 1e-4
+
+material = 1.0 2e6
+geometry = 2 1 0 1e-3 0.05e-3 0.25e-3 0 1e-4
+bertotti = 2 200.0 2.0 1.5 0.35e-3
+
+conductor = 0 1 0 1e-3 0      0.05e-3 0 1e-4
+conductor = 1 1 0 1e-3 0.25e-3 0.30e-3 0 1e-4
+
+analysis = M
+tline = Z
+current = 1
+frequency = 50
+end

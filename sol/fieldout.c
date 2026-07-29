@@ -85,6 +85,18 @@ void field_add_grad(const char *name, const double *u, int kind)
 	const int64_t nc = num_cell();
 	double *v = (double *)malloc((size_t)nc * 3 * sizeof(double));
 
+	field_cell_grad(u, kind, v);
+	field_add_cellvec(name, v);
+	free(v);
+}
+
+
+// 上と同じ計算を、溜めずに呼び出し側の配列 v[3*num_cell()] に書く。
+// 鉄損 (bertotti) が B を要素毎に必要とするので分離した (fieldout = 0 でも使う)
+void field_cell_grad(const double *u, int kind, double *v)
+{
+	const int64_t nc = num_cell();
+
 	if (MeshMode && (MeshDim == 2)) {
 		// 断面 2 次元 : 面内 2 軸だけが微分に効く
 		int p, q;
@@ -157,9 +169,6 @@ void field_add_grad(const char *name, const double *u, int kind)
 			v[(c * 3) + q] = -gp;
 		}
 	}
-
-	field_add_cellvec(name, v);
-	free(v);
 }
 
 
