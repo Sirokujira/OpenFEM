@@ -21,8 +21,15 @@
 #              セルと座標の対応が崩れると値が入れ替わるので、
 #              VTK の並べ替え (i 最内) の誤りを検出できる
 #
-# 構造格子 (RECTILINEAR_GRID) と非構造格子 (UNSTRUCTURED_GRID、VTK_TETRA) の
-# どちらも扱う。VTK のセルの並びは i が最内なので、体積もその順に作る。
+# 構造格子 (RECTILINEAR_GRID) と非構造格子 (UNSTRUCTURED_GRID) の どちらも扱う。
+# VTK のセルの並びは i が最内なので、体積もその順に作る。
+#
+# 非構造格子のセルは**先頭の節点数で見分ける** (VTK の CELLS 行は
+# "<節点数> <節点番号>..." なので型を読まなくても分かる):
+#   4 節点 -> 四面体 (VTK_TETRA / VTK_QUADRATIC_TETRA の頂点 4 個) -> 体積
+#   3 節点 -> 三角形 (VTK_TRIANGLE、断面 2 次元の M / F) -> **面積**
+# 断面 2 次元は単位長あたりで扱うので、面積がそのまま「体積」になり
+# ∫|J|²/(2σ) dA = ½Re(Y) のような恒等式がそのまま使える。
 
 BEGIN { mode = ""; nx = ny = nz = 0; np = 0; nc = 0; want = 0; got = 0
         if (xcut == "") xcut = ""; if (axis == "") axis = 0
@@ -46,7 +53,7 @@ BEGIN { mode = ""; nx = ny = nz = 0; np = 0; nc = 0; want = 0; got = 0
 	if (rd == "z") { zc[k++] = $1; if (k == n) { nz = n; rd = "" }; next }
 	if (rd == "p") { px[k] = $1; py[k] = $2; pz[k] = $3; k++;
 	                 if (k == n) { np = n; rd = "" }; next }
-	if (rd == "c") { c0[k] = $2; c1[k] = $3; c2[k] = $4; c3[k] = $5; k++;
+	if (rd == "c") { cn[k] = $1; c0[k] = $2; c1[k] = $3; c2[k] = $4; c3[k] = $5; k++;
 	                 if (k == n) { nc = n; rd = "" }; next }
 	if (want && (NF == 3)) { vx[got] = $1; vy[got] = $2; vz[got] = $3; got++; next }
 	if (want && (NF != 3) && (got > 0)) { want = 0 }
@@ -69,6 +76,12 @@ END {
 		for (e = 0; e < nc; e++) {
 			ax = px[c1[e]] - px[c0[e]]; ay = py[c1[e]] - py[c0[e]]; az = pz[c1[e]] - pz[c0[e]]
 			bx = px[c2[e]] - px[c0[e]]; by = py[c2[e]] - py[c0[e]]; bz = pz[c2[e]] - pz[c0[e]]
+			if (cn[e] == 3) {
+				# 三角形 : 面積 = |a x b| / 2 (単位長あたりなのでこれが「体積」)
+				nx1 = (ay*bz - az*by); ny1 = (az*bx - ax*bz); nz1 = (ax*by - ay*bx)
+				cv[e] = sqrt((nx1*nx1) + (ny1*ny1) + (nz1*nz1)) / 2
+				continue
+			}
 			dx = px[c3[e]] - px[c0[e]]; dy = py[c3[e]] - py[c0[e]]; dz = pz[c3[e]] - pz[c0[e]]
 			d = (ay*bz - az*by) * dx + (az*bx - ax*bz) * dy + (ax*by - ay*bx) * dz
 			cv[e] = ((d < 0) ? -d : d) / 6
@@ -92,9 +105,10 @@ END {
 		}
 		else {
 			for (e = 0; e < nc; e++) {
-				gx[e] = (px[c0[e]] + px[c1[e]] + px[c2[e]] + px[c3[e]]) / 4
-				gy[e] = (py[c0[e]] + py[c1[e]] + py[c2[e]] + py[c3[e]]) / 4
-				gz[e] = (pz[c0[e]] + pz[c1[e]] + pz[c2[e]] + pz[c3[e]]) / 4
+				nn = cn[e]			# 3 = 三角形、4 = 四面体
+				gx[e] = (px[c0[e]] + px[c1[e]] + px[c2[e]] + ((nn == 3) ? 0 : px[c3[e]])) / nn
+				gy[e] = (py[c0[e]] + py[c1[e]] + py[c2[e]] + ((nn == 3) ? 0 : py[c3[e]])) / nn
+				gz[e] = (pz[c0[e]] + pz[c1[e]] + pz[c2[e]] + ((nn == 3) ? 0 : pz[c3[e]])) / nn
 			}
 		}
 	}

@@ -772,6 +772,61 @@ compare "Re(I) of the return conductor" \
 	"$(awk -v v="$(vtk ilo J_F_re_port1 1 0.15e-3 2)" 'BEGIN{ printf "%.10e", -v }')" \
 	"$(vtk ihi J_F_re_port1 1 0.15e-3 2)" 1e-9
 
+# (4b) 同じ恒等式を**断面 2 次元の非構造格子**でも通す。三角形セルなので
+#      vtkcheck.awk はセル面積を使う (単位長あたりなので面積 = 「体積」)。
+#      この経路は場の出力を足したときに検証が無いまま出荷していた
+awk '/^analysis = F/{print "fieldout = 1"} {print}' "$SRC/plate2d_ac.ofe" > "$WORK/fld2d.ofe"
+(cd "$WORK" && "$OFE" -n 2 fld2d.ofe > /dev/null && "$OFE_POST" > /dev/null)
+# 断面積 = W (2t + d) = 1e-3 * 0.3e-3
+compare "field area (2-D mesh) [m^2]" "$(vtk vol J_F_re_port1)" 3.0e-7 1e-9
+# VTK_TRIANGLE = 5、1 セルあたり 3 節点。**vtkcheck.awk は先頭の節点数で
+# 判定するのでセル型の誤りは見えない**ので、型そのものを別に assert する
+# (型が違うと ParaView が開けない)
+res=$(awk '
+	NF == 0       { next }
+	/^CELLS/      { st = "c"; k = 0; next }
+	/^CELL_TYPES/ { st = "t"; k = 0; next }
+	/^[A-Z_]+ /   { st = ""; next }
+	st == "t" { k++; if ($1 != 5) type++; next }
+	st == "c" { if ($1 != 3) nn++; next }
+	END { if (k == 0) { printf "NG (no cells)" }
+	      else if (type || nn) { printf "NG (%d not type 5, %d not 3-node)", type, nn }
+	      else { printf "OK" } }' "$WORK/ofe_field.vtk")
+echo "  VTK cell type is TRIANGLE with 3 nodes : $res"
+case "$res" in NG*) status=1 ;; esac
+pf=$(awk -v a="$(vtk int2 J_F_re_port1)" -v b="$(vtk int2 J_F_im_port1)" \
+	'BEGIN{ printf "%.10e", (a + b) / (2 * 5.8e7) }')
+pt=$(awk -v R="$(value_of Rf)" -v L="$(value_of Lf)" \
+	'BEGIN{ om = 2 * 3.14159265358979324 * 1e3; X = om * L
+	        printf "%.10e", 0.5 * R / ((R * R) + (X * X)) }')
+compare "ohmic loss from the field (2-D) [W/m]" "$pf" "$pt" 1e-4
+qf=$(awk -v a="$(vtk int2 B_F_re_port1)" -v b="$(vtk int2 B_F_im_port1)" \
+	'BEGIN{ om = 2 * 3.14159265358979324 * 1e3
+	        printf "%.10e", om * (a + b) / (4e-7 * 3.14159265358979324) }')
+qt=$(awk -v R="$(value_of Rf)" -v L="$(value_of Lf)" \
+	'BEGIN{ om = 2 * 3.14159265358979324 * 1e3; X = om * L
+	        printf "%.10e", X / ((R * R) + (X * X)) }')
+compare "magnetic energy from the field (2-D)" "$qf" "$qt" 1e-3
+# B の向き : 板は y (幅方向) に一様なので ∂Az/∂y = 0、B = ∇×(Az x̂) は **y 向き**。
+# 回転を取らず -∇Az にすると同じ大きさで z 向きになるので、大きさの恒等式では
+# 見えずこの比較でだけ落ちる。
+#
+# **最大値ではなく符号つきの体積加重平均で見ること。** 四角形を対角線で 2 つの
+# 三角形に割っているので、z にだけ変化する場でも重心での ∂Az/∂y が対角線の
+# 向きに応じて交番し、max|B_z| は max|B_y| の 0.9% ほど残る (実測 1.6e-5 対
+# 1.8e-3)。符号つき平均ではこれが打ち消し合って 1e-11 まで落ちる
+res=$(awk -v by="$(vtk mean1 B_F_re_port1)" -v bz="$(vtk mean2 B_F_re_port1)" \
+	'BEGIN{ if (by < 0) by = -by; if (bz < 0) bz = -bz
+	        printf "%s", ((by > 0) && (bz < 1e-6 * by)) ? "OK" : "NG" }')
+echo "  B_F is y-directed on the 2-D mesh (curl, not gradient) : $res"
+case "$res" in NG*) status=1 ;; esac
+# 符号つきの導体電流。2 枚の板は z で分かれ、電流は tline 軸 (x) 向きなので
+# 分割軸 (z=2) と積分する成分 (x=0) を分ける。界面は z = 0.1e-3 (間隙の中央)
+compare "Re(I) of the return conductor (2-D)" \
+	"$(awk -v v="$(vtk ilo J_F_re_port1 2 0.1e-3 0)" 'BEGIN{ printf "%.10e", -v }')" \
+	"$(vtk ihi J_F_re_port1 2 0.1e-3 0)" 1e-6
+
+
 # 非導電領域 (空気) を含む 3 次元渦電流。空気層は界面で Robin 条件に潰れるので
 # 1 次元の閉形式が残る。**空気が効いていることを見るには L を見る必要がある**
 # (空気の辺を A=0 に固定する変異は R をほとんど動かさず L だけ -43% ずらす)
