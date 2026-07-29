@@ -48,6 +48,8 @@
 #                    1 次元厳密解と比較する (Ldc / Rs / R(f) / L(f)、許容 0.2%)
 #   anisotropic mu : 面内の異方性 ν が **B に掛かる** こと (grad(Az) ではなく)。
 #                    等方性では一致するので等方性ケースでは検出できない
+#   hn_plate       : Havriliak-Negami 分散。β=1 で Cole-Cole、α=0 で Cole-Davidson、
+#                    両方で Debye に厳密一致すること (極限が恒等式になる)
 #   temp_material  : εr(T) で C が厳密に比例すること (4 温度)
 #   temp_mur       : μr(T) で L が動くこと (内部インダクタンスは動かない)
 #   bhtempco       : B 軸を k 倍すると (L - L_int) がちょうど k 倍になること
@@ -526,6 +528,39 @@ mesh_reject "2-D mesh not normal to tline" t2d_plane.ofe
 sed 's/^region = 1 2/region = 1 2\nbh = 2 100 0.5\nbh = 2 1000 1.5/' \
     "$SRC/plate2d_dc.ofe" > "$WORK/t2d_bh.ofe"
 mesh_reject "nonlinear (bh) on a 2-D mesh" t2d_bh.ofe
+
+# Havriliak-Negami 分散。**3 つの極限がそのまま恒等式になる**ので、
+# 閉形式を別に用意しなくても厳密に検査できる:
+#   β = 1        -> Cole-Cole (同じ α)
+#   α = 0        -> Cole-Davidson (同じ β)
+#   α = 0, β = 1 -> Debye
+# 「別のキーで書いた同じ物理」が全桁一致することを見る
+echo "[hn_plate] Havriliak-Negami (alpha = 0.3, beta = 0.6) at 1 GHz"
+run_case hn_plate
+compare "C [F]" "$(value_of C)" 1.797624606e-13 1e-6
+compare "G [S]" "$(value_of G)" 1.962350996e-04 1e-6
+hn_same() {	# hn_same <ラベル> <極 1 の行> <極 2 の行>
+	sed "s/^havriliak = .*/$2/" "$SRC/hn_plate.ofe" > "$WORK/hn1.ofe"
+	(cd "$WORK" && "$OFE" -n 2 hn1.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	c1=$(value_of C); g1=$(value_of G)
+	sed "s/^havriliak = .*/$3/" "$SRC/hn_plate.ofe" > "$WORK/hn2.ofe"
+	(cd "$WORK" && "$OFE" -n 2 hn2.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "$1 : C" "$(value_of C)" "$c1" 1e-9
+	compare "$1 : G" "$(value_of G)" "$g1" 1e-9
+}
+hn_same "beta = 1 equals Cole-Cole" \
+	"havriliak = 2 2.0 3.0 1.591549431e-10 0.3 1.0" \
+	"colecole = 2 2.0 3.0 1.591549431e-10 0.3"
+hn_same "alpha = 0 equals Cole-Davidson" \
+	"havriliak = 2 2.0 3.0 1.591549431e-10 0.0 0.6" \
+	"coledavidson = 2 2.0 3.0 1.591549431e-10 0.6"
+hn_same "alpha = 0, beta = 1 equals Debye" \
+	"havriliak = 2 2.0 3.0 1.591549431e-10 0.0 1.0" \
+	"debye = 2 2.0 3.0 1.591549431e-10"
+# beta の範囲外は弾くこと
+sed 's/^havriliak = .*/havriliak = 2 2.0 3.0 1.591549431e-10 0.3 1.5/' \
+    "$SRC/hn_plate.ofe" > "$WORK/hn_bad.ofe"
+mesh_reject "havriliak with beta > 1" hn_bad.ofe
 
 # εr / μr / B-H の温度依存。σ(T) と同じ 1 次係数だが、**適用箇所が違う**:
 #   εr / μr は読み出し時 (material_freq が εr を上書きするので入力時では消える)
@@ -1006,7 +1041,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
-         bertotti_core temp_material temp_mur; do
+         bertotti_core temp_material temp_mur hn_plate; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

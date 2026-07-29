@@ -1,0 +1,37 @@
+OpenFEM 1 0
+title = parallel plate with a Havriliak-Negami dielectric (alpha=0.3, beta=0.6)
+#
+# 平行平板 (1mm x 1mm、間隔 0.2mm) に Havriliak-Negami 分散を詰める。
+#
+#   εr(ω) = eps_inf + Δε / (1 + (jωτ)^(1-α))^β
+#   Z = 1 + (ωτ)^(1-α) e^{j(1-α)π/2} を極形式 R e^{jφ} にして
+#   Δε / Z^β = Δε R^-β (cos βφ - j sin βφ)
+#
+# eps_inf = 2.0, Δε = 3.0, τ = 1.591549431e-10 s (1GHz で ωτ = 1), α = 0.3, β = 0.6
+#
+# f = 1 GHz での値 (上式から独立に計算):
+#   εr' = 4.060507060,  εr'' = 0.705469249
+#   C = eps0 * εr' * A/d = 1.797624606e-13 [F]
+#   G = ω * eps0 * εr'' * A/d = 1.962350996e-04 [S]
+#
+# **3 つの極限がそのまま恒等式になる** (閉形式を別に用意しなくてよい):
+#   β = 1        -> Cole-Cole (同じ α) に厳密一致
+#   α = 0        -> Cole-Davidson (同じ β) に厳密一致
+#   α = 0, β = 1 -> Debye に厳密一致
+# rlc_check.sh はこの 3 つを「別のキーで書いた同じ物理」と突き合わせる。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 4 1e-3
+zmesh = 0 8 0.2e-3
+
+material = 1.0 0
+havriliak = 2 2.0 3.0 1.591549431e-10 0.3 0.6
+geometry = 2 1 0 1e-3 0 1e-3 0 0.2e-3
+
+conductor = 0 1 0 1e-3 0 1e-3 0      0
+conductor = 1 1 0 1e-3 0 1e-3 0.2e-3 0.2e-3
+
+analysis = C R
+frequency = 1e9
+solver = 20000 500 1e-12
+end

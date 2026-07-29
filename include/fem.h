@@ -86,9 +86,13 @@ typedef struct {
 //   type 3 (Drude)     : -ωp^2 / (ω^2 - jωΓ)              a=fp [Hz], b=Γ/2π [Hz]
 //   type 4 (Cole-Cole) : Δε / (1 + (jωτ)^(1-α))           a=Δε,  b=τ [s],  c=α (0<=α<1)
 //     α = 0 の Cole-Cole は Debye に厳密に一致する (検証で使う)
+//   type 5 (Havriliak-Negami) : Δε / (1 + (jωτ)^(1-α))^β
+//                                                          a=Δε, b=τ, c=α, d=β (0<β<=1)
+//     β = 1 で Cole-Cole、α = 0 で Cole-Davidson、両方で Debye に厳密一致する。
+//     この 3 つの極限がそのまま検証の恒等式になる
 typedef struct {
 	int    type;
-	double a, b, c;
+	double a, b, c, d;
 } pole_t;
 
 // 材料 (id=0 : 真空, id=1 : PEC 予約, id>=2 : ユーザー定義)

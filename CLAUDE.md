@@ -59,6 +59,9 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
 - 分散材料 (`debye`/`lorentz`/`drude`/`colecole`) は時間因子 e^{jωt}、ε = ε' − jε''。
   `er` に ε'、`ei` に **+ε''** (損失が正) を足す。極を足すときはこの符号規約に従う。
   Cole-Cole は α = 0 で Debye に厳密一致するので、その恒等式を検証に使う。
+  Havriliak-Negami (`havriliak`) は β=1 で Cole-Cole、α=0 で Cole-Davidson、
+  両方で Debye に厳密一致する。**極限を持つモデルは極限そのものを恒等式にする**
+  (閉形式を別に用意しなくてよく、しかも厳密)。
 - 温度依存は σ の読み出し**手前で一度だけ**掛ける (`input_data.c` の末尾)。σ の
   読み出しは `Material[].sigma` (R/A/E) と `CondSigma[]` (Rs/F) の 2 系統あり、
   下流で個別に補正すると必ず漏れる。

@@ -770,6 +770,8 @@ end
 | `lorentz` | `<material_id> <eps_inf> (<deps> <f0> <delta>)...` | なし | Lorentz 分散材料 (多極可)。`debye` と混在させると極が足し合わされる |
 | `drude` | `<material_id> <eps_inf> (<fp> <gamma>)...` | なし | Drude 媒質 (多極可)。ωp = 2π·fp、Γ = 2π·gamma。低周波では σ = ε0ωp²/Γ の導体になる |
 | `colecole` | `<material_id> <eps_inf> (<deps> <tau> <alpha>)...` | なし | Cole-Cole 分散 (多極可)。0 ≤ α < 1、α = 0 は Debye に厳密一致 |
+| `havriliak` | `<material_id> <eps_inf> (<deps> <tau> <alpha> <beta>)...` | なし | Havriliak-Negami 分散 (多極可)。0 ≤ α < 1、0 < β ≤ 1。β=1 で Cole-Cole、α=0 で Cole-Davidson、両方で Debye に厳密一致 |
+| `coledavidson` | `<material_id> <eps_inf> (<deps> <tau> <beta>)...` | なし | Cole-Davidson 分散 (多極可)。α = 0 の Havriliak-Negami と同じ |
 | `anisoeps` | `<material_id> <exx> <eyy> <ezz> [<exy> <eyz> <ezx>]` | 等方性 | 異方性の比誘電率。3 値で対角、6 値で非対角を含む対称テンソル |
 | `anisomur` | `<material_id> <mxx> <myy> <mzz> [<mxy> <myz> <mzx>]` | 等方性 | 異方性の比透磁率 (同上)。ν = (μ0μ̃)⁻¹ をテンソルとして逆転する |
 | `conductorsigma` | `<conductor_id> <sigma>` | なし | 導体の導電率。DC 直列抵抗 Rs の計算に使う |
@@ -889,6 +891,34 @@ f と I を 2 倍にし、比が指数どおりになることを見ます:
 | 古典項を f² でなく f¹ に | 総和 −3.8% |
 | 古典項の係数 /6 → /12 | 総和 −1.9% |
 
+### Havriliak-Negami — 極限そのものを恒等式にする
+
+```
+εr(ω) = ε∞ + Δε / (1 + (jωτ)^(1−α))^β
+```
+
+Z = 1 + (ωτ)^(1−α) e^{j(1−α)π/2} を極形式 R e^{jφ} にすると
+Δε/Z^β = Δε R^{−β}(cos βφ − j sin βφ) で評価できます。
+
+この極は **3 つの既存モデルを極限として含む**ので、閉形式を別に用意しなくても
+厳密な検証ができます。「別のキーで書いた同じ物理」が全桁一致することを見ます:
+
+| 極限 | 一致する相手 |
+|---|---|
+| β = 1 | `colecole`(同じ α) |
+| α = 0 | `coledavidson`(同じ β) |
+| α = 0, β = 1 | `debye` |
+
+絶対値の錨として α=0.3, β=0.6, ωτ=1 の C / G も上式から独立に計算して比較します
+(実測 +0.00%)。
+
+| 埋め込んだ誤り | 検出 |
+|---|---|
+| R^{−β} を R^{−1} に (大きさで β を無視) | C −9.8% |
+| 位相に β を掛けない | C −5.0% |
+| 指数 1−α を α に | C −1.7% |
+| `coledavidson` の β を c から d に移し忘れ | Cole-Davidson 一致検査で −16.1% |
+
 ## 温度依存
 
 `temperature` で与えた一様温度に対し、4 つの材料量に 1 次の温度係数を持てます。
@@ -949,7 +979,8 @@ k 倍になり、閉形式なしで厳密な恒等式が作れます。
 - 分散材料は **Debye / Lorentz / Drude / Cole-Cole** の多極 (合計最大 8 極、混在可)。
   Drude は準静的な定式化の制約から εr'(ω) > 0 の範囲でのみ使える
   (ω < ωp では εr' < 0 になり ∇・(ε∇φ) = 0 が正定値でなくなるので入力エラーにする)。
-  Havriliak-Negami・Cole-Davidson は未対応。
+  **Havriliak-Negami** ε∞ + Δε/(1+(jωτ)^(1−α))^β と、その α = 0 の場合である
+  **Cole-Davidson** にも対応 (`havriliak` / `coledavidson`)。
 - 異方性は**対称テンソル** (非対角を含む) に対応。非線形との併用は
   軸毎の B-H 曲線 (直交異方性) の形で対応しており、主軸は格子軸に
   一致している必要があります。

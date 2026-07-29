@@ -118,6 +118,27 @@ int material_freq(void)
 				er -= wp * wp / den;
 				ei += wp * wp * gm / (omega_d * den);
 			}
+			else if (pl->type == 5) {
+				// Havriliak-Negami : Δε / (1 + (jωτ)^(1-α))^β
+				//   Z = 1 + (ωτ)^(1-α) e^{j(1-α)π/2} を極形式 R e^{jφ} にして
+				//   Δε / Z^β = Δε R^-β (cos βφ - j sin βφ)
+				// β = 1 で Cole-Cole、α = 0 で Cole-Davidson に厳密一致する
+				const double ex = 1 - pl->c;
+				const double wt = omega_d * pl->b;
+				if (wt <= 0) {
+					er += pl->a;					// ω = 0 は静的値
+					continue;
+				}
+				const double x = pow(wt, ex);
+				const double d1 = 1 + (x * cos(ex * PI / 2));
+				const double d2 = x * sin(ex * PI / 2);
+				const double rr = sqrt((d1 * d1) + (d2 * d2));
+				if (rr <= 0) continue;
+				const double ph = atan2(d2, d1);
+				const double rb = pow(rr, -pl->d);
+				er += pl->a * rb * cos(pl->d * ph);
+				ei += pl->a * rb * sin(pl->d * ph);
+			}
 			else {
 				// Cole-Cole : Δε / (1 + (jωτ)^β),  β = 1-α
 				//   (jωτ)^β = (ωτ)^β (cos(βπ/2) + j sin(βπ/2))
@@ -461,7 +482,8 @@ int input_data(FILE *fp)
 			}
 		}
 		else if (!strcmp(strkey, "debye") || !strcmp(strkey, "lorentz")
-		      || !strcmp(strkey, "drude") || !strcmp(strkey, "colecole")) {
+		      || !strcmp(strkey, "drude") || !strcmp(strkey, "colecole")
+		      || !strcmp(strkey, "havriliak") || !strcmp(strkey, "coledavidson")) {
 			// debye    = <material_id> <eps_inf> (<deps> <tau>)...
 			// lorentz  = <material_id> <eps_inf> (<deps> <f0> <delta>)...
 			// drude    = <material_id> <eps_inf> (<fp> <gamma>)...
@@ -470,12 +492,19 @@ int input_data(FILE *fp)
 			//                   + Σ Lorentz  Δε ω0^2/(ω0^2-ω^2+jωδ)
 			//                   - Σ Drude    ωp^2/(ω^2-jωΓ)          (ωp=2πfp, Γ=2πgamma)
 			//                   + Σ ColeCole Δε/(1+(jωτ)^(1-α))
+			//                   + Σ H-N      Δε/(1+(jωτ)^(1-α))^β
+			// havriliak    = <material_id> <eps_inf> (<deps> <tau> <alpha> <beta>)...
+			// coledavidson = <material_id> <eps_inf> (<deps> <tau> <beta>)...
+			//   Cole-Davidson は H-N の α = 0 の場合なので同じ極として持つ
 			// frequency の値で epsr (実部) と tand (= εr''/εr') に展開する。
 			// 同じ材料に複数行書くと極が追加される (eps_inf は最後の指定が効く)。
-			const int ptype = (!strcmp(strkey, "debye")   ? 1 :
-			                   !strcmp(strkey, "lorentz") ? 2 :
-			                   !strcmp(strkey, "drude")   ? 3 : 4);
-			const int nper = ((ptype == 1) ? 2 : (ptype == 3) ? 2 : 3);
+			const int cd = !strcmp(strkey, "coledavidson");
+			const int ptype = (!strcmp(strkey, "debye")     ? 1 :
+			                   !strcmp(strkey, "lorentz")   ? 2 :
+			                   !strcmp(strkey, "drude")     ? 3 :
+			                   !strcmp(strkey, "colecole")  ? 4 : 5);
+			const int nper = ((ptype == 1) ? 2 : (ptype == 3) ? 2
+			                : (ptype == 5) ? (cd ? 3 : 4) : 3);
 			if ((nval < 2 + nper) || (((nval - 2) % nper) != 0)) {
 				printf(errfmt2, strkey);
 				return 1;
@@ -503,7 +532,21 @@ int input_data(FILE *fp)
 				pl->type = ptype;
 				pl->a = atof(tk[0]);
 				pl->b = atof(tk[1]);
-				pl->c = ((nper == 3) ? atof(tk[2]) : 0);
+				pl->c = ((nper >= 3) ? atof(tk[2]) : 0);
+				pl->d = 1;
+				if (ptype == 5) {
+					// Cole-Davidson は α = 0 の H-N なので β を c から d に移す
+					if (cd) { pl->d = pl->c; pl->c = 0; }
+					else    { pl->d = atof(tk[3]); }
+					if ((pl->c < 0) || (pl->c >= 1)) {
+						printf("*** %s : alpha must be 0 <= alpha < 1\n", strkey);
+						return 1;
+					}
+					if ((pl->d <= 0) || (pl->d > 1)) {
+						printf("*** %s : beta must be 0 < beta <= 1\n", strkey);
+						return 1;
+					}
+				}
 				if ((pl->a < 0) || (pl->b <= 0)) {
 					printf(errfmt2, strkey);
 					return 1;
