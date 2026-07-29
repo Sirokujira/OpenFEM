@@ -102,12 +102,14 @@ void field_cell_grad(const double *u, int kind, double *v)
 		int p, q;
 		tri_axes(&p, &q);
 		for (int e = 0; e < NTri; e++) {
-			const int32_t *nd = &Tri[e * 3];
-			double g[3][2], area, d[3] = {0, 0, 0};
-			if (!tri_grad(nd, g, &area)) {
-				for (int a = 0; a < 3; a++) {
-					d[p] += u[nd[a]] * g[a][0];
-					d[q] += u[nd[a]] * g[a][1];
+			double gn[6][2], d[3] = {0, 0, 0};
+			int nen = 0;
+			if (!tri_grad_center(e, gn, &nen)) {
+				int32_t nd[6];
+				tri_nodes(e, nd);
+				for (int a = 0; a < nen; a++) {
+					d[p] += u[nd[a]] * gn[a][0];
+					d[q] += u[nd[a]] * gn[a][1];
 				}
 			}
 			for (int c = 0; c < 3; c++) v[(e * 3) + c] = -d[c];
@@ -191,12 +193,20 @@ static void write_grid(FILE *fp)
 		for (int i = 0; i < NNode; i++) {
 			fprintf(fp, "%.9e %.9e %.9e\n", Xp[i], Yp[i], Zp[i]);
 		}
-		fprintf(fp, "\nCELLS %d %d\n", NTri, 4 * NTri);
+		// VTK_QUADRATIC_TRIANGLE (22) の中間節点の並びは Gmsh の tri6 と同じ
+		// ((0,1) (1,2) (2,0))。四面体と違い並べ替えは要らない
+		const int nen = ((TetOrder >= 2) ? 6 : 3);
+		fprintf(fp, "\nCELLS %d %d\n", NTri, (nen + 1) * NTri);
 		for (int e = 0; e < NTri; e++) {
-			fprintf(fp, "3 %d %d %d\n", Tri[e * 3], Tri[(e * 3) + 1], Tri[(e * 3) + 2]);
+			int32_t nd[6];
+			tri_nodes(e, nd);
+			fprintf(fp, "%d", nen);
+			for (int l = 0; l < nen; l++) fprintf(fp, " %d", nd[l]);
+			fprintf(fp, "\n");
 		}
 		fprintf(fp, "\nCELL_TYPES %d\n", NTri);
-		for (int e = 0; e < NTri; e++) fprintf(fp, "5\n");	// VTK_TRIANGLE
+		// VTK_TRIANGLE = 5, VTK_QUADRATIC_TRIANGLE = 22
+		for (int e = 0; e < NTri; e++) fprintf(fp, "%d\n", ((nen == 6) ? 22 : 5));
 	}
 	else if (MeshMode) {
 		fprintf(fp, "DATASET UNSTRUCTURED_GRID\n");

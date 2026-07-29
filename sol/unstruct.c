@@ -176,11 +176,12 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 			printf("%s\n", "*** mesh : no tetrahedron and no triangle found");
 			return 1;
 		}
-		TetOrder = 1;			// 2 次元格子の 2 次要素は未対応
+		// 三角形の次数は「中間節点が頂点と違うか」で決まる (1 次では頂点で埋めてある)
+		TetOrder = ((Tri2[0] != Tri[0]) ? 2 : 1);
 		for (int t = 0; t < NTri; t++) {
-			if (Tri2[(t * 3)] != Tri[(t * 3)]) {
-				printf("%s\n", "*** mesh : a 2-D (cross-section) mesh must use "
-					"3-node triangles (second-order elements are 3-D only)");
+			const int o = ((Tri2[(t * 3)] != Tri[(t * 3)]) ? 2 : 1);
+			if (o != TetOrder) {
+				printf("%s\n", "*** mesh : mixed triangle orders in a 2-D mesh");
 				return 1;
 			}
 		}
@@ -949,6 +950,18 @@ int solve_nodal_test(FILE *fp_log)
 //
 // 単位長あたりの量として扱うので「体積」は面積そのもの (線路長 1 m 相当)。
 
+// 三角形の局所節点をまとめて取り出す。戻り値は節点数 (1 次 3、2 次 6)。
+// 並びは Gmsh の tri6 と同じ (頂点 3 個のあと辺 (0,1) (1,2) (2,0) の中間節点)
+int tri_nodes(int e, int32_t nd[6])
+{
+	for (int l = 0; l < 3; l++) nd[l] = Tri[(e * 3) + l];
+	if (TetOrder < 2) return 3;
+	for (int l = 0; l < 3; l++) nd[3 + l] = Tri2[(e * 3) + l];
+
+	return 6;
+}
+
+
 // 面内の 2 軸 (伝送線路軸 t の次の 2 つ)
 void tri_axes(int *p, int *q)
 {
@@ -997,10 +1010,13 @@ void crs_alloc_tri(crs_t *A)
 {
 	const int n = NNode;
 
+	const int nen = ((TetOrder >= 2) ? 6 : 3);
 	int *cnt = (int *)malloc((size_t)n * sizeof(int));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < NTri; e++) {
-		for (int l = 0; l < 3; l++) cnt[Tri[(e * 3) + l]]++;
+		int32_t nd[6];
+		tri_nodes(e, nd);
+		for (int l = 0; l < nen; l++) cnt[nd[l]]++;
 	}
 	int64_t *nptr = (int64_t *)malloc(((size_t)n + 1) * sizeof(int64_t));
 	nptr[0] = 0;
@@ -1008,8 +1024,10 @@ void crs_alloc_tri(crs_t *A)
 	int32_t *nlist = (int32_t *)malloc((size_t)nptr[n] * sizeof(int32_t));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < NTri; e++) {
-		for (int l = 0; l < 3; l++) {
-			const int32_t i = Tri[(e * 3) + l];
+		int32_t nd[6];
+		tri_nodes(e, nd);
+		for (int l = 0; l < nen; l++) {
+			const int32_t i = nd[l];
 			nlist[nptr[i] + cnt[i]] = (int32_t)e;
 			cnt[i]++;
 		}
@@ -1031,14 +1049,16 @@ void crs_alloc_tri(crs_t *A)
 		}
 		for (int i = 0; i < n; i++) {
 			const int64_t p0 = nptr[i], p1 = nptr[i + 1];
-			const int need = (int)(p1 - p0) * 3;
+			const int need = (int)(p1 - p0) * nen;
 			if (need > cap) {
 				cap = need;
 				work = (int32_t *)realloc(work, (size_t)cap * sizeof(int32_t));
 			}
 			int m = 0;
 			for (int64_t p = p0; p < p1; p++) {
-				for (int l = 0; l < 3; l++) work[m++] = Tri[(nlist[p] * 3) + l];
+				int32_t nd[6];
+				tri_nodes(nlist[p], nd);
+				for (int l = 0; l < nen; l++) work[m++] = nd[l];
 			}
 			qsort(work, (size_t)m, sizeof(int32_t), cmp_int32);
 			if (pass == 0) {
@@ -1067,6 +1087,135 @@ void crs_alloc_tri(crs_t *A)
 }
 
 
+// ---- 2 次三角形 (6 節点、等パラメトリック) ----
+//
+// 積分は四面体と同じ考え方で Duffy 変換 + 各方向 3 点 Gauss-Legendre (9 点):
+//   λ1 = u, λ2 = v(1-u),  λ0 = 1 - λ1 - λ2,  dλ1 dλ2 = (1-u) du dv
+// 重みは全部正で、剛性 (λ について 2 次) も質量 (4 次) も直線要素なら厳密になる。
+#define NQTRI (9)
+
+static void tri_quad(double lam[NQTRI][3], double wq[NQTRI])
+{
+	const double gp[3] = {0.5 - (0.5 * 0.77459666924148337704),
+	                      0.5,
+	                      0.5 + (0.5 * 0.77459666924148337704)};
+	const double gw[3] = {5.0 / 18, 8.0 / 18, 5.0 / 18};
+
+	int q = 0;
+	for (int a = 0; a < 3; a++) {
+	for (int b = 0; b < 3; b++) {
+		const double u = gp[a], v = gp[b];
+		lam[q][1] = u;
+		lam[q][2] = v * (1 - u);
+		lam[q][0] = 1 - lam[q][1] - lam[q][2];
+		wq[q] = gw[a] * gw[b] * (1 - u);
+		q++;
+	}
+	}
+}
+
+
+// 6 節点三角形の形状関数と λ 微分 dl[i][a] = ∂N_i/∂λ_a
+static void tri6_shape(const double lam[3], double n[6], double dl[6][3])
+{
+	static const int ed[3][2] = {{0, 1}, {1, 2}, {2, 0}};	// Gmsh の tri6
+
+	memset(dl, 0, sizeof(double) * 6 * 3);
+	for (int a = 0; a < 3; a++) {
+		n[a] = lam[a] * ((2 * lam[a]) - 1);
+		dl[a][a] = (4 * lam[a]) - 1;
+	}
+	for (int l = 0; l < 3; l++) {
+		const int a = ed[l][0], b = ed[l][1];
+		n[3 + l] = 4 * lam[a] * lam[b];
+		dl[3 + l][a] = 4 * lam[b];
+		dl[3 + l][b] = 4 * lam[a];
+	}
+}
+
+
+// 積分点 1 点での面内勾配 ∇N_i とヤコビアン行列式。戻り値 : 0 = 正常
+static int tri6_grad(const int32_t nd[6], const double lam[3],
+	double gn[6][2], double *det)
+{
+	int p, q;
+	tri_axes(&p, &q);
+	const double *cp = ((p == 0) ? Xp : (p == 1) ? Yp : Zp);
+	const double *cq = ((q == 0) ? Xp : (q == 1) ? Yp : Zp);
+
+	double n[6], dl[6][3], dx[6][2];
+	tri6_shape(lam, n, dl);
+	// 参照座標 ξ = (λ1, λ2) についての微分 (λ0 = 1 - λ1 - λ2)
+	for (int i = 0; i < 6; i++) {
+		for (int k = 0; k < 2; k++) dx[i][k] = dl[i][k + 1] - dl[i][0];
+	}
+
+	double j[2][2] = {{0, 0}, {0, 0}};
+	for (int k = 0; k < 2; k++) {
+		for (int i = 0; i < 6; i++) {
+			j[0][k] += cp[nd[i]] * dx[i][k];
+			j[1][k] += cq[nd[i]] * dx[i][k];
+		}
+	}
+	const double d = (j[0][0] * j[1][1]) - (j[0][1] * j[1][0]);
+	if (d == 0) return 1;
+
+	// Jinv[k][r] = ∂ξ_k/∂x_r
+	const double ji[2][2] = {{ j[1][1] / d, -j[0][1] / d},
+	                         {-j[1][0] / d,  j[0][0] / d}};
+	for (int i = 0; i < 6; i++) {
+		for (int r = 0; r < 2; r++) {
+			gn[i][r] = (dx[i][0] * ji[0][r]) + (dx[i][1] * ji[1][r]);
+		}
+	}
+	*det = d;
+
+	return 0;
+}
+
+
+// 2 次三角形の面積 (等パラメトリック写像で積分する)
+double tri6_area(int e)
+{
+	int32_t nd[6];
+	if (tri_nodes(e, nd) != 6) return 0;
+
+	double lam[NQTRI][3], wq[NQTRI], a = 0;
+	tri_quad(lam, wq);
+	for (int q = 0; q < NQTRI; q++) {
+		double gn[6][2], det;
+		if (tri6_grad(nd, lam[q], gn, &det)) return 0;
+		a += wq[q] * fabs(det);
+	}
+
+	return a;
+}
+
+
+// 要素の重心での面内 ∇N_i (場の出力に使う)。1 次では要素内一定なので同じ値
+int tri_grad_center(int e, double gn[6][2], int *nen)
+{
+	int32_t nd[6];
+	const int n = tri_nodes(e, nd);
+
+	*nen = n;
+	if (n == 3) {
+		double g[3][2], area;
+		if (tri_grad(nd, g, &area)) return 1;
+		for (int i = 0; i < 3; i++) {
+			gn[i][0] = g[i][0];
+			gn[i][1] = g[i][1];
+		}
+		return 0;
+	}
+
+	const double lam[3] = {1.0 / 3, 1.0 / 3, 1.0 / 3};
+	double det;
+
+	return tri6_grad(nd, lam, gn, &det);
+}
+
+
 // 剛性行列 K_ij = ∫ ν ∇λ_i・∇λ_j dS  (面内の異方性テンソルも扱う)
 // nucell が非 NULL なら要素毎の ν を使う (等方性、非線形解析用)。
 void assemble_nu_tri(crs_t *A, const double *nucell)
@@ -1075,10 +1224,16 @@ void assemble_nu_tri(crs_t *A, const double *nucell)
 	tri_axes(&p, &q);
 	crs_zero(A);
 
+	const int p2 = (TetOrder >= 2);
+	double lam[NQTRI][3], wq[NQTRI];
+	if (p2) tri_quad(lam, wq);
+
 	for (int e = 0; e < NTri; e++) {
-		const int32_t *nd = &Tri[e * 3];
+		int32_t nd6[6];
+		const int nen = tri_nodes(e, nd6);
+		const int32_t *nd = nd6;
 		double g[3][2], area;
-		if (tri_grad(nd, g, &area)) continue;
+		if (!p2 && tri_grad(nd, g, &area)) continue;
 
 		// 面内 2x2 の磁気抵抗率 [[cpp, cpq], [cpq, cqq]]
 		double cpp, cqq, cpq;
@@ -1097,6 +1252,24 @@ void assemble_nu_tri(crs_t *A, const double *nucell)
 			cpp = cm[p][p];
 			cqq = cm[q][q];
 			cpq = cm[p][q];
+		}
+
+		if (p2) {
+			for (int q = 0; q < NQTRI; q++) {
+				double gn[6][2], det;
+				if (tri6_grad(nd, lam[q], gn, &det)) break;
+				const double dw = wq[q] * fabs(det);
+				for (int l = 0; l < nen; l++) {
+					for (int m = 0; m < nen; m++) {
+						const double v = (cpp * gn[l][0] * gn[m][0])
+						               + (cqq * gn[l][1] * gn[m][1])
+						               + (cpq * ((gn[l][0] * gn[m][1]) + (gn[l][1] * gn[m][0])));
+						const int64_t s = crs_find(A, nd[l], nd[m]);
+						if (s >= 0) A->val[s] += v * dw;
+					}
+				}
+			}
+			continue;
 		}
 
 		for (int l = 0; l < 3; l++) {
@@ -1123,7 +1296,26 @@ void assemble_mass_tri(crs_t *A)
 		const double sg = CondSigma[id];
 		if (sg <= 0) continue;
 
-		const int32_t *nd = &Tri[e * 3];
+		int32_t nd[6];
+		const int nen = tri_nodes(e, nd);
+		if (nen == 6) {
+			// 2 次三角形 : ∫N_i N_j dA を Gauss 積分する
+			double lam[NQTRI][3], wq[NQTRI];
+			tri_quad(lam, wq);
+			for (int q = 0; q < NQTRI; q++) {
+				double gn[6][2], det, n[6], dl[6][3];
+				if (tri6_grad(nd, lam[q], gn, &det)) break;
+				tri6_shape(lam[q], n, dl);
+				const double dw = sg * wq[q] * fabs(det);
+				for (int l = 0; l < 6; l++) {
+					for (int m = 0; m < 6; m++) {
+						const int64_t s = crs_find(A, nd[l], nd[m]);
+						if (s >= 0) A->val[s] += dw * n[l] * n[m];
+					}
+				}
+			}
+			continue;
+		}
 		const double w = sg * TriArea[e] / 12;
 		for (int l = 0; l < 3; l++) {
 			for (int m = 0; m < 3; m++) {

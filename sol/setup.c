@@ -127,6 +127,15 @@ static int setup_tri2d(void)
 			printf("*** triangle %d is degenerate (zero area)\n", e + 1);
 			return 1;
 		}
+		// 2 次要素では等パラメトリック写像で積分した面積を使う
+		// (頂点 3 個から作る面積は曲がった要素では内接多角形の値になる)
+		if (TetOrder >= 2) {
+			area = tri6_area(e);
+			if (area <= 0) {
+				printf("*** triangle %d is degenerate or inverted\n", e + 1);
+				return 1;
+			}
+		}
 		TriArea[e] = area;
 	}
 

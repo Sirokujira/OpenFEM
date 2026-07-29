@@ -44,6 +44,8 @@
 #   coax_p2        : 粗い同軸 (nr=4, nt=12) を曲がった 2 次要素で (許容 0.3%)
 #                    + 同じ格子の 1 次要素より 10 倍以上良いこと
 #   mesh order     : 次数の混在・2 次格子への analysis=A・1 次三角形を弾くこと
+#   plate2d_p2     : 断面 2 次元の 2 次要素 (6 節点三角形)。導体内の Az が厳密に
+#                    2 次なので内部インダクタンスまで厳密に出る (1 次は -0.045%)
 #   plate2d        : 断面 2 次元の三角形格子で M / F を解き、構造格子版と同じ
 #                    1 次元厳密解と比較する (Ldc / Rs / R(f) / L(f)、許容 0.2%)
 #   anisotropic mu : 面内の異方性 ν が **B に掛かる** こと (grad(Az) ではなく)。
@@ -115,6 +117,10 @@ compare() {
 	echo "  $1 : value=$2 expected=$3 -> $res"
 	case "$res" in NG*) status=1 ;; esac
 }
+
+# ofe_field.vtk から集計値を取り出す (vtkcheck.awk の出力を 1 項目だけ拾う)
+vtk() { awk -v arr="$2" -v axis="${3:-0}" -v xcut="${4:-}" -v comp="${5:-}" \
+	-f "$SRC/vtkcheck.awk" "$WORK/ofe_field.vtk" | awk -v k="$1" '$1 == k { print $2 }'; }
 
 in_range() {
 	# in_range <label> <value> <min> <max>
@@ -455,6 +461,63 @@ for pair in "1e3 6.896552e-01 2.932153e-07" \
 	compare "L(f=$1) [H/m]" "$(value_of Lf)" "$3" 0.002
 done
 
+# 断面 2 次元の 2 次要素 (6 節点三角形)。**導体内の Az は電流密度が一様なとき
+# 厳密に 2 次**なので、内部インダクタンス 2t/3 を P2 は厳密に表せる。
+# 1 次要素は -0.045% ずれるので、次数が効いていることがそのまま出る
+echo "[plate2d_p2] second-order (6-node) triangles on the 2-D mesh"
+run_case plate2d_p2
+compare "Ldc [H/m]" "$(value_of Ldc)" 2.932153e-07 1e-5
+compare "Rs [ohm/m]" "$(value_of Rs)" 6.896552e-01 1e-6
+# 1 次との対比 (2 次が黙って 1 次に退行していないこと)
+lp2=$(value_of Ldc)
+run_case plate2d_dc
+res=$(awk -v a="$(value_of Ldc)" -v b="$lp2" \
+	'BEGIN{ e = 2.932153e-07
+	        e1 = (a - e) / e; if (e1 < 0) e1 = -e1
+	        e2 = (b - e) / e; if (e2 < 0) e2 = -e2
+	        printf "P1 %+.4f%% vs P2 %+.4f%% -> %s", 100 * e1, 100 * e2,
+	               ((e1 > 100 * e2) ? "OK" : "NG") }')
+echo "  order 2 beats order 1 : $res"
+case "$res" in *NG) status=1 ;; esac
+
+echo "[plate2d_p2 F] the same mesh with the eddy-current analysis"
+for pair in "1e3 6.896552e-01 2.932153e-07" "1e7 1.624296e+00 2.780550e-07"; do
+	set -- $pair
+	sed -e 's/plate2d.msh/plate2d_p2.msh/' -e "s/^frequency = .*/frequency = $1/" \
+	    "$SRC/plate2d_ac.ofe" > "$WORK/p2ac.ofe"
+	(cd "$WORK" && "$OFE" -n 2 p2ac.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "R(f=$1) [ohm/m]" "$(value_of Rf)" "$2" 1e-4
+	compare "L(f=$1) [H/m]" "$(value_of Lf)" "$3" 1e-4
+done
+# 場の出力 : 2 次三角形でも恒等式が成り立つこと + セル型が QUADRATIC_TRIANGLE
+sed -e 's/plate2d.msh/plate2d_p2.msh/' -e 's/^analysis = F/fieldout = 1\nanalysis = F/' \
+    "$SRC/plate2d_ac.ofe" > "$WORK/p2fld.ofe"
+(cd "$WORK" && "$OFE" -n 2 p2fld.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "field area (P2 2-D) [m^2]" "$(vtk vol J_F_re_port1)" 3.0e-7 1e-9
+pf=$(awk -v a="$(vtk int2 J_F_re_port1)" -v b="$(vtk int2 J_F_im_port1)" \
+	'BEGIN{ printf "%.10e", (a + b) / (2 * 5.8e7) }')
+pt=$(awk -v R="$(value_of Rf)" -v L="$(value_of Lf)" \
+	'BEGIN{ om = 2 * 3.14159265358979324 * 1e3; X = om * L
+	        printf "%.10e", 0.5 * R / ((R * R) + (X * X)) }')
+compare "ohmic loss from the field (P2 2-D) [W/m]" "$pf" "$pt" 1e-4
+res=$(awk '
+	NF == 0       { next }
+	/^CELLS/      { st = "c"; k = 0; next }
+	/^CELL_TYPES/ { st = "t"; k = 0; next }
+	/^[A-Z_]+ /   { st = ""; next }
+	st == "t" { k++; if ($1 != 22) type++; next }
+	st == "c" { if ($1 != 6) nn++; next }
+	END { if (k == 0) { printf "NG (no cells)" }
+	      else if (type || nn) { printf "NG (%d not type 22, %d not 6-node)", type, nn }
+	      else { printf "OK" } }' "$WORK/ofe_field.vtk")
+echo "  VTK cell type is QUADRATIC_TRIANGLE with 6 nodes : $res"
+case "$res" in NG*) status=1 ;; esac
+# 次数の混在は弾くこと
+awk '/^[0-9]+ 9 2 / && !done { print $1, 2, 2, $4, $5, $6, $7, $8; done = 1; next } { print }' \
+    "$SRC/plate2d_p2.msh" > "$WORK/mix2d.msh"
+sed 's/^mesh = .*/mesh = mix2d.msh/' "$SRC/plate2d_p2.ofe" > "$WORK/p2mix.ofe"
+mesh_reject "mixed triangle orders in a 2-D mesh" p2mix.ofe
+
 # 異方性の μ。**B は ∇Az を 90 度回したものなので、ν を ∇Az にそのまま掛けると
 # 面内 2 成分を取り違える。** 等方性では一致するので等方性ケースでは検出できない。
 # 1 次元解では B が p 軸を向くので、効くのは μ_pp だけ (μ_qq は L を変えない)。
@@ -792,8 +855,6 @@ fi
 #   ∫ ½ε|E|² dV = ½CV²          (静電界)
 #   ∫ |J|²/(2σ) dV = ½Re(V I*)  (渦電流。J が一様な低周波では厳密)
 echo "[fieldout] the written field must reproduce the extracted lumped values"
-vtk() { awk -v arr="$2" -v axis="${3:-0}" -v xcut="${4:-}" -v comp="${5:-}" \
-	-f "$SRC/vtkcheck.awk" "$WORK/ofe_field.vtk" | awk -v k="$1" '$1 == k { print $2 }'; }
 
 # (0) 向き・分母・並べ替えの検査。直列 2 材料で E が区分一様になり、
 #     3 軸とも長さも分割数も違い、通電方向は不等間隔にしてある。
@@ -1064,7 +1125,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
-         bertotti_core temp_material temp_mur hn_plate; do
+         bertotti_core temp_material temp_mur hn_plate plate2d_p2; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

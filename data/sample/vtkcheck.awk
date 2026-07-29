@@ -26,8 +26,10 @@
 #
 # 非構造格子のセルは**先頭の節点数で見分ける** (VTK の CELLS 行は
 # "<節点数> <節点番号>..." なので型を読まなくても分かる):
-#   4 節点 -> 四面体 (VTK_TETRA / VTK_QUADRATIC_TETRA の頂点 4 個) -> 体積
-#   3 節点 -> 三角形 (VTK_TRIANGLE、断面 2 次元の M / F) -> **面積**
+#   4 / 10 節点 -> 四面体 (VTK_TETRA / VTK_QUADRATIC_TETRA) -> 体積
+#   3 /  6 節点 -> 三角形 (VTK_TRIANGLE / VTK_QUADRATIC_TRIANGLE) -> **面積**
+# どちらも先頭の頂点だけで測る (直線要素では厳密。曲がった 2 次要素では
+# 内接多角形になるので、その場合は体積そのものを恒等式に使わないこと)
 # 断面 2 次元は単位長あたりで扱うので、面積がそのまま「体積」になり
 # ∫|J|²/(2σ) dA = ½Re(Y) のような恒等式がそのまま使える。
 
@@ -76,7 +78,7 @@ END {
 		for (e = 0; e < nc; e++) {
 			ax = px[c1[e]] - px[c0[e]]; ay = py[c1[e]] - py[c0[e]]; az = pz[c1[e]] - pz[c0[e]]
 			bx = px[c2[e]] - px[c0[e]]; by = py[c2[e]] - py[c0[e]]; bz = pz[c2[e]] - pz[c0[e]]
-			if (cn[e] == 3) {
+			if ((cn[e] == 3) || (cn[e] == 6)) {
 				# 三角形 : 面積 = |a x b| / 2 (単位長あたりなのでこれが「体積」)
 				nx1 = (ay*bz - az*by); ny1 = (az*bx - ax*bz); nz1 = (ax*by - ay*bx)
 				cv[e] = sqrt((nx1*nx1) + (ny1*ny1) + (nz1*nz1)) / 2
@@ -105,7 +107,8 @@ END {
 		}
 		else {
 			for (e = 0; e < nc; e++) {
-				nn = cn[e]			# 3 = 三角形、4 = 四面体
+				# 頂点だけで重心を出す (3/6 -> 三角形の 3 頂点、4/10 -> 四面体の 4 頂点)
+				nn = ((cn[e] == 3) || (cn[e] == 6)) ? 3 : 4
 				gx[e] = (px[c0[e]] + px[c1[e]] + px[c2[e]] + ((nn == 3) ? 0 : px[c3[e]])) / nn
 				gy[e] = (py[c0[e]] + py[c1[e]] + py[c2[e]] + ((nn == 3) ? 0 : py[c3[e]])) / nn
 				gz[e] = (pz[c0[e]] + pz[c1[e]] + pz[c2[e]] + ((nn == 3) ? 0 : pz[c3[e]])) / nn
