@@ -234,6 +234,9 @@ EXTERN conductor_t *Conductor;
 EXTERN int NPort;				// ポート数 (= 導体番号の最大値、基準導体 0 を除く)
 
 EXTERN solver_t Solver;
+// 直接解法 (RCM + スカイライン Cholesky)。1 : 反復解法の代わりに使う (既定 0)。
+// 実対称正定値の系 (C / L / R / M) 専用。渦電流 (F / A) の複素系は COCG のまま
+EXTERN int Direct;
 
 EXTERN int Analysis;			// ANALYSIS_* のビット OR
 EXTERN char Tline;				// 'X'/'Y'/'Z' : 単位長あたりで出力、0 : 絶対値

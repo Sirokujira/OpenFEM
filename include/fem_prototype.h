@@ -100,6 +100,10 @@ void ja_eval(const ja_t *, double, double, double, double, double *, double *, d
 int solver_cg(const crs_t *, const double *, double *, const unsigned char *,
 	int, int, double, FILE *, const char *);
 
+// solver_direct.c
+int solver_direct(const crs_t *, const double *, double *, const unsigned char *,
+	FILE *, const char *);
+
 // solve.c
 int solve(FILE *);
 

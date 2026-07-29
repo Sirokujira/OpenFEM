@@ -44,6 +44,7 @@ set(SOL_SOURCES
     sol/crs.c
     sol/assemble.c
     sol/solver_cg.c
+    sol/solver_direct.c
     sol/solver_cocg.c
     sol/solve.c
     sol/matutil.c

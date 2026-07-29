@@ -33,6 +33,12 @@ int solver_cg(const crs_t *A, const double *b, double *x, const unsigned char *f
 {
 	const int n = (int)A->n;
 
+	// direct = 1 のときは直接解法に回す (呼び出し側は書き換えない)。
+	// 反復回数の代わりに 0 を返す
+	if (Direct) {
+		return ((solver_direct(A, b, x, fix, fp_log, label) == 0) ? 0 : -1);
+	}
+
 	double *r = (double *)malloc(n * sizeof(double));
 	double *p = (double *)malloc(n * sizeof(double));
 	double *q = (double *)malloc(n * sizeof(double));

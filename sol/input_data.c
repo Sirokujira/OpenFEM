@@ -283,6 +283,7 @@ int input_data(FILE *fp)
 	NlTol = 1e-5;
 	NlRelax = 1.0;
 
+	Direct = 0;
 	Solver.maxiter = 10000;
 	Solver.nout = 100;
 	Solver.converg = 1e-9;
@@ -642,6 +643,10 @@ int input_data(FILE *fp)
 				mt->bh_b[ax][nb] = bb;
 				mt->nbh[ax]++;
 			}
+		}
+		else if (!strcmp(strkey, "direct")) {
+			// direct = 0|1  : 直接解法 (RCM + スカイライン Cholesky) を使う
+			Direct = (atoi(token[2]) != 0);
 		}
 		else if (!strcmp(strkey, "bertotti")) {
 			// bertotti = <material_id> <kh> <alpha> <ke> [<d>]
@@ -1292,6 +1297,13 @@ int input_data(FILE *fp)
 	// P 解析 (節点要素の自己検証) も非構造格子専用
 	if ((Analysis & ANALYSIS_P) && !MeshMode) {
 		printf("%s\n", "*** analysis P (nodal element self test) requires an unstructured mesh");
+		return 1;
+	}
+
+	// 直接解法は実対称正定値の系だけ。複素対称系 (F / A) は COCG のまま
+	if (Direct && (Analysis & (ANALYSIS_F | ANALYSIS_A))) {
+		printf("%s\n", "*** direct = 1 supports only the real symmetric systems "
+			"(C / L / R / M); analysis F / A use the complex COCG solver");
 		return 1;
 	}
 

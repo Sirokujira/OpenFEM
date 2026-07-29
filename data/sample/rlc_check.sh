@@ -44,6 +44,8 @@
 #   coax_p2        : 粗い同軸 (nr=4, nt=12) を曲がった 2 次要素で (許容 0.3%)
 #                    + 同じ格子の 1 次要素より 10 倍以上良いこと
 #   mesh order     : 次数の混在・2 次格子への analysis=A・1 次三角形を弾くこと
+#   direct         : 直接解法 (RCM + スカイライン Cholesky) が反復解法と
+#                    完全一致すること (9 ケース) + F / A では弾くこと
 #   gmsh 4.1       : 同じ形状を Gmsh 2.2 と 4.1 で書いた結果が完全一致すること
 #                    (+ $Entities 欠落とバイナリを弾くこと)
 #   plate2d_p2     : 断面 2 次元の 2 次要素 (6 節点三角形)。導体内の Az が厳密に
@@ -462,6 +464,64 @@ for pair in "1e3 6.896552e-01 2.932153e-07" \
 	compare "R(f=$1) [ohm/m]" "$(value_of Rf)" "$2" 0.002
 	compare "L(f=$1) [H/m]" "$(value_of Lf)" "$3" 0.002
 done
+
+# 直接解法 (RCM + スカイライン Cholesky)。**反復解法と同じ答えになること**を
+# 恒等式に使う。既存のケースにそのまま適用でき、閉形式も許容誤差も要らない。
+# 構造格子・非構造格子 (3 次元 / 断面 2 次元)・異方性・非線形をひと通り通す
+echo "[direct] the direct solver must agree with the iterative one"
+# direct_same <ケース> [nolog]
+#   既定では「プロファイルの報告がログに出ること」も見て、黙って反復解法に
+#   落ちていないことを確かめる。非線形 (B-H) の内側解法だけはログハンドルを
+#   渡していないので報告が出ない。そのケースは nolog を付けて値の一致だけ見る
+#   (経路が通っていることは他の 8 ケースで担保している)
+direct_same() {
+	run_case "$1"; grep -v '^title' "$WORK/rlc.csv" > "$WORK/it.csv"
+	sed 's/^analysis = /direct = 1\nanalysis = /' "$SRC/$1.ofe" > "$WORK/dir.ofe"
+	if ! (cd "$WORK" && "$OFE" -n 2 dir.ofe > /dev/null && "$OFE_POST" > /dev/null); then
+		echo "  $1 : the direct run failed -> NG" >&2
+		status=1
+		return
+	fi
+	if [ "$2" != nolog ] && ! grep -q "direct : profile" "$WORK/ofe.log"; then
+		echo "  $1 : the direct solver was not used -> NG" >&2
+		status=1
+		return
+	fi
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/di.csv"
+	if cmp -s "$WORK/it.csv" "$WORK/di.csv"; then
+		echo "  $1 : identical -> OK"
+	else
+		echo "  $1 : differ -> NG" >&2
+		diff "$WORK/it.csv" "$WORK/di.csv" | head -4 >&2
+		status=1
+	fi
+}
+direct_same parallel_plate
+direct_same resistor_bar
+direct_same aniso_plate
+direct_same plate_line_dc
+direct_same box_tet
+direct_same coax_tet
+direct_same plate2d_dc
+direct_same plate2d_p2
+# 非線形 (B-H) の内側でも使えること (内側解法はログを取らないので nolog)
+direct_same plate_line_bh nolog
+# **RCM が実際に効いていることも見る。** 並べ替えを外して密に詰めても答えは
+# 正しいままなので、値の一致だけでは検出できない (実測: first[] を全部 0 に
+# する変異が全緑で通った)。平均帯幅が節点数の 1/4 未満であることを assert する
+# (密なら (n+1)/2 = 816 になる。RCM 有りの実測は 57.1)
+sed 's/^analysis = /direct = 1\nanalysis = /' "$SRC/coax_tet.ofe" > "$WORK/dbw.ofe"
+(cd "$WORK" && "$OFE" -n 2 dbw.ofe > /dev/null)
+res=$(awk '/direct : profile/ { for (i = 1; i <= NF; i++) if ($i == "bandwidth") bw = $(i+2) }
+	END { if (bw == "") { printf "NG (no report)" }
+	      else printf "%s (mean bandwidth %.1f, dense would be 816)",
+	                  ((bw < 1632 / 4) ? "OK" : "NG"), bw }' "$WORK/ofe.log")
+echo "  RCM reduces the profile : $res"
+case "$res" in NG*) status=1 ;; esac
+
+# 複素対称系 (F / A) は COCG のままなので弾くこと
+sed 's/^analysis = /direct = 1\nanalysis = /' "$SRC/plate_line_ac.ofe" > "$WORK/dir_f.ofe"
+mesh_reject "direct = 1 with analysis F" dir_f.ofe
 
 # Gmsh ASCII 4.1 形式の読み込み。**同じ形状を 2.2 と 4.1 で書いた結果が
 # 完全に一致すること**を恒等式に使う (閉形式は要らないうえ、これ以上厳密な
