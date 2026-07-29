@@ -206,6 +206,12 @@ int input_data(FILE *fp)
 		Material[m].be_d = 0;
 		Material[m].tempco = 0;
 		Material[m].temp0 = 20;
+		Material[m].epstempco = 0;
+		Material[m].epstemp0 = 20;
+		Material[m].mutempco = 0;
+		Material[m].mutemp0 = 20;
+		Material[m].bhtempco = 0;
+		Material[m].bhtemp0 = 20;
 		Material[m].eps6_given = 0;
 		Material[m].bhaniso = 0;
 		Material[m].ja.on = 0;
@@ -367,7 +373,17 @@ int input_data(FILE *fp)
 			Material[NMaterial].tand  = 0;
 			Material[NMaterial].npole = 0;
 			Material[NMaterial].einf  = 1;
+			Material[NMaterial].be_kh = 0;
+			Material[NMaterial].be_alpha = 2;
+			Material[NMaterial].be_ke = 0;
+			Material[NMaterial].be_d = 0;
 			Material[NMaterial].tempco = 0;
+			Material[NMaterial].epstempco = 0;
+			Material[NMaterial].epstemp0 = 20;
+			Material[NMaterial].mutempco = 0;
+			Material[NMaterial].mutemp0 = 20;
+			Material[NMaterial].bhtempco = 0;
+			Material[NMaterial].bhtemp0 = 20;
 			Material[NMaterial].temp0 = 20;
 			Material[NMaterial].eps6_given = 0;
 			Material[NMaterial].bhaniso = 0;
@@ -663,6 +679,28 @@ int input_data(FILE *fp)
 			Material[mid].tempco = atof(token[3]);
 			if (nval == 3) Material[mid].temp0 = atof(token[4]);
 		}
+		else if (!strcmp(strkey, "epstempco") || !strcmp(strkey, "mutempco")
+		      || !strcmp(strkey, "bhtempco")) {
+			// epstempco / mutempco / bhtempco = <material_id> <alpha> [<T0>]
+			//   εr(T)   = εr0 (1 + α (T - T0))
+			//   μr(T)   = μr0 (1 + α (T - T0))
+			//   B(H; T) = B0(H) (1 + α (T - T0))   (飽和磁束密度の温度低下)
+			// α はデータシートの温度係数 [1/K] (ppm/K なら 1e-6 倍して書く)
+			if (nval < 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			if ((mid < 0) || (mid >= NMaterial)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const double al = atof(token[3]);
+			const double t0 = ((nval >= 3) ? atof(token[4]) : 20);
+			if      (strkey[0] == 'e') { Material[mid].epstempco = al; Material[mid].epstemp0 = t0; }
+			else if (strkey[0] == 'm') { Material[mid].mutempco  = al; Material[mid].mutemp0  = t0; }
+			else                       { Material[mid].bhtempco  = al; Material[mid].bhtemp0  = t0; }
+		}
 		else if (!strcmp(strkey, "conductortempco")) {
 			// conductortempco = <conductor_id> <alpha> [<T0>]
 			//   conductorsigma で与えた導体の σ に同じモデルを適用する
@@ -924,6 +962,39 @@ int input_data(FILE *fp)
 		}
 		mt->sigma /= den;
 	}
+	// B-H 曲線の温度依存は σ と同じく**入力解釈で一度だけ**掛ける
+	// (曲線は再計算されないので累積の心配が無い)。εr / μr は material_freq() が
+	// 上書きするのでここでは掛けられず、読み出し時 (material_coef_pub) に掛ける
+	for (int m = 0; m < NMaterial; m++) {
+		material_t *mt = &Material[m];
+		if (mt->bhtempco == 0) continue;
+		const double fac = 1 + (mt->bhtempco * (Temperature - mt->bhtemp0));
+		if (fac <= 0) {
+			printf("*** bhtempco : material %d has a non-positive factor "
+				"(1 + alpha (T - T0) = %.4e) at T = %.4e degC\n", m, fac, Temperature);
+			return 1;
+		}
+		for (int d = 0; d < 3; d++) {
+			for (int i = 0; i < mt->nbh[d]; i++) mt->bh_b[d][i] *= fac;
+		}
+		if (mt->ja.on) mt->ja.ms *= fac;		// 飽和磁化も同じ割合で動く
+	}
+	// εr / μr の係数はここでは掛けないが、符号が破綻していないかは見ておく
+	for (int m = 0; m < NMaterial; m++) {
+		const material_t *mt = &Material[m];
+		const double fe = 1 + (mt->epstempco * (Temperature - mt->epstemp0));
+		const double fm = 1 + (mt->mutempco  * (Temperature - mt->mutemp0));
+		if ((mt->epstempco != 0) && (fe <= 0)) {
+			printf("*** epstempco : material %d has a non-positive factor (%.4e) "
+				"at T = %.4e degC\n", m, fe, Temperature);
+			return 1;
+		}
+		if ((mt->mutempco != 0) && (fm <= 0)) {
+			printf("*** mutempco : material %d has a non-positive factor (%.4e) "
+				"at T = %.4e degC\n", m, fm, Temperature);
+			return 1;
+		}
+	}
 	for (int p = 0; p < MAXPORT; p++) {
 		if (CondTempco[p] == 0) continue;
 		const double den = 1 + (CondTempco[p] * (Temperature - CondTemp0[p]));
@@ -994,6 +1065,24 @@ int input_data(FILE *fp)
 			if (((fabs(mt->mur - 1) > EPS) || (mt->mu6[0] > 0)) && !use_mu) {
 				input_warn("mur / anisomur (material %d) is not read by the selected "
 					"analysis (only M / F / A / E use it)", m);
+			}
+			// 温度係数も「どの解析が読むか」を登録する (読まれない指定は無害に
+			// 見えて実は効いていないので、警告が唯一の防波堤になる)
+			if ((mt->epstempco != 0) && !use_eps) {
+				input_warn("epstempco (material %d) scales epsr, which only "
+					"analysis C / R read", m);
+			}
+			if ((mt->mutempco != 0) && !use_mu) {
+				input_warn("mutempco (material %d) scales mur, which only "
+					"analysis M / F / A / E read", m);
+			}
+			if ((mt->bhtempco != 0) && (mt->nbh[0] <= 0) && !mt->ja.on) {
+				input_warn("bhtempco (material %d) has no effect because the material "
+					"has no bh curve and no ja model", m);
+			}
+			if ((mt->bhtempco != 0) && !(Analysis & ANALYSIS_M)) {
+				input_warn("bhtempco (material %d) scales the B-H curve, which only "
+					"analysis M reads", m);
 			}
 		}
 		for (int p = 0; p < MAXPORT; p++) {

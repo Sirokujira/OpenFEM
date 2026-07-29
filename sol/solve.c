@@ -260,7 +260,9 @@ static int solve_magnetostatic(FILE *fp_log)
 		elem_t el;
 		elem_get(c, &el);
 		const material_t *mt = &Material[el.mat];
-		nucell[c] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0) : (1 / (MU0 * mt->mu6[0])));
+		// 線形材料の μr にも温度依存を掛ける (B-H は bh_b が入力時に補正済み)
+		const double fm = 1 + (mt->mutempco * (Temperature - mt->mutemp0));
+		nucell[c] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0) : (1 / (MU0 * mt->mu6[0] * fm)));
 	}
 	// 2 次元格子では異方性テンソルを面内 2x2 で使えるので nucell は渡さない
 	// 線形なら異方性テンソルを使う (nucell は等方性なので非線形反復専用)

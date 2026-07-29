@@ -75,10 +75,17 @@ void material_coef_pub(int m, int mode, double c[6])
 {
 	const material_t *mt = &Material[m];
 
+	// εr / μr の温度依存はここ (読み出し時) で掛ける。
+	// σ のように入力解釈で一度だけ掛ける方式は使えない : material_freq() が
+	// 分散材料の εr を毎回展開し直して上書きするので、周波数掃引で補正が消える。
+	// 読み出し時なら何度呼んでも累積しない
+	const double fe = 1 + (mt->epstempco * (Temperature - mt->epstemp0));
+	const double fm = 1 + (mt->mutempco  * (Temperature - mt->mutemp0));
+
 	for (int d = 0; d < 6; d++) c[d] = 0;
 
 	if      (mode == 0) {
-		for (int d = 0; d < 6; d++) c[d] = EPS0 * mt->eps6[d];
+		for (int d = 0; d < 6; d++) c[d] = EPS0 * mt->eps6[d] * fe;
 	}
 	else if (mode == 1) {
 		c[0] = c[1] = c[2] = EPS0;			// 真空 (等方性)
@@ -87,7 +94,7 @@ void material_coef_pub(int m, int mode, double c[6])
 		// 誘電損は等価導電率 σ_d = ω ε0 εr tanδ として扱う (frequency 未指定なら 0)
 		const double omega = 2 * PI * Freq;
 		for (int d = 0; d < 6; d++) {
-			c[d] = omega * EPS0 * mt->eps6[d] * mt->tand;
+			c[d] = omega * EPS0 * mt->eps6[d] * fe * mt->tand;
 		}
 		c[0] += mt->sigma;					// 導電率は等方性
 		c[1] += mt->sigma;
@@ -96,7 +103,7 @@ void material_coef_pub(int m, int mode, double c[6])
 	else {
 		// 磁気抵抗率テンソル ν = (μ0 μ~)^-1
 		double mu[6], nu[6];
-		for (int d = 0; d < 6; d++) mu[d] = MU0 * mt->mu6[d];
+		for (int d = 0; d < 6; d++) mu[d] = MU0 * mt->mu6[d] * fm;
 		if (tensor6_inverse(mu, nu)) {
 			nu[0] = nu[1] = nu[2] = 1 / MU0;
 			nu[3] = nu[4] = nu[5] = 0;

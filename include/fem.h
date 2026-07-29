@@ -111,6 +111,18 @@ typedef struct {
 	// 導電率の温度依存 : σ(T) = σ0 / (1 + α (T - T0))  (金属の標準的な抵抗率モデル)
 	double tempco;				// 抵抗率の温度係数 α [1/K] (0 : 温度依存なし)
 	double temp0;				// 基準温度 T0 [degC]
+	// εr / μr / B-H の温度依存 (いずれも 1 次係数、データシートの ppm/K 相当)
+	//   εr(T) = εr0 (1 + αe (T - Te0))     epstempco
+	//   μr(T) = μr0 (1 + αm (T - Tm0))     mutempco
+	//   B(H; T) = B0(H) (1 + αb (T - Tb0)) bhtempco  (飽和磁束密度の温度低下)
+	//
+	// **εr / μr は読み出し時 (material_coef_pub) に掛ける。** σ のように入力解釈で
+	// 一度だけ掛ける方式が使えないのは、material_freq() が分散材料の εr を
+	// 毎回展開し直して上書きするため (周波数掃引で補正が消える)。
+	// B-H 曲線は再計算されないので σ と同じく入力解釈で一度だけ掛ける。
+	double epstempco, epstemp0;
+	double mutempco,  mutemp0;
+	double bhtempco,  bhtemp0;
 	// B-H 曲線 (軸毎)。bhaniso = 0 なら軸 0 の曲線を |B| に対して等方的に使う
 	int    bhaniso;				// 1 : 軸毎に別の曲線 (直交異方性)
 	int    nbh[3];				// 各軸の点数 (0 : 線形、mu6 を使う)

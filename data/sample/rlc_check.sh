@@ -48,6 +48,9 @@
 #                    1 次元厳密解と比較する (Ldc / Rs / R(f) / L(f)、許容 0.2%)
 #   anisotropic mu : 面内の異方性 ν が **B に掛かる** こと (grad(Az) ではなく)。
 #                    等方性では一致するので等方性ケースでは検出できない
+#   temp_material  : εr(T) で C が厳密に比例すること (4 温度)
+#   temp_mur       : μr(T) で L が動くこと (内部インダクタンスは動かない)
+#   bhtempco       : B 軸を k 倍すると (L - L_int) がちょうど k 倍になること
 #   bertotti_core  : 鉄損 (Bertotti の損失分離)。1 次元厳密な B に対する閉形式と
 #                    機械精度で一致すること + **3 項を指数で分離**して検査する
 #   off-diagonal mu : 格子と材料テンソルを同じ角だけ面内で回すと答えが一致する
@@ -524,6 +527,49 @@ sed 's/^region = 1 2/region = 1 2\nbh = 2 100 0.5\nbh = 2 1000 1.5/' \
     "$SRC/plate2d_dc.ofe" > "$WORK/t2d_bh.ofe"
 mesh_reject "nonlinear (bh) on a 2-D mesh" t2d_bh.ofe
 
+# εr / μr / B-H の温度依存。σ(T) と同じ 1 次係数だが、**適用箇所が違う**:
+#   εr / μr は読み出し時 (material_freq が εr を上書きするので入力時では消える)
+#   B-H は入力時 (曲線は再計算されないので σ と同じでよい)
+echo "[temp_material] epsr(T) = epsr0 (1 + alpha (T - T0)), C is exactly proportional"
+for pair in "20 1.7708376e-13" "70 2.4849e-13" "120 2.2135470e-13" "-30 1.5495329e-13"; do
+	set -- $pair
+	sed "s/^temperature = .*/temperature = $1/" "$SRC/temp_material.ofe" > "$WORK/tm.ofe"
+	(cd "$WORK" && "$OFE" -n 2 tm.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	# C = eps0 epsr0 (1 + alpha (T - T0)) A / d
+	exp=$(awk -v t="$1" 'BEGIN{ printf "%.10e", 1.7708375600e-13 * (1 + 2.5e-3 * (t - 20)) }')
+	compare "C(T=$1) [F]" "$(value_of C)" "$exp" 1e-6
+done
+
+# μr の温度依存。**L 全体は μr に比例しない** (内部インダクタンス 2t/3 は
+# 導体側なので温度で動かない)。比例と誤って実装すると必ずずれる
+echo "[temp_mur] mur(T) with the internal inductance held fixed"
+for t in 20 120; do
+	sed "s/^temperature = .*/temperature = $t/" "$SRC/temp_mur.ofe" > "$WORK/tu.ofe"
+	(cd "$WORK" && "$OFE" -n 2 tu.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	# L' = mu0 (mur(T) d + 2t/3) / W
+	exp=$(awk -v t="$t" 'BEGIN{ pi = 3.14159265358979324; mu0 = 4 * pi * 1e-7
+		mur = 4.0 * (1 - 3.0e-3 * (t - 20))
+		printf "%.10e", mu0 * ((mur * 0.2e-3) + (2 * 0.05e-3 / 3)) / 1e-3 }')
+	compare "Ldc(T=$t) [H/m]" "$(value_of Ldc)" "$exp" 0.002
+done
+
+# B-H 曲線の温度依存。1 次元では H = I/W が Ampere の法則で固定されるので、
+# B 軸を k 倍すると**間隙の鎖交磁束がちょうど k 倍**になる。内部インダクタンス
+# L_int = mu0 2t/(3W) は動かないので (L - L_int) の比が厳密に k になる
+echo "[bhtempco] scaling the B axis scales the flux exactly"
+lint_bh=""
+for t in 20 120; do
+	sed 's/^analysis = M/bhtempco = 2 -2.0e-3 20\ntemperature = '"$t"'\nanalysis = M/' \
+	    "$SRC/plate_line_bh.ofe" > "$WORK/tb.ofe"
+	(cd "$WORK" && "$OFE" -n 2 tb.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	lint_bh="$lint_bh $(value_of Ldc)"
+done
+set -- $lint_bh
+compare "(L - L_int) ratio at T = 120 vs 20" \
+	"$(awk -v a="$2" -v b="$1" 'BEGIN{ pi = 3.14159265358979324; mu0 = 4 * pi * 1e-7
+		li = mu0 * 2 * 0.05e-3 / (3 * 1e-3)
+		printf "%.10e", (a - li) / (b - li) }')" 0.8 1e-5
+
 # 鉄損 (Bertotti の損失分離)。板間を積層鉄心で埋めた平行平板線路で、
 # 磁束密度が厳密に 1 次元 (B = mu0 I/W) なので閉形式と機械精度で一致する
 echo "[bertotti_core] iron loss vs the closed form on a 1-D exact field"
@@ -959,7 +1005,8 @@ lint_expect "analysis=L alone"             lint_l_only.ofe    yes
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
-         box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30; do
+         box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
+         bertotti_core temp_material temp_mur; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

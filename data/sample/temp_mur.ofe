@@ -1,0 +1,31 @@
+OpenFEM 1 0
+title = temperature dependence of mur (1-D exact inductance)
+#
+# plate_line_dc.ofe の板間を μr の材料で埋めたもの。磁界は 1 次元なので
+#
+#   L'(T) = mu0 (μr(T) d + 2t/3) / W,   μr(T) = μr0 (1 + αm (T - T0))
+#
+# μr0 = 4.0、αm = -3.0e-3 [1/K]、T0 = 20、d = 0.2mm、t = 0.05mm、W = 1mm
+#   T =  20 : μr = 4.0   -> L' = mu0 (0.8e-3 + 0.03333e-3)/1e-3 = 1.0471976e-06
+#   T = 120 : μr = 2.8   -> L' = mu0 (0.56e-3 + 0.03333e-3)/1e-3 = 7.4560333e-07
+#
+# 内部インダクタンス (2t/3) は導体 (真空) なので温度で動かない。したがって
+# **L 全体は μr に比例しない**。比例と誤って実装すると必ずずれる。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 20 0.05e-3 20 0.25e-3 20 0.30e-3
+zmesh = 0 1 1e-4
+
+material = 1.0 0
+geometry = 2 1 0 1e-3 0.05e-3 0.25e-3 0 1e-4
+mur = 2 4.0
+mutempco = 2 -3.0e-3 20
+
+conductor = 0 1 0 1e-3 0      0.05e-3 0 1e-4
+conductor = 1 1 0 1e-3 0.25e-3 0.30e-3 0 1e-4
+
+analysis = M
+tline = Z
+current = 1
+temperature = 20
+end

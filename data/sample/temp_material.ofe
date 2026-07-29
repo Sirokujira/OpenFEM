@@ -1,0 +1,30 @@
+OpenFEM 1 0
+title = temperature dependence of epsr (exact proportionality)
+#
+# 平行平板コンデンサの C は εr に厳密に比例するので、温度係数がそのまま比に出る:
+#
+#   εr(T) = εr0 (1 + αe (T - T0))
+#   C(T)  = eps0 εr(T) A / d
+#
+# αe = 2.5e-3 [1/K]、T0 = 20 degC、εr0 = 4.0、A = 1e-6 m^2、d = 0.2e-3 m
+#   T =  20 : C = 1.7708376e-13
+#   T = 120 : C = 1.7708376e-13 * 1.25
+#
+# **εr の温度補正は読み出し時に掛けている。** σ のように入力解釈で一度だけ
+# 掛ける方式は使えない (material_freq() が分散材料の εr を毎回展開し直して
+# 上書きするので、周波数掃引で補正が消える)。読み出し時なら累積もしない。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 4 1e-3
+zmesh = 0 4 0.2e-3
+
+material = 4.0 0
+geometry = 2 1 0 1e-3 0 1e-3 0 0.2e-3
+epstempco = 2 2.5e-3 20
+
+conductor = 0 1 0 1e-3 0 1e-3 0       0
+conductor = 1 1 0 1e-3 0 1e-3 0.2e-3  0.2e-3
+
+analysis = C
+temperature = 20
+end
