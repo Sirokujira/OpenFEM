@@ -8,6 +8,8 @@
 #   resistor_bar   : R = d / (sigma * A)            (厳密、許容 1%)
 #   coax           : C' = 2 pi eps / ln(b/a)        (階段近似、許容 5%)
 #                    L' = mu0 / (2 pi) ln(b/a)      (階段近似、許容 5%)
+#   coupled_microstrip : 唯一の多ポートケース。形状の対称性から C11=C22, L11=L22 が
+#                    全桁一致すること + Maxwell 行列の符号 + 多ポート SPICE (K, CM)
 #   microstrip     : Z0 が 40..60 ohm の範囲にあること (設計値 ~50 ohm)
 #   plate_line_dc  : L'dc = mu0(d + 2t/3)/W         (1 次元厳密、許容 1%)
 #                    Rs' = 2/(sigma W t)            (厳密、許容 1%)
@@ -98,6 +100,14 @@ value_of() {
 	' "$WORK/rlc.csv"
 }
 
+# rlc.csv から行列 <name> の (i,j) 成分を取り出す (多ポートの非対角を見るため)
+value_ij() {
+	awk -F, -v name="$1" -v i="$2" -v j="$3" '
+		$1 == name && NF == 2 { found = 1; next }
+		found && ($1 == i)    { print $(j + 1); exit }
+	' "$WORK/rlc.csv"
+}
+
 # スカラー項目 (例 "Z0 [ohm]") を取り出す
 scalar_of() {
 	awk -F, -v name="$1" '$1 == name { print $2; exit }' "$WORK/rlc.csv"
@@ -148,6 +158,49 @@ run_case coax
 compare "C [F/m]" "$(value_of C)" 1.063395e-10 0.05
 compare "L [H/m]" "$(value_of L)" 2.1972246e-07 0.05
 compare "Z0 [ohm]" "$(scalar_of 'Z0 [ohm]')" 4.545953e+01 0.05
+
+# 結合線路 (2 ポート)。**唯一の多ポートケース**なので、行列の非対角成分・
+# 対称化の診断・多ポートの SPICE 出力 (相互インダクタンス K と結合容量 CM) を
+# 通すのはここだけ。README に載っているのに検査が無く、壊れても気づけなかった。
+#
+# 使う恒等式は「形状の対称性」。2 本の線路は x = 0 について対称で xmesh も
+# 対称なので、離散問題まで対称になり C11 = C22 と L11 = L22 が**全桁一致**する。
+# ポート番号の取り違えはここで落ちる。
+echo "[coupled_microstrip] 2-port coupled line (the only multi-port case)"
+run_case coupled_microstrip
+compare "C11 == C22 (structure is symmetric)" "$(value_ij C 1 1)" "$(value_ij C 2 2)" 1e-9
+compare "L11 == L22 (structure is symmetric)" "$(value_ij L 1 1)" "$(value_ij L 2 2)" 1e-9
+compare "C12 == C21 (matrix symmetry)" "$(value_ij C 1 2)" "$(value_ij C 2 1)" 1e-9
+compare "L12 == L21 (matrix symmetry)" "$(value_ij L 1 2)" "$(value_ij L 2 1)" 1e-9
+# Maxwell 容量行列の符号 : 対角 > 0、非対角 < 0、行和 > 0 (対地容量が正)。
+# 相互インダクタンスは同方向電流なので正
+res=$(awk -v c11="$(value_ij C 1 1)" -v c12="$(value_ij C 1 2)" -v l12="$(value_ij L 1 2)" \
+	'BEGIN{ printf "%s", ((c11 > 0) && (c12 < 0) && ((c11 + c12) > 0) && (l12 > 0)) ? "OK" : "NG" }')
+echo "  Maxwell signs (C diag>0, C offdiag<0, row sum>0, L offdiag>0) : $res"
+case "$res" in NG*) status=1 ;; esac
+# TEM の L は真空容量の逆行列 L = mu0 eps0 inv(C0) なので、**inv(L) も Maxwell 行列**
+# (非対角が負) でなければならない。2x2 では inv([[a,b],[b,a]]) の非対角が -b/(a^2-b^2)
+res=$(awk -v a="$(value_ij L 1 1)" -v b="$(value_ij L 1 2)" \
+	'BEGIN{ d = (a * a) - (b * b)
+	        printf "%s", ((d > 0) && ((-b / d) < 0)) ? "OK" : "NG" }')
+echo "  inv(L) is a Maxwell matrix (L = mu0 eps0 inv(C0)) : $res"
+case "$res" in NG*) status=1 ;; esac
+# 多ポートの SPICE 出力 : 相互インダクタンス K と結合容量 CM が段数分だけ出ること
+res=$(awk -v ns=4 '/^K12_/ { k++ } /^CM12_/ { c++ }
+	END { printf "%s (K=%d, CM=%d, sections=%d)", ((k == ns) && (c == ns)) ? "OK" : "NG",
+	             k, c, ns }' "$WORK/ofe_circuit.sp")
+echo "  SPICE ladder has K and CM per section : $res"
+case "$res" in NG*) status=1 ;; esac
+# 結合係数 k = L12/L11 が妥当な範囲にあること (w = s = h なので 0.1..0.3)
+in_range "coupling k = L12/L11" \
+	"$(awk -v a="$(value_ij L 1 1)" -v b="$(value_ij L 1 2)" 'BEGIN{ printf "%.6f", b / a }')" \
+	0.1 0.3
+# 対称化の診断が出ていて、かつ十分小さいこと (多ポートでしか出ない行)
+asym=$(awk '/electrostatic matrix asymmetry/ { print $(NF-1) }' "$WORK/ofe.log")
+res=$(awk -v v="$asym" 'BEGIN{ if (v == "") { print "NG (no diagnostic)"; exit }
+	                            printf "%s", (v < 1e-9) ? "OK" : "NG" }')
+echo "  matrix asymmetry diagnostic = $asym -> $res"
+case "$res" in NG*) status=1 ;; esac
 
 echo "[microstrip] w/h = 0.75/0.4, epsr = 4.4"
 run_case microstrip
@@ -1219,7 +1272,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
-         box_tet_41 plate2d_41; do
+         box_tet_41 plate2d_41 coupled_microstrip; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

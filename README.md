@@ -849,7 +849,7 @@ end
 | `resistor_bar.ofe` | 直方体抵抗 | R = d/(σA) と一致 (誤差 < 0.01%) |
 | `coax.ofe` | 同軸線路 (単位長) | C', L', Z0 とも誤差 ~2% (円形導体の階段近似による) |
 | `microstrip.ofe` | マイクロストリップ線路 | Z0 = 49.3 Ω, ε_eff = 3.30 (Hammerstad の目安と整合) |
-| `coupled_microstrip.ofe` | 結合線路 (2 ポート) | C/L 行列と結合係数、4 段梯子の SPICE 出力 |
+| `coupled_microstrip.ofe` | 結合線路 (2 ポート) | **唯一の多ポートケース**。形状の対称性から C11=C22, L11=L22 が全桁一致 + Maxwell 行列の符号 + inv(L) が Maxwell 行列 + 段数分の相互インダクタンス K と結合容量 CM |
 | `plate_line_dc.ofe` | 平行平板線路の静磁場 | L'dc = μ0(d + 2t/3)/W と一致 (誤差 0.01%)、Rs' も厳密 |
 | `coax_loss.ofe` | 損失同軸 (C/L/G/L_dc/Rs) | L'dc 誤差 0.22%、Rs' 誤差 0.53%、G' = ωC'tanδ を厳密に再現 |
 | `plate_line_ac.ofe` | 平行平板線路の渦電流 | 1 次元厳密解 Z = 2γcoth(γt)/(σW) + jωμ0d/W と比較 (1kHz: R 誤差 0.00% / 10MHz: R 誤差 0.12%) |
