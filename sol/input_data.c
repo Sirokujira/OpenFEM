@@ -1221,6 +1221,17 @@ int input_data(FILE *fp)
 				printf("%s\n", "*** analysis A requires at least one port (electrode)");
 				return 1;
 			}
+			// A-φ 連成は (A, φ) -> (A + Gψ, φ - jωψ) で不変なので、ゲージを
+			// 固定しない既定の系は**特異**。右辺が値域に入るので COCG は解に
+			// 収束するが、分解には主小行列の非特異性が要る。丸めのおかげで
+			// ピボットが 0 にならず通ってしまうこともあるが、それは
+			// コンパイラ・並べ替え依存の運なので、はっきり gauge = 1 を要求する
+			// (直接解法にはゲージ固定の反復回数の不利が無いので損もしない)
+			if (Direct && !GaugeTree) {
+				printf("%s\n", "*** direct = 1 with analysis A requires gauge = 1 "
+					"(the ungauged A-phi system is singular)");
+				return 1;
+			}
 		}
 		return 0;
 	}
@@ -1297,13 +1308,6 @@ int input_data(FILE *fp)
 	// P 解析 (節点要素の自己検証) も非構造格子専用
 	if ((Analysis & ANALYSIS_P) && !MeshMode) {
 		printf("%s\n", "*** analysis P (nodal element self test) requires an unstructured mesh");
-		return 1;
-	}
-
-	// 直接解法は実対称正定値の系だけ。複素対称系 (F / A) は COCG のまま
-	if (Direct && (Analysis & (ANALYSIS_F | ANALYSIS_A))) {
-		printf("%s\n", "*** direct = 1 supports only the real symmetric systems "
-			"(C / L / R / M); analysis F / A use the complex COCG solver");
 		return 1;
 	}
 

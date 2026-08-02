@@ -146,6 +146,41 @@ void crs_spmv(const crs_t *A, const double *x, double *y, const unsigned char *f
 }
 
 
+/*
+複素対称行列の積 y = (K + jω M) x  (fix[row] != 0 の行は恒等行 y = x)。
+
+COCG (反復) と直接解法の**両方**がこれを使う。同じ関数を通しておかないと、
+直接解法が最後に計算する残差が「自分の思う行列」に対する残差になってしまい、
+検査として意味を失う。w1..w4 は長さ n の作業配列。
+*/
+void crs_spmv_c(const crs_t *K, const crs_t *M, double omega,
+	const double *xr, const double *xi, double *yr, double *yi,
+	const unsigned char *fix, double *w1, double *w2, double *w3, double *w4)
+{
+	const int n = (int)K->n;
+
+	crs_spmv(K, xr, w1, fix);		// 固定行は w1 = xr
+	crs_spmv(K, xi, w2, fix);
+	crs_spmv(M, xr, w3, NULL);
+	crs_spmv(M, xi, w4, NULL);
+
+	int i;
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+	for (i = 0; i < n; i++) {
+		if ((fix != NULL) && fix[i]) {
+			yr[i] = w1[i];
+			yi[i] = w2[i];
+		}
+		else {
+			yr[i] = w1[i] - (omega * w4[i]);
+			yi[i] = w2[i] + (omega * w3[i]);
+		}
+	}
+}
+
+
 // 対角成分
 void crs_diag(const crs_t *A, double *d)
 {
