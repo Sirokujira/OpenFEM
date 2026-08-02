@@ -66,41 +66,19 @@ static double cnorm(const double *ar, const double *ai, int n)
 }
 
 
-// y = (K + jω M) x   (固定節点は恒等行)
-static void spmv_c(const crs_t *K, const crs_t *M, double omega,
-	const double *xr, const double *xi, double *yr, double *yi,
-	const unsigned char *fix, double *w1, double *w2, double *w3, double *w4)
-{
-	const int n = (int)K->n;
-
-	crs_spmv(K, xr, w1, fix);		// 固定行は w1 = xr
-	crs_spmv(K, xi, w2, fix);
-	crs_spmv(M, xr, w3, NULL);
-	crs_spmv(M, xi, w4, NULL);
-
-	int i;
-#ifdef _OPENMP
-#pragma omp parallel for
-#endif
-	for (i = 0; i < n; i++) {
-		if (fix[i]) {
-			yr[i] = w1[i];
-			yi[i] = w2[i];
-		}
-		else {
-			yr[i] = w1[i] - (omega * w4[i]);
-			yi[i] = w2[i] + (omega * w3[i]);
-		}
-	}
-}
-
-
 int solver_cocg(const crs_t *K, const crs_t *M, double omega,
 	const double *br, const double *bi, double *xr, double *xi,
 	const unsigned char *fix, int maxiter, int nout, double converg,
 	FILE *fp_log, const char *label)
 {
 	const int n = (int)K->n;
+
+	// direct = 1 のときは直接解法 (スカイライン LDL^T) に回す。
+	// 反復回数の代わりに 0 を返す (実対称系の solver_cg と同じ約束)
+	if (Direct) {
+		return ((solver_direct_c(K, M, omega, br, bi, xr, xi, fix, fp_log, label) == 0)
+			? 0 : -1);
+	}
 
 	double *rr = (double *)malloc(n * sizeof(double));
 	double *ri = (double *)malloc(n * sizeof(double));
@@ -168,7 +146,7 @@ int solver_cocg(const crs_t *K, const crs_t *M, double omega,
 	int converged = 0;
 
 	for (iter = 1; iter <= maxiter; iter++) {
-		spmv_c(K, M, omega, pr, pi, qr, qi, fix, w1, w2, w3, w4);
+		crs_spmv_c(K, M, omega, pr, pi, qr, qi, fix, w1, w2, w3, w4);
 
 		double pqr, pqi;
 		cdot(pr, pi, qr, qi, n, &pqr, &pqi);

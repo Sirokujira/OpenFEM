@@ -82,6 +82,9 @@ void crs_free(crs_t *);
 void crs_zero(crs_t *);
 int64_t crs_offset(int64_t, int, int, int, int, int, int);
 void crs_spmv(const crs_t *, const double *, double *, const unsigned char *);
+void crs_spmv_c(const crs_t *, const crs_t *, double,
+	const double *, const double *, double *, double *, const unsigned char *,
+	double *, double *, double *, double *);
 void crs_diag(const crs_t *, double *);
 double crs_row_dot(const crs_t *, int64_t, const double *);
 
@@ -102,6 +105,9 @@ int solver_cg(const crs_t *, const double *, double *, const unsigned char *,
 
 // solver_direct.c
 int solver_direct(const crs_t *, const double *, double *, const unsigned char *,
+	FILE *, const char *);
+int solver_direct_c(const crs_t *, const crs_t *, double,
+	const double *, const double *, double *, double *, const unsigned char *,
 	FILE *, const char *);
 
 // solve.c

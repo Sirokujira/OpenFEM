@@ -47,7 +47,10 @@
 #                    + 同じ格子の 1 次要素より 10 倍以上良いこと
 #   mesh order     : 次数の混在・2 次格子への analysis=A・1 次三角形を弾くこと
 #   direct         : 直接解法 (RCM + スカイライン Cholesky) が反復解法と
-#                    完全一致すること (9 ケース) + F / A では弾くこと
+#                    完全一致すること (実対称の 9 ケース)
+#   direct F/A     : 複素対称系の直接解法 (LDL^T)。反復解法と一致すること
+#                    (F の構造格子・三角形格子、3 次元 A-φ) + 分解の残差が
+#                    小さいこと + ゲージ固定なしの A を弾くこと
 #   gmsh 4.1       : 同じ形状を Gmsh 2.2 と 4.1 で書いた結果が完全一致すること
 #                    (+ $Entities 欠落とバイナリを弾くこと)
 #   plate2d_p2     : 断面 2 次元の 2 次要素 (6 節点三角形)。導体内の Az が厳密に
@@ -572,9 +575,87 @@ res=$(awk '/direct : profile/ { for (i = 1; i <= NF; i++) if ($i == "bandwidth")
 echo "  RCM reduces the profile : $res"
 case "$res" in NG*) status=1 ;; esac
 
-# 複素対称系 (F / A) は COCG のままなので弾くこと
+# 複素対称系 (F / A) の直接解法 (スカイライン **LDL^T**)。
+#
+# 実対称のときと違い rlc.csv はバイト単位では一致しない。この系は
+# ‖A‖‖x‖ >> ‖b‖ (低周波では ωM << K) なので、後退安定な分解でも相対残差は
+# 1e-11 程度で頭打ちになり、COCG とは最後の 1 桁が違い得る。そこで
+# 「同じ答えに落ちること」を相対誤差で見て、**分解が破綻していないことは
+# ログの残差で別に assert する** (値の一致だけだと、両方が同じくらい
+# 間違っている可能性を排除できない)
+echo "[direct F/A] the complex-symmetric (LDL^T) direct solver"
+direct_close() {	# direct_close <ラベル> <反復の .ofe> <直接の .ofe> <許容>
+	if ! (cd "$WORK" && "$OFE" -n 2 "$2" > /dev/null && "$OFE_POST" > /dev/null); then
+		echo "  $1 : the iterative run failed -> NG" >&2
+		status=1
+		return
+	fi
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/it.csv"
+	if ! (cd "$WORK" && "$OFE" -n 2 "$3" > /dev/null && "$OFE_POST" > /dev/null); then
+		echo "  $1 : the direct run failed -> NG" >&2
+		status=1
+		return
+	fi
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/di.csv"
+	if ! grep -q "direct : profile" "$WORK/ofe.log"; then
+		echo "  $1 : the direct solver was not used -> NG" >&2
+		status=1
+		return
+	fi
+	# 分解の残差 (ソルバーが自分で計算してログに出したもの)。黙って反復解法に
+	# 落ちていれば行そのものが無いので、そこも NG にする
+	res=$(awk '$NF == "direct" { r = $(NF - 1) + 0; if (r > m) m = r; n++ }
+		END { if (n == 0) printf "NG (no residual reported)"
+		      else printf "%s (max %.2e over %d solves)", ((m < 1e-8) ? "OK" : "NG"), m, n }' \
+		"$WORK/ofe.log")
+	echo "  $1 : factorization residual $res"
+	case "$res" in NG*) status=1 ;; esac
+	# 反復解法との一致 (rlc.csv の全成分の最大相対差)
+	res=$(awk -F, -v tol="$4" '
+		NR == FNR { a[FNR] = $0; next }
+		{ n = split(a[FNR], p, ",")
+		  if (n != NF) { bad = 1; exit }
+		  for (i = 1; i <= NF; i++) {
+			if (($i + 0 != $i) || (p[i] + 0 != p[i])) {
+				if ($i != p[i]) bad = 1		# 名前の行が食い違った
+				continue
+			}
+			d = $i - p[i]; if (d < 0) d = -d
+			s = ($i < 0) ? -$i : $i
+			t = (p[i] < 0) ? -p[i] : p[i]
+			if (t > s) s = t
+			if ((s > 0) && ((d / s) > m)) m = d / s
+		  }
+		}
+		END { if (bad || (FNR == 0)) printf "NG (the two outputs differ in shape)"
+		      else printf "%s (max %.1e)", ((m <= tol) ? "OK" : "NG"), m }' \
+		"$WORK/it.csv" "$WORK/di.csv")
+	echo "  $1 : agrees with the iterative solver $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+# (a) 構造格子の断面 2 次元 (F、表皮効果)
+cp "$SRC/plate_line_ac.ofe" "$WORK/"
 sed 's/^analysis = /direct = 1\nanalysis = /' "$SRC/plate_line_ac.ofe" > "$WORK/dir_f.ofe"
-mesh_reject "direct = 1 with analysis F" dir_f.ofe
+direct_close "plate_line_ac (structured, F)" plate_line_ac.ofe dir_f.ofe 1e-6
+# (b) 非構造格子 (三角形) の F。断面 2 次元の CRS パターンを通す
+cp "$SRC/plate2d_ac.ofe" "$WORK/"
+sed 's/^analysis = /direct = 1\nanalysis = /' "$SRC/plate2d_ac.ofe" > "$WORK/dir_f2.ofe"
+direct_close "plate2d_ac (triangles, F)" plate2d_ac.ofe dir_f2.ofe 1e-6
+# (c) 3 次元 A-φ 連成 (辺 + 節点の混在した行列)。**ゲージ固定が要る** ので
+#     反復側も gauge = 1 で回し、違いが解法だけになるようにする
+sed 's/^analysis = /gauge = 1\nanalysis = /' "$SRC/bar_eddy.ofe" > "$WORK/g1_a.ofe"
+sed 's/^analysis = /gauge = 1\ndirect = 1\nanalysis = /' "$SRC/bar_eddy.ofe" > "$WORK/dir_a.ofe"
+direct_close "bar_eddy (3-D A-phi, gauge = 1)" g1_a.ofe dir_a.ofe 1e-6
+
+# ゲージを固定しない A-φ は (A, φ) -> (A + Gψ, φ - jωψ) で不変な**特異系**。
+# COCG は右辺が値域に入るので収束するが、分解はピボットが 0 になって成立しない。
+# 黙って壊れた答えを返さずに入力段で弾くこと
+sed 's/^analysis = /direct = 1\nanalysis = /' "$SRC/bar_eddy.ofe" > "$WORK/dir_a0.ofe"
+mesh_reject "direct = 1 with analysis A and no gauge" dir_a0.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 dir_a0.ofe 2>&1 | grep -q "requires gauge = 1"); then
+	echo "  *** it was rejected for a different reason than the missing gauge" >&2
+	status=1
+fi
 
 # Gmsh ASCII 4.1 形式の読み込み。**同じ形状を 2.2 と 4.1 で書いた結果が
 # 完全に一致すること**を恒等式に使う (閉形式は要らないうえ、これ以上厳密な
