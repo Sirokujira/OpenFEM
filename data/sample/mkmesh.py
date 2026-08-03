@@ -39,6 +39,22 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
 
   -v41 1 を付けると Gmsh ASCII **4.1** 形式で書く (読み込みの検証用)。
   同じ形状を 2.2 と 4.1 で書いて結果が完全に一致することを rlc_check.sh で見る。
+
+バイナリ形式の検証用ファイル (box_bin*.msh / plate2d_bin*.msh / box_p2_bin*.msh)
+だけは、**このスクリプトでは書きません**。自作の書き手と読み手が同じ誤解を
+共有しているとテストが素通りするので、本物の gmsh (4.12.1) に変換させています:
+
+  python3 mkmesh.py box     small.msh  -nx 3 -ny 3 -nz 2
+  python3 mkmesh.py plate2d p2d.msh    -nw 6 -nt 2 -ng 2
+  python3 mkmesh.py box     p2ord.msh  -nx 2 -ny 2 -nz 2 -order 2
+  for src base in (small box_bin) (p2d plate2d_bin) (p2ord box_p2_bin):
+      gmsh -0 $src.msh -o $base.msh     -format msh22
+      gmsh -0 $src.msh -o ${base}_22.msh -format msh22 -bin
+      gmsh -0 $src.msh -o ${base}_41.msh -format msh41 -bin
+
+**gmsh は変換のたびに節点を振り直す**ので、比較する ASCII 側 (base.msh) も
+同じ変換で出したものを置いてあります (元の出力と直接比べると丸めの順序が
+変わって一致しません)。
 """
 
 import math

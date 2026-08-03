@@ -407,6 +407,433 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 }
 
 
+// ---- Gmsh バイナリの読み込み (2.2 / 4.1) ----
+/*
+ASCII との違いは「データの並べ方」だけなので、格納 (elem_store / elem_finish)
+と物理タグの解決 (ent_phys) は共通のものをそのまま使う。
+
+**エンディアンは変換しない。** $MeshFormat の直後に書かれている int32 が 1 と
+読めるかどうかで判定し、違えば「別エンディアンの格子は非対応」と言って落とす。
+黙って読み違えるより落ちる方がよく、手元で検証できない変換を書いても
+「動くつもりのコード」が増えるだけになる。
+
+  2.2 : $Nodes / $Elements の**個数だけが ASCII 行**で、以降はバイナリ。
+        節点は (int32 tag, double x, y, z) の並び。要素は**型ごとのブロック**で、
+        ブロック頭が (型, 個数, タグ数) の int32 3 個。ASCII と違って
+        1 要素ごとに型が書かれていない。
+  4.1 : 個数も含めて全部バイナリ。**size_t (ヘッダ 3 番目 = 8) と int32 が
+        混在する**ので、どちらかを取り違えると即座にずれる。
+
+読み飛ばしのために全要素型の節点数表を持つ (Gmsh のマニュアルの表)。
+表に無い型が出たら、何バイト進めばよいか分からないので**落とす**。
+ASCII では 1 要素 1 行なので行末まで飛ばせば済むが、バイナリでは
+「知らない型は読み飛ばせない」。
+*/
+
+// Gmsh の要素型 -> 節点数 (1..31)。0 は「未知」
+static const int GMSH_NNODE[32] = {
+	0,  2,  3,  4,  4,  8,  6,  5,  3,  6,  9,		//  0..10
+	10, 27, 18, 14,  1,  8, 20, 15, 13,  9,			// 11..20
+	10, 12, 15, 15, 21,  4,  5,  6, 20, 35,			// 21..30
+	56												// 31
+};
+
+static int gmsh_nnode(long type)
+{
+	if ((type < 1) || (type > 31)) return 0;
+
+	return GMSH_NNODE[type];
+}
+
+
+static int rd_raw(FILE *fp, void *p, size_t n)
+{
+	return (fread(p, 1, n, fp) != n);
+}
+
+static int rd_i32(FILE *fp, int32_t *v)
+{
+	return rd_raw(fp, v, 4);
+}
+
+static int rd_i64(FILE *fp, int64_t *v)
+{
+	return rd_raw(fp, v, 8);
+}
+
+
+// 節点 (2.2 バイナリ)
+static int read_nodes_bin22(FILE *fp, int32_t **idmap, int32_t *maxid)
+{
+	char line[BUFSIZ];
+
+	if (fgets(line, sizeof(line), fp) == NULL) return 1;
+	const int nn = atoi(line);
+	if (nn < 4) {
+		printf("*** mesh : too few nodes (%d)\n", nn);
+		return 1;
+	}
+
+	NNode = nn;
+	Xp = (double *)malloc((size_t)nn * sizeof(double));
+	Yp = (double *)malloc((size_t)nn * sizeof(double));
+	Zp = (double *)malloc((size_t)nn * sizeof(double));
+
+	int32_t *id = (int32_t *)malloc((size_t)nn * sizeof(int32_t));
+	int32_t mx = 0;
+	for (int i = 0; i < nn; i++) {
+		double xyz[3];
+		if (rd_i32(fp, &id[i]) || rd_raw(fp, xyz, 3 * sizeof(double))) {
+			printf("*** mesh : truncated binary node %d\n", i + 1);
+			free(id);
+			return 1;
+		}
+		if (id[i] > mx) mx = id[i];
+		Xp[i] = xyz[0];
+		Yp[i] = xyz[1];
+		Zp[i] = xyz[2];
+	}
+	if (mx < 1) {
+		free(id);
+		return 1;
+	}
+
+	int32_t *map = (int32_t *)malloc(((size_t)mx + 1) * sizeof(int32_t));
+	for (int32_t i = 0; i <= mx; i++) map[i] = -1;
+	for (int i = 0; i < nn; i++) map[id[i]] = i;
+	free(id);
+
+	*idmap = map;
+	*maxid = mx;
+
+	return 0;
+}
+
+
+// 要素 (2.2 バイナリ)。型ごとのブロックで並ぶ
+static int read_elements_bin22(FILE *fp, const int32_t *idmap, int32_t maxid)
+{
+	char line[BUFSIZ];
+
+	if (fgets(line, sizeof(line), fp) == NULL) return 1;
+	const long ne = atol(line);
+
+	elem_reset();
+
+	long got = 0;
+	while (got < ne) {
+		int32_t hdr[3];
+		if (rd_i32(fp, &hdr[0]) || rd_i32(fp, &hdr[1]) || rd_i32(fp, &hdr[2])) {
+			printf("%s\n", "*** mesh : truncated binary element block");
+			return 1;
+		}
+		const long type = hdr[0], cnt = hdr[1], ntag = hdr[2];
+		const int nn = gmsh_nnode(type);
+		if ((nn < 1) || (cnt < 0) || (ntag < 0)) {
+			printf("*** mesh : unknown element type %ld in a binary file "
+				"(cannot skip it)\n", type);
+			return 1;
+		}
+		if ((got + cnt) > ne) {
+			printf("%s\n", "*** mesh : binary element blocks overrun the count");
+			return 1;
+		}
+		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9));
+
+		for (long e = 0; e < cnt; e++) {
+			int32_t etag = 0;
+			if (rd_i32(fp, &etag)) return 1;
+			int tag = 0;
+			for (long t = 0; t < ntag; t++) {
+				int32_t v = 0;
+				if (rd_i32(fp, &v)) return 1;
+				if (t == 0) tag = (int)v;		// 1 つ目が物理タグ
+			}
+			int32_t nd[10];
+			for (int l = 0; l < nn; l++) {
+				int32_t g = 0;
+				if (rd_i32(fp, &g)) return 1;
+				if (!use) continue;				// 使わない型は読み捨てる
+				if ((g < 0) || (g > maxid) || (idmap[g] < 0)) {
+					printf("*** mesh : element %d refers to an unknown node %d\n",
+						(int)etag, (int)g);
+					return 1;
+				}
+				nd[l] = idmap[g];
+			}
+			if (use && elem_store((int)type, tag, nd)) return 1;
+		}
+		got += cnt;
+	}
+
+	return elem_finish();
+}
+
+
+// エンティティ (4.1 バイナリ)。物理タグはここにしか無い
+static int read_entities_bin41(FILE *fp)
+{
+	int64_t n[4];
+
+	NEnt = 0;
+	for (int d = 0; d < 4; d++) {
+		if (rd_i64(fp, &n[d])) return 1;
+	}
+	for (int d = 0; d < 4; d++) {
+		for (int64_t e = 0; e < n[d]; e++) {
+			int32_t tag = 0;
+			double b[6];
+			// 点は座標 3 個、それ以外は外接直方体 6 個
+			const int nb = ((d == 0) ? 3 : 6);
+			if (rd_i32(fp, &tag) || rd_raw(fp, b, (size_t)nb * sizeof(double))) return 1;
+			int64_t np = 0;
+			if (rd_i64(fp, &np)) return 1;
+			int phys = 0;
+			for (int64_t i = 0; i < np; i++) {
+				int32_t pt = 0;
+				if (rd_i32(fp, &pt)) return 1;
+				if (i == 0) phys = (int)pt;		// 複数あれば最初のものを使う
+			}
+			if (d > 0) {
+				int64_t nbd = 0;
+				if (rd_i64(fp, &nbd)) return 1;
+				for (int64_t i = 0; i < nbd; i++) {
+					int32_t dummy = 0;
+					if (rd_i32(fp, &dummy)) return 1;
+				}
+			}
+			if (NEnt < MAXENT) {
+				Ent[NEnt].dim = d;
+				Ent[NEnt].tag = tag;
+				Ent[NEnt].phys = phys;
+				NEnt++;
+			}
+		}
+	}
+
+	return 0;
+}
+
+
+// 節点 (4.1 バイナリ)
+static int read_nodes_bin41(FILE *fp, int32_t **idmap, int32_t *maxid)
+{
+	int64_t nblk = 0, nn = 0, mn = 0, mx = 0;
+
+	if (rd_i64(fp, &nblk) || rd_i64(fp, &nn) || rd_i64(fp, &mn) || rd_i64(fp, &mx)) return 1;
+	if ((nn < 4) || (mx < 1) || (mx > INT32_MAX)) {
+		printf("*** mesh : too few nodes (%lld)\n", (long long)nn);
+		return 1;
+	}
+
+	NNode = (int)nn;
+	Xp = (double *)malloc((size_t)nn * sizeof(double));
+	Yp = (double *)malloc((size_t)nn * sizeof(double));
+	Zp = (double *)malloc((size_t)nn * sizeof(double));
+	int32_t *map = (int32_t *)malloc(((size_t)mx + 1) * sizeof(int32_t));
+	for (int32_t i = 0; i <= (int32_t)mx; i++) map[i] = -1;
+
+	int64_t *tags = (int64_t *)malloc((size_t)nn * sizeof(int64_t));
+	int k = 0;
+	for (int64_t b = 0; b < nblk; b++) {
+		int32_t dim = 0, tag = 0, par = 0;
+		int64_t cnt = 0;
+		if (rd_i32(fp, &dim) || rd_i32(fp, &tag) || rd_i32(fp, &par) || rd_i64(fp, &cnt)
+		 || (cnt < 0) || ((k + cnt) > nn)) {
+			free(map); free(tags);
+			return 1;
+		}
+		// ブロック内は「節点番号がまとめて、そのあと座標がまとめて」
+		if (rd_raw(fp, &tags[k], (size_t)cnt * sizeof(int64_t))) {
+			free(map); free(tags);
+			return 1;
+		}
+		for (int64_t i = 0; i < cnt; i++) {
+			double xyz[3];
+			if (rd_raw(fp, xyz, 3 * sizeof(double))) {
+				free(map); free(tags);
+				return 1;
+			}
+			Xp[k + i] = xyz[0];
+			Yp[k + i] = xyz[1];
+			Zp[k + i] = xyz[2];
+		}
+		k += (int)cnt;
+	}
+	if (k != nn) { free(map); free(tags); return 1; }
+
+	for (int i = 0; i < NNode; i++) {
+		const int64_t g = tags[i];
+		if ((g < 1) || (g > mx)) { free(map); free(tags); return 1; }
+		map[g] = i;
+	}
+	free(tags);
+
+	*idmap = map;
+	*maxid = (int32_t)mx;
+
+	return 0;
+}
+
+
+// 要素 (4.1 バイナリ)
+static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
+{
+	int64_t nblk = 0, ne = 0, mn = 0, mx = 0;
+
+	if (rd_i64(fp, &nblk) || rd_i64(fp, &ne) || rd_i64(fp, &mn) || rd_i64(fp, &mx)) return 1;
+
+	elem_reset();
+
+	for (int64_t b = 0; b < nblk; b++) {
+		int32_t dim = 0, tag = 0, type = 0;
+		int64_t cnt = 0;
+		if (rd_i32(fp, &dim) || rd_i32(fp, &tag) || rd_i32(fp, &type) || rd_i64(fp, &cnt)
+		 || (cnt < 0)) {
+			printf("%s\n", "*** mesh : truncated binary element block");
+			return 1;
+		}
+		const int nn = gmsh_nnode(type);
+		if (nn < 1) {
+			printf("*** mesh : unknown element type %d in a binary file "
+				"(cannot skip it)\n", (int)type);
+			return 1;
+		}
+		// 物理タグはエンティティ側にある (2.2 と違い要素には無い)
+		const int phys = ent_phys((int)dim, tag);
+		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9));
+
+		for (int64_t e = 0; e < cnt; e++) {
+			int64_t etag = 0;
+			if (rd_i64(fp, &etag)) return 1;
+			int32_t nd[10];
+			for (int l = 0; l < nn; l++) {
+				int64_t g = 0;
+				if (rd_i64(fp, &g)) return 1;
+				if (!use) continue;
+				if ((g < 0) || (g > maxid) || (idmap[g] < 0)) {
+					printf("*** mesh : element %lld refers to an unknown node %lld\n",
+						(long long)etag, (long long)g);
+					return 1;
+				}
+				nd[l] = idmap[g];
+			}
+			if (use && elem_store((int)type, phys, nd)) return 1;
+		}
+	}
+
+	if ((NTet < 1) && (NTri < 1)) {
+		printf("%s\n", "*** mesh : no tetrahedron and no triangle found");
+		return 1;
+	}
+
+	return elem_finish();
+}
+
+
+/*
+バイナリ格子の読み込み本体。
+
+**セクションの探索は行単位だが、バイナリ領域を行として読み飛ばしてはいけない**
+(データに 0x0A が現れる)。各セクションの読み手がちょうどの長さを消費するので、
+戻ってきた位置から次のセクション見出しを探す形にしてある。
+*/
+static int mesh_read_binary(const char *fname, int v41)
+{
+	char line[BUFSIZ];
+	int32_t *idmap = NULL;
+	int32_t maxid = 0;
+	int ierr = 0;
+	int have_nodes = 0, have_elements = 0;
+
+	NEnt = 0;
+
+	FILE *fp = fopen(fname, "rb");
+	if (fp == NULL) {
+		printf("*** mesh file %s open error.\n", fname);
+		return 1;
+	}
+
+	while (fgets(line, sizeof(line), fp) != NULL) {
+		if      (!strncmp(line, "$MeshFormat", 11)) {
+			if (fgets(line, sizeof(line), fp) == NULL) { ierr = 1; break; }
+			double ver = 0;
+			long bin = 0, sz = 0;
+			if (sscanf(line, "%lf %ld %ld", &ver, &bin, &sz) != 3) { ierr = 1; break; }
+			if (sz != 8) {
+				printf("*** mesh : the binary file uses %ld-byte floats "
+					"(only 8 is supported)\n", sz);
+				ierr = 1;
+				break;
+			}
+			// 直後の int32 が 1 なら同じエンディアン
+			int32_t one = 0;
+			if (rd_i32(fp, &one)) { ierr = 1; break; }
+			if (one != 1) {
+				// マーカーの 4 バイトが全部印字可能なら、ヘッダだけ
+				// バイナリを名乗って中身が ASCII のファイル (手で書き換えた
+				// もの) である可能性が高い。原因の違う 2 つを同じ文言で
+				// 報告すると、直しようのない診断になる
+				const unsigned char *b = (const unsigned char *)&one;
+				int text = 1;
+				for (int i = 0; i < 4; i++) {
+					if ((b[i] < 0x20) || (b[i] > 0x7e)) text = 0;
+				}
+				if (text) {
+					printf("%s\n", "*** mesh : the header says binary but the "
+						"content is ASCII (the second field of $MeshFormat "
+						"must be 0 for ASCII files)");
+				}
+				else {
+					printf("*** mesh : the binary file has the opposite byte order "
+						"(endianness marker = %d); convert it with gmsh on this "
+						"machine\n", (int)one);
+				}
+				ierr = 1;
+				break;
+			}
+			// マーカーの後ろの改行を読み捨てる
+			int c = fgetc(fp);
+			if (c != '\n') ungetc(c, fp);
+		}
+		else if (!strncmp(line, "$Entities", 9)) {
+			ierr = (v41 ? read_entities_bin41(fp) : 0);
+			if (ierr) {
+				printf("%s\n", "*** mesh : cannot parse the binary $Entities");
+				break;
+			}
+		}
+		else if (!strncmp(line, "$Nodes", 6)) {
+			ierr = (v41 ? read_nodes_bin41(fp, &idmap, &maxid)
+			            : read_nodes_bin22(fp, &idmap, &maxid));
+			if (ierr) break;
+			have_nodes = 1;
+		}
+		else if (!strncmp(line, "$Elements", 9)) {
+			if (!have_nodes) {
+				printf("%s\n", "*** mesh : $Elements before $Nodes");
+				ierr = 1;
+				break;
+			}
+			ierr = (v41 ? read_elements_bin41(fp, idmap, maxid)
+			            : read_elements_bin22(fp, idmap, maxid));
+			if (ierr) break;
+			have_elements = 1;
+		}
+	}
+
+	fclose(fp);
+	free(idmap);
+
+	if (!ierr && (!have_nodes || !have_elements)) {
+		printf("%s\n", "*** mesh : $Nodes or $Elements is missing");
+		ierr = 1;
+	}
+
+	return ierr;
+}
+
+
 int mesh_read(const char *fname)
 {
 	char line[BUFSIZ];
@@ -434,16 +861,18 @@ int mesh_read(const char *fname)
 				ierr = 1;
 				break;
 			}
-			// バイナリは 2 番目の数字が 1 (ASCII は 0)
+			// バイナリは 2 番目の数字が 1 (ASCII は 0)。**別の読み手に渡す**。
+			// ASCII 用のこの経路はテキストモードで開いた FILE* を使っており、
+			// Windows では改行が変換されてバイナリが壊れるので、
+			// 開き直して最初から読む (ASCII の経路には一切手を入れない)
 			{
 				double ver = 0;
 				long bin = 0, sz = 0;
 				if (sscanf(line, "%lf %ld %ld", &ver, &bin, &sz) >= 2) {
 					if (bin != 0) {
-						printf("%s\n", "*** mesh : binary Gmsh files are not supported "
-							"(save as ASCII)");
-						ierr = 1;
-						break;
+						fclose(fp);
+						free(idmap);
+						return mesh_read_binary(fname, v41);
 					}
 				}
 			}
