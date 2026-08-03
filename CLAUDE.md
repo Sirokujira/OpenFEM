@@ -131,6 +131,11 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
 - `ofe_post` が `ofe.out` の新フィールドを無害に扱えることを確認する
   (フォーマットを変えたら先頭のマジック `OFEOUT01` も上げる)。
 - CPU 実装にだけ追加した機能は README に対応状況を明記する。
+- **外部ライブラリを使う機能は任意依存 (既定 OFF) にする。** 「素の CMake で
+  3 OS ビルドできる」性質を既定のまま保つこと。無効ビルドではスタブに落とし、
+  **その機能を要求されたら黙って無視せず入力エラーにする** (書いたつもりで
+  ファイルが無いのが一番困る)。検証は「無効ビルドでは弾かれること」と
+  「有効ビルドでは動くこと」の両方を見る (`hdf5` がその形)。
 
 ## 設定ファイル (.claude/)
 
@@ -142,5 +147,6 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
 ## CI
 
 `.github/workflows/ci.yml`: Linux / macOS (libomp) / Windows (MSVC + Ninja)。
-外部ライブラリ依存は無い。Windows の検証ステップは Git for Windows の bash で
+既定のビルドに外部ライブラリ依存は無い (HDF5 だけ任意依存で、`WITH_HDF5=ON` の
+Linux ジョブが 1 つ別にある)。Windows の検証ステップは Git for Windows の bash で
 `rlc_check.sh` を実行する。タグ `v*` push で Release にバイナリを添付。

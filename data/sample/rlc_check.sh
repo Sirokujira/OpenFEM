@@ -48,6 +48,9 @@
 #   mesh order     : 次数の混在・2 次格子への analysis=A・1 次三角形を弾くこと
 #   direct         : 直接解法 (RCM + スカイライン Cholesky) が反復解法と
 #                    完全一致すること (実対称の 9 ケース)
+#   hdf5           : 系列の HDF5 出力 (任意依存)。既存の出口と同じ数字が入って
+#                    いること (ofe_sweep.csv / ofe.log の履歴 / ofe_field.vtk)。
+#                    HDF5 無しのビルドでは「弾かれること」だけ見て skip する
 #   direct F/A     : 複素対称系の直接解法 (LDL^T)。反復解法と一致すること
 #                    (F の構造格子・三角形格子、3 次元 A-φ) + 分解の残差が
 #                    小さいこと + ゲージ固定なしの A を弾くこと
@@ -1374,6 +1377,136 @@ if grep -q "did not converge" "$WORK/ofe.log"; then
 	echo "  *** hysteresis iteration did not converge" >&2
 	status=1
 fi
+
+# 系列の HDF5 出力 (hdf5 = 1)。**HDF5 は任意依存**なので、
+#   ・入っていないビルド : 「hdf5 = 1 が弾かれること」だけを見て残りは skip する
+#     (黙って通すと、書けないのに気づかないまま緑になる)
+#   ・入っているビルド   : 既存の出口 (ofe_sweep.csv / ofe.log / ofe_field.vtk) と
+#     **同じ数字が入っていること**を恒等式にする。系列専用の閉形式は要らないし、
+#     「2 つの出口が食い違う」という一番起きやすい壊れ方をそのまま検出できる
+echo "[hdf5] the time-series output (ofe_series.h5)"
+sed 's/^analysis = /hdf5 = 1\nanalysis = /' "$SRC/parallel_plate.ofe" > "$WORK/h5probe.ofe"
+h5msg=$(cd "$WORK" && "$OFE" -n 2 h5probe.ofe 2>&1 || true)
+case "$h5msg" in
+*"needs a build with HDF5"*)
+	echo "  built without HDF5 : hdf5 = 1 is rejected -> OK (the rest is skipped)"
+	;;
+*)
+	if ! command -v h5dump > /dev/null 2>&1; then
+		echo "  *** the binary supports HDF5 but h5dump is missing; cannot verify" >&2
+		status=1
+	else
+
+	# データセットを 1 行 1 値で取り出す。h5v <名前> [start] [count]
+	#
+	# **桁数は比べる相手に合わせること** ($H5FMT)。csv は %.8e、VTK は %.9e、
+	# ログは %13.6e で書かれているので、同じ倍精度値を同じ桁で丸めれば
+	# 文字列として一致する。取り出しと比較で桁が違うと二重丸めで
+	# 最後の桁がずれ、正しい実装が落ちる (実際に踏んだ)
+	H5FMT="%.8e"
+	h5v() {
+		if [ -n "$2" ]; then
+			h5dump -d "$1" -s "$2" -c "$3" -m "$H5FMT" -y -w 1 -A 0 "$WORK/ofe_series.h5"
+		else
+			h5dump -d "$1" -m "$H5FMT" -y -w 1 -A 0 "$WORK/ofe_series.h5"
+		fi 2>/dev/null | sed -n '/DATA {/,/}/p' | tr -d ' ,' | grep -E '^-?[0-9]' || true
+		# データセットが無いときは空を返す。ここで落とすと set -e で
+		# スクリプトごと死に、どの検査が NG なのか分からなくなる
+	}
+	# 2 つの数値列が (指定した桁で) 一致すること
+	same_nums() {	# same_nums <ラベル> <file a> <file b> <printf 書式>
+		# 空のファイルを awk の NR == FNR に食わせると 2 つ目が 1 つ目として
+		# 読まれ、件数の報告が入れ替わる。先に弾いて診断を正直にする
+		if [ ! -s "$2" ]; then
+			echo "  $1 : NG (no values in the HDF5 file)" >&2
+			status=1
+			return
+		fi
+		if [ ! -s "$3" ]; then
+			echo "  $1 : NG (no reference values)" >&2
+			status=1
+			return
+		fi
+		res=$(awk -v f="${4:-%.8e}" '
+			NR == FNR { a[FNR] = sprintf(f, $1 + 0); na = FNR; next }
+			{ b[FNR] = sprintf(f, $1 + 0); nb = FNR }
+			END { if ((na == 0) || (na != nb)) { printf "NG (%d vs %d values)", na, nb; exit }
+			      for (i = 1; i <= na; i++) if (a[i] != b[i]) {
+			          printf "NG (row %d : %s vs %s)", i, a[i], b[i]; exit }
+			      printf "OK (%d values)", na }' "$2" "$3")
+		echo "  $1 : $res"
+		case "$res" in NG*) status=1 ;; esac
+	}
+
+	# (a) 周波数掃引 : /sweep が ofe_sweep.csv と完全に一致すること
+	sed 's/^analysis = /hdf5 = 1\nanalysis = /' "$SRC/sweep_plate.ofe" > "$WORK/h5sw.ofe"
+	(cd "$WORK" && "$OFE" -n 2 h5sw.ofe > /dev/null)
+	h5v /sweep/frequency > "$WORK/h5f.txt"
+	awk -F, 'NR > 1 { print $1 }' "$WORK/ofe_sweep.csv" > "$WORK/csvf.txt"
+	same_nums "sweep frequency == ofe_sweep.csv" "$WORK/h5f.txt" "$WORK/csvf.txt"
+	# 行列は 1 ポートなので (点数 x 1 x 1)。csv の列と 1 対 1 に並ぶ
+	q=2
+	for m in C G R; do
+		h5v "/sweep/$m" > "$WORK/h5m.txt"
+		awk -F, -v q="$q" 'NR > 1 { print $q }' "$WORK/ofe_sweep.csv" > "$WORK/csvm.txt"
+		same_nums "sweep $m == ofe_sweep.csv" "$WORK/h5m.txt" "$WORK/csvm.txt"
+		q=$((q + 1))
+	done
+
+	# (b) ヒステリシス履歴 : /hysteresis が ofe.log の表と一致すること。
+	# **順序そのものが物理** (B は履歴依存) なので、並べ替えたら別の答えになる
+	sed 's/^analysis = /hdf5 = 1\nanalysis = /' "$SRC/plate_line_ja.ofe" > "$WORK/h5ja.ofe"
+	(cd "$WORK" && "$OFE" -n 2 h5ja.ofe > /dev/null)
+	H5FMT="%.6e"			# ログの表は %13.6e
+	awk '$1 ~ /^[0-9]+$/ && NF == 6 { print $3 }' "$WORK/ofe.log" > "$WORK/logh.txt"
+	awk '$1 ~ /^[0-9]+$/ && NF == 6 { print $4 }' "$WORK/ofe.log" > "$WORK/logb.txt"
+	awk '$1 ~ /^[0-9]+$/ && NF == 6 { print $2 }' "$WORK/ofe.log" > "$WORK/logi.txt"
+	h5v /hysteresis/H > "$WORK/h5h.txt"
+	h5v /hysteresis/B > "$WORK/h5b.txt"
+	h5v /hysteresis/current > "$WORK/h5i.txt"
+	# ログは %13.6e なので 6 桁で比べる (HDF5 側は倍精度そのもの)
+	same_nums "hysteresis H == ofe.log" "$WORK/h5h.txt" "$WORK/logh.txt" "%.6e"
+	same_nums "hysteresis B == ofe.log" "$WORK/h5b.txt" "$WORK/logb.txt" "%.6e"
+	same_nums "hysteresis current == ofe.log" "$WORK/h5i.txt" "$WORK/logi.txt" "%.6e"
+	# 履歴の向きが保たれていること (B は行って戻る。並べ替えると必ず壊れる)
+	res=$(awk 'NR <= 3 { up = ($1 > prev) } { prev = $1 }
+		END { printf "%s", (up ? "OK" : "NG") }' "$WORK/h5b.txt")
+	echo "  hysteresis order is the magnetisation history : $res"
+	case "$res" in NG*) status=1 ;; esac
+
+	# (c) 場のスナップショット。**表皮効果のある F の掃引**を使う:
+	# 一様誘電体の C 掃引では φ が周波数に依らない (ε が一様なら ∇・(ε∇φ)=0 の
+	# 解は ε に依らない) ので、「点ごとに場が違う」ことを検査できない
+	sed -e 's/^analysis = /hdf5 = 1\nfieldout = 1\nanalysis = /' \
+	    -e 's/^frequency = .*/frequencysweep = 1e3 1e5 1e7/' \
+	    "$SRC/plate_line_ac.ofe" > "$WORK/h5ac.ofe"
+	(cd "$WORK" && "$OFE" -n 2 h5ac.ofe > /dev/null)
+	H5FMT="%.8e"
+	h5v /field/axis > "$WORK/h5ax.txt"
+	printf '1e3\n1e5\n1e7\n' > "$WORK/wantax.txt"
+	same_nums "field axis == the swept frequencies" "$WORK/h5ax.txt" "$WORK/wantax.txt"
+	# 最後のスナップショットが ofe_field.vtk (= 最後の点) と一致すること。
+	# 並べ替え (構造格子は x が最内) と点の取り違えはここで落ちる
+	awk '/^SCALARS Az_F_re_port1/ { f = 1; getline; next }
+	     f && /^[A-Z]/ { f = 0 } f && (NF == 1) { print }' "$WORK/ofe_field.vtk" > "$WORK/vtkaz.txt"
+	nn=$(wc -l < "$WORK/vtkaz.txt")
+	H5FMT="%.9e"			# ofe_field.vtk は %.9e
+	h5v /field/Az_F_re_port1 "2,0" "1,$nn" > "$WORK/h5az2.txt"
+	same_nums "last field snapshot == ofe_field.vtk" "$WORK/h5az2.txt" "$WORK/vtkaz.txt" "%.9e"
+	# **点ごとに中身が違うこと。** 全点に同じ配列を書く壊れ方は、点数も
+	# 最後の点との一致も通ってしまうのでこれだけが捕まえる
+	h5v /field/Az_F_re_port1 "0,0" "1,$nn" > "$WORK/h5az0.txt"
+	res=$(paste "$WORK/h5az0.txt" "$WORK/h5az2.txt" | awk '
+		{ d = $1 - $2; if (d < 0) d = -d; if (d > m) m = d
+		  a = ($1 < 0) ? -$1 : $1; if (a > x) x = a }
+		END { if (x <= 0) { printf "NG (the field is identically zero)"; exit }
+		      printf "%s (max|d| / max|v| = %.2f)", ((m > 0.1 * x) ? "OK" : "NG"), m / x }')
+	echo "  the snapshots differ from point to point (skin effect) : $res"
+	case "$res" in NG*) status=1 ;; esac
+
+	fi
+	;;
+esac
 
 if [ "$status" -ne 0 ]; then
 	echo "*** RLC validation FAILED" >&2

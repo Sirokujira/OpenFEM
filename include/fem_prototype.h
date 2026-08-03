@@ -76,6 +76,15 @@ void field_cell_grad(const double *, int, double *);
 void field_free(void);
 int field_write(FILE *);
 
+// hdf5out.c
+int  h5_enabled(void);
+int  h5_open(FILE *);
+void h5_close(FILE *);
+int  h5_add_sweep(double);
+int  h5_add_hysteresis(int, double, double, double, double, int);
+int  h5_add_field(double);
+int  h5_nfield(void);
+
 // crs.c
 void crs_alloc(crs_t *);
 void crs_free(crs_t *);

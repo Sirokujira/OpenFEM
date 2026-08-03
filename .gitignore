@@ -7,6 +7,9 @@
 ofe.log
 rlc.csv
 ofe_circuit.sp
+ofe_field.vtk
+ofe_sweep.csv
+ofe_series.h5
 
 # Python
 __pycache__/
