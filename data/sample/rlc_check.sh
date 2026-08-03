@@ -55,7 +55,8 @@
 #                    (F の構造格子・三角形格子、3 次元 A-φ) + 分解の残差が
 #                    小さいこと + ゲージ固定なしの A を弾くこと
 #   gmsh 4.1       : 同じ形状を Gmsh 2.2 と 4.1 で書いた結果が完全一致すること
-#                    (+ $Entities 欠落とバイナリを弾くこと)
+#                    (+ $Entities 欠落と、ヘッダだけバイナリを名乗る
+#                    ファイルを弾くこと)
 #   plate2d_p2     : 断面 2 次元の 2 次要素 (6 節点三角形)。導体内の Az が厳密に
 #                    2 次なので内部インダクタンスまで厳密に出る (1 次は -0.045%)
 #   plate2d        : 断面 2 次元の三角形格子で M / F を解き、構造格子版と同じ
@@ -686,10 +687,87 @@ awk '/^\$Entities/ { skip = 1 } /^\$EndEntities/ { skip = 0; next } !skip { prin
     "$SRC/box_tet_41.msh" > "$WORK/noent.msh"
 sed 's/^mesh = .*/mesh = noent.msh/' "$SRC/box_tet_41.ofe" > "$WORK/noent.ofe"
 mesh_reject "Gmsh 4.1 without \$Entities" noent.ofe
-# バイナリは弾くこと (読めない形式を黙って誤読しない)
+# ヘッダだけバイナリを名乗って中身が ASCII のファイルは弾くこと。
+# バイナリを読めるようになった今でも、これは黙って誤読してはいけない形
 sed 's/^4.1 0 8$/4.1 1 8/' "$SRC/box_tet_41.msh" > "$WORK/bin.msh"
 sed 's/^mesh = .*/mesh = bin.msh/' "$SRC/box_tet_41.ofe" > "$WORK/bin.ofe"
-mesh_reject "binary Gmsh file" bin.ofe
+mesh_reject "ASCII content with a binary header" bin.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 bin.ofe 2>&1 | grep -q "content is ASCII"); then
+	echo "  *** it was rejected for a different reason than the false header" >&2
+	status=1
+fi
+
+# Gmsh **バイナリ**形式の読み込み。
+#
+# 検証用のファイルは**本物の gmsh に作らせてある** (4.12.1):
+#   gmsh -0 <格子> -o <出力> -format msh22|msh41 [-bin]
+# 自作の書き手と読み手が同じ誤解を共有していると、テストは通るのに実際の
+# ツールが出したファイルで落ちる。形式の検証では出所が本質なので、
+# ここだけは自前で書き出したファイルを使わない。
+#
+# gmsh は変換のたびに節点を振り直すため、比較する ASCII 側も**同じ変換で
+# 出したもの** (box_bin.msh 等) を置いてある。元の mkmesh.py 出力と直接
+# 比べると節点の並びが違い、丸めの順序が変わって一致しない。
+echo "[gmsh binary] the same mesh in ASCII and binary must give identical results"
+for m in "$SRC"/*.msh; do
+	[ -f "$m" ] && cp "$m" "$WORK/"
+done
+bin_same() {	# bin_same <ラベル> <.ofe> <ASCII の .msh> <バイナリの .msh>
+	# **本当にバイナリかを確かめる。** ASCII に差し替えても一致検査は通るので、
+	# それだけでは「バイナリを読めている」ことの証拠にならない
+	if ! head -c 24 "$WORK/$4" | tr '\n' ' ' | grep -qa 'MeshFormat [0-9.]* 1 8'; then
+		echo "  $1 : $4 is not a binary Gmsh file -> NG" >&2
+		status=1
+		return
+	fi
+	sed "s/^mesh = .*/mesh = $3/" "$SRC/$2" > "$WORK/bm_a.ofe"
+	sed "s/^mesh = .*/mesh = $4/" "$SRC/$2" > "$WORK/bm_b.ofe"
+	if ! (cd "$WORK" && "$OFE" -n 2 bm_a.ofe > /dev/null && "$OFE_POST" > /dev/null); then
+		echo "  $1 : the ASCII run failed -> NG" >&2
+		status=1
+		return
+	fi
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/bm_a.csv"
+	if ! (cd "$WORK" && "$OFE" -n 2 bm_b.ofe > /dev/null && "$OFE_POST" > /dev/null); then
+		echo "  $1 : the binary run failed -> NG" >&2
+		status=1
+		return
+	fi
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/bm_b.csv"
+	if cmp -s "$WORK/bm_a.csv" "$WORK/bm_b.csv"; then
+		echo "  $1 : identical -> OK"
+	else
+		echo "  $1 : differ -> NG" >&2
+		diff "$WORK/bm_a.csv" "$WORK/bm_b.csv" | head -4 >&2
+		status=1
+	fi
+}
+# 3 次元四面体 / 断面 2 次元三角形 / 2 次要素の 3 種を、2.2 と 4.1 の両方で。
+# 2 次要素を入れてあるのは、バイナリでは節点数が型から決まる (10 / 6) ためで、
+# 型ごとの節点数表を間違えるとここでずれる
+bin_same "3-D tetrahedra, binary 2.2" box_tet.ofe box_bin.msh box_bin_22.msh
+bin_same "3-D tetrahedra, binary 4.1" box_tet.ofe box_bin.msh box_bin_41.msh
+bin_same "2-D triangles, binary 2.2" plate2d_dc.ofe plate2d_bin.msh plate2d_bin_22.msh
+bin_same "2-D triangles, binary 4.1" plate2d_dc.ofe plate2d_bin.msh plate2d_bin_41.msh
+bin_same "order-2 tetrahedra, binary 2.2" box_p2.ofe box_p2_bin.msh box_p2_bin_22.msh
+bin_same "order-2 tetrahedra, binary 4.1" box_p2.ofe box_p2_bin.msh box_p2_bin_41.msh
+
+# 逆エンディアンのファイルは**読み違えずに落ちること**。バイト入れ替えは
+# 手元で検証できないので実装せず、はっきり断る方を選んでいる
+sed 's/^mesh = .*/mesh = bin_swapped.msh/' "$SRC/box_tet.ofe" > "$WORK/binsw.ofe"
+mesh_reject "binary Gmsh with the opposite byte order" binsw.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 binsw.ofe 2>&1 | grep -q "opposite byte order"); then
+	echo "  *** it was rejected for a different reason than the byte order" >&2
+	status=1
+fi
+# **知らない要素型はバイナリでは読み飛ばせない** (1 要素 1 行の ASCII と違い、
+# 節点数が分からないと何バイト進めばよいか決まらない)。黙って誤読しないこと
+sed 's/^mesh = .*/mesh = bin_unknown_type.msh/' "$SRC/box_tet.ofe" > "$WORK/binut.ofe"
+mesh_reject "binary Gmsh with an unknown element type" binut.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 binut.ofe 2>&1 | grep -q "unknown element type"); then
+	echo "  *** it was rejected for a different reason than the element type" >&2
+	status=1
+fi
 
 # 断面 2 次元の 2 次要素 (6 節点三角形)。**導体内の Az は電流密度が一様なとき
 # 厳密に 2 次**なので、内部インダクタンス 2t/3 を P2 は厳密に表せる。
