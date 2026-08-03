@@ -272,6 +272,7 @@ int input_data(FILE *fp)
 	GaugeTree = 0;
 	NInputWarn = 0;
 	FieldOut = 0;
+	Hdf5Out = 0;
 	NFieldN = 0;
 	NFieldC = 0;
 
@@ -818,6 +819,18 @@ int input_data(FILE *fp)
 			}
 			FieldOut = (atoi(token[2]) != 0);
 		}
+		else if (!strcmp(strkey, "hdf5")) {
+			// hdf5 = 0|1  : 掃引・履歴の系列を ofe_series.h5 に書く
+			//   周波数掃引の R/L/C/G、電流掃引 (J-A) の履歴、各点の場を
+			//   1 つの自己記述的なファイルにまとめる (表示側で使う)。
+			//   既定 0 で従来と完全に一致する。HDF5 は任意依存なので、
+			//   -DWITH_HDF5=ON でビルドしていなければ下で入力エラーにする
+			if (nval < 1) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			Hdf5Out = (atoi(token[2]) != 0);
+		}
 		else if (!strcmp(strkey, "awall")) {
 			// awall = <physical_tag>  : その面で A の接線成分を 0 に固定する
 			//   B・n = 0 (磁束が面を貫かない) 対称面 / 磁気遮蔽。analysis = A で使う。
@@ -1169,6 +1182,15 @@ int input_data(FILE *fp)
 	}
 
 	if (material_freq()) return 1;
+
+	// HDF5 は任意依存。無いビルドで hdf5 = 1 を**黙って無視しない**
+	// (書いたつもりでファイルが無いのが一番困る)。
+	// この検査は非構造格子の早期 return より前に置くこと (格子の種類に依らない)
+	if (Hdf5Out && !h5_enabled()) {
+		printf("%s\n", "*** hdf5 = 1 needs a build with HDF5 "
+			"(cmake -DWITH_HDF5=ON); this binary was built without it");
+		return 1;
+	}
 
 	// 非構造格子のときは xmesh 等も conductor も要らない
 

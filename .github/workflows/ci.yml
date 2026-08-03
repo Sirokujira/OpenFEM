@@ -68,6 +68,49 @@ jobs:
             /tmp/rlc-check/*.csv
           if-no-files-found: ignore
 
+  # HDF5 を入れたビルド (任意依存)。**既定の 3 ジョブは HDF5 無しのまま**で、
+  # 「外部ライブラリ依存は無い」という性質を守る。このジョブだけが
+  # ofe_series.h5 を書く経路と、h5dump による検証を通す。
+  # 既定ジョブ側は逆に「hdf5 = 1 が弾かれること」を検査している。
+  build-linux-hdf5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install HDF5 (library + h5dump)
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev hdf5-tools
+
+      - name: Configure (WITH_HDF5=ON)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DWITH_HDF5=ON
+
+      - name: Build ofe / ofe_post
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Smoke test — the series file is actually written
+        run: |
+          mkdir -p /tmp/h5smoke
+          sed 's/^analysis = /hdf5 = 1\nfieldout = 1\nanalysis = /' \
+            data/sample/sweep_plate.ofe > /tmp/h5smoke/sweep.ofe
+          cd /tmp/h5smoke
+          "$GITHUB_WORKSPACE/bin/ofe" -n 2 sweep.ofe
+          grep -q "normal end" ofe.log
+          test -s ofe_series.h5
+          h5ls -r ofe_series.h5
+
+      - name: Validation test — RLGC vs analytic (+ the HDF5 series)
+        run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-linux-hdf5
+          path: |
+            /tmp/h5smoke/*.log
+            /tmp/rlc-check/*.log
+          if-no-files-found: ignore
+
   # macOS (Apple Silicon)。AppleClang は OpenMP を同梱しないため
   # Homebrew の libomp を明示指定する。
   build-macos:

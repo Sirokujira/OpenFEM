@@ -43,6 +43,7 @@ extern "C" {
 #define FN_spice "ofe_circuit.sp"
 #define FN_field "ofe_field.vtk"
 #define FN_sweep "ofe_sweep.csv"
+#define FN_series "ofe_series.h5"
 
 // 数学・物理定数 (OpenFDTD の ofd.h と同じ定義)
 #define PI     (4.0 * atan(1.0))
@@ -259,6 +260,10 @@ EXTERN char FieldNName[MAXFIELD][64];
 EXTERN double *FieldN[MAXFIELD];	// [num_node()] 節点スカラー
 EXTERN char FieldCName[MAXFIELD][64];
 EXTERN double *FieldC[MAXFIELD];	// [3*num_cell()] 要素ベクトル
+
+// 系列の出力 (hdf5 キー)。掃引・履歴を 1 点ずつ ofe_series.h5 に追記する。
+// WITH_HDF5=OFF でビルドすると 1 を指定した時点で入力エラーになる (黙って無視しない)
+EXTERN int Hdf5Out;			// 1 : ofe_series.h5 を書く (既定 0)
 
 // 入力解釈で出た警告 (ofe.log を開く前に走るので溜めておき、後でログにも出す)
 #define MAXINWARN (16)

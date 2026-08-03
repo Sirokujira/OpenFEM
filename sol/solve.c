@@ -355,6 +355,8 @@ static int solve_magnetostatic(FILE *fp_log)
 			for (int is = 0; is < NSweep; is++) {
 				const double cur = Sweep[is];
 				const double fac = cur / Curr;
+				// 前のステップの場を捨てる (最後の 1 点だけが後で VTK に残る)
+				field_free();
 				for (int i = 0; i < n; i++) {
 					rhs[i] = (fix[i] ? 0 : (fac * b[0][i]));
 				}
@@ -439,6 +441,16 @@ static int solve_magnetostatic(FILE *fp_log)
 				fprintf(fp_log, "  %5d %13.6e %13.6e %13.6e %13.6e %6d\n",
 					is + 1, cur, hmean, bmean, lval, it);
 				fflush(fp_log);
+
+				// 履歴を系列に追記する。**順序そのものが物理**なので
+				// (B は履歴依存)、読み手が並べ替えないよう属性にも書いてある
+				ierr |= h5_add_hysteresis(is + 1, cur, hmean, bmean, lval, it);
+				if (FieldOut) {
+					field_add_node("Az", az);
+					field_add_grad("B", az, 1);
+					ierr |= h5_add_field(cur);
+				}
+				if (ierr) break;
 			}
 
 			free(res);
@@ -1056,9 +1068,21 @@ int solve(FILE *fp_log)
 {
 	int ierr = 0;
 
+	// 系列の出力 (hdf5 = 1)。掃引しない実行でも 1 点の系列として書く
+	// (ヒステリシスの履歴は solve_one() の中で追記されるので、ここで開けておく)
+	if (h5_open(fp_log)) return 1;
+
 	if (NFreqSweep < 1) {
 		ierr = solve_one(fp_log);
-		if (!ierr) ierr |= field_write(fp_log);
+		if (!ierr) {
+			ierr |= h5_add_sweep(Freq);
+			// 電流掃引 (ヒステリシス) は既にステップ毎に追記済み。
+			// ここで足すと最後のステップが二重に入るので、まだ 1 点も
+			// 書いていないときだけ「1 点の系列」として書く
+			if (h5_nfield() == 0) ierr |= h5_add_field(Freq);
+			ierr |= field_write(fp_log);
+		}
+		h5_close(fp_log);
 		field_free();
 		return ierr;
 	}
@@ -1066,6 +1090,7 @@ int solve(FILE *fp_log)
 	FILE *fp = fopen(FN_sweep, "w");
 	if (fp == NULL) {
 		fprintf(fp_log, "*** %s open error\n", FN_sweep);
+		h5_close(NULL);
 		return 1;
 	}
 	fprintf(fp_log, "\n=== frequency sweep (%d points) ===\n", NFreqSweep);
@@ -1100,6 +1125,12 @@ int solve(FILE *fp_log)
 		}
 		sweep_row(fp, kcol, fp_log);
 		fflush(fp);
+
+		// **場はこの時点でだけ手元にある** (次の点の頭で field_free() される)。
+		// 溜めずにその場で追記するので、メモリの使い方は従来と変わらない
+		ierr |= h5_add_sweep(Freq);
+		ierr |= h5_add_field(Freq);
+		if (ierr) break;
 	}
 	fclose(fp);
 
@@ -1108,6 +1139,7 @@ int solve(FILE *fp_log)
 			FN_sweep, NFreqSweep);
 		ierr |= field_write(fp_log);
 	}
+	h5_close(fp_log);
 	field_free();
 
 	return ierr;

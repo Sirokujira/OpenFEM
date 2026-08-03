@@ -19,6 +19,18 @@ else()
     set(MATH_LIB m)
 endif()
 
+# ── HDF5 (任意) ──────────────────────────────────────────────────────
+# 掃引・履歴の系列を ofe_series.h5 に書く経路でだけ使う。**既定は OFF**:
+# このリポジトリの「外部ライブラリ依存は無い / 素の CMake で 3 OS ビルドできる」
+# 性質を既定のまま保つため。OFF のときは hdf5.h を include すらしないので、
+# HDF5 が無い環境のビルドは一切変わらない (`hdf5 = 1` は入力エラーになる)。
+option(WITH_HDF5 "Enable the HDF5 time-series output (ofe_series.h5)" OFF)
+if(WITH_HDF5)
+    # HDF5::HDF5 ターゲットは CMake 3.19 以降なので、互換のため変数を使う
+    find_package(HDF5 REQUIRED COMPONENTS C)
+    message(STATUS "HDF5 enabled (${HDF5_C_LIBRARIES})")
+endif()
+
 option(WITH_OPENMP "Enable OpenMP support" ON)
 if(WITH_OPENMP)
     find_package(OpenMP)
@@ -52,12 +64,18 @@ set(SOL_SOURCES
     sol/edge.c
     sol/eddy3d.c
     sol/fieldout.c
+    sol/hdf5out.c
     sol/outputRLC.c
     sol/utils.c
 )
 
 add_executable(ofe ${SOL_SOURCES})
 target_link_libraries(ofe PRIVATE ${MATH_LIB})
+if(WITH_HDF5)
+    target_include_directories(ofe PRIVATE ${HDF5_C_INCLUDE_DIRS})
+    target_link_libraries(ofe PRIVATE ${HDF5_C_LIBRARIES})
+    target_compile_definitions(ofe PRIVATE OFE_HDF5)
+endif()
 if(WITH_OPENMP AND OpenMP_C_FOUND)
     target_link_libraries(ofe PRIVATE OpenMP::OpenMP_C)
 endif()
