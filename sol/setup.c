@@ -193,9 +193,9 @@ static int setup_unstruct(void)
 	// 黙って誤答を出すより弾く
 	// 辺要素 (Whitney) も節点要素の自己検証も四面体の形状関数に基づく。
 	// 六面体格子を渡されたら黙って誤答を出さずに弾く
-	if ((MeshElem == MESHELEM_HEX) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
+	if ((MeshElem != MESHELEM_TET) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
 		printf("%s\n", "*** analysis E / A (edge elements) need a tetrahedral mesh "
-			"(this mesh has hexahedra)");
+			"(this mesh has hexahedra or prisms)");
 		return 1;
 	}
 	if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
@@ -215,6 +215,16 @@ static int setup_unstruct(void)
 				if (HexTag[e] == RegionTag[q]) m = RegionMat[q];
 			}
 			HexMat[e] = (unsigned char)m;
+		}
+	}
+	else if (MeshElem == MESHELEM_PRISM) {
+		PrismMat = (unsigned char *)malloc((size_t)NPrism * sizeof(unsigned char));
+		for (int e = 0; e < NPrism; e++) {
+			int m = 0;
+			for (int q = 0; q < NRegion; q++) {
+				if (PrismTag[e] == RegionTag[q]) m = RegionMat[q];
+			}
+			PrismMat[e] = (unsigned char)m;
 		}
 	}
 	else {

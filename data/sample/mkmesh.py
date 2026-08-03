@@ -163,6 +163,66 @@ def write_msh_hex(path, nodes, hexes, quads):
         f.write("$EndElements\n")
 
 
+def write_msh_cells(path, nodes, cells):
+    """任意の要素型を Gmsh ASCII 2.2 で書く。cells = [(物理タグ, Gmsh 型, 節点)]
+
+    型は 2 = 三角形、3 = 四角形、5 = 六面体、6 = 角柱。局所節点の並びは
+    Gmsh の規約に合わせること (VTK も同じ並びなので書き出しでの入れ替えは不要)。
+    """
+    with open(path, "w") as f:
+        f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n")
+        f.write("$Nodes\n%d\n" % len(nodes))
+        for i, (x, y, z) in enumerate(nodes):
+            f.write("%d %.16g %.16g %.16g\n" % (i + 1, x, y, z))
+        f.write("$EndNodes\n")
+        f.write("$Elements\n%d\n" % len(cells))
+        for e, (tag, ty, n) in enumerate(cells):
+            f.write("%d %d 2 %d %d %s\n" % (e + 1, ty, tag, tag,
+                                             " ".join(str(v + 1) for v in n)))
+        f.write("$EndElements\n")
+
+
+def make_box_prism_warp(nx=3, ny=3, nz=3, lx=1e-3, ly=1e-3, lz=0.2e-3, seed=20260803):
+    """**ゆがんだ**角柱格子 (等パラメトリック写像の自己検証用)
+
+    四角形を対角線で 2 つの三角形に割って z に押し出す。内部節点だけを乱数で
+    動かすので、**上下の三角形が平行移動の関係でなくなる** — これがないと
+    ヤコビアンが ζ に依らなくなり、「J を 1 回だけ評価する」誤りが検出できない。
+
+    物理タグ : 1 = 体積、10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
+    """
+    rnd = random.Random(seed)
+    nodes = []
+    idx = {}
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            for k in range(nz + 1):
+                x, y, z = lx * i / nx, ly * j / ny, lz * k / nz
+                if 0 < i < nx: x += 0.30 * (rnd.random() - 0.5) * lx / nx
+                if 0 < j < ny: y += 0.30 * (rnd.random() - 0.5) * ly / ny
+                if 0 < k < nz: z += 0.30 * (rnd.random() - 0.5) * lz / nz
+                idx[(i, j, k)] = len(nodes)
+                nodes.append((x, y, z))
+
+    cells = []
+    # 下面の三角形の分割 : (i,j)-(i+1,j)-(i+1,j+1) と (i,j)-(i+1,j+1)-(i,j+1)
+    tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                for tri in tris:
+                    b = [idx[(i + a, j + c, k)] for a, c in tri]
+                    t = [idx[(i + a, j + c, k + 1)] for a, c in tri]
+                    cells.append((1, 6, b + t))
+    for i in range(nx):
+        for j in range(ny):
+            for k, tag in ((0, 10), (nz, 11)):
+                for tri in tris:
+                    cells.append((tag, 2, [idx[(i + a, j + c, k)] for a, c in tri]))
+
+    return nodes, cells
+
+
 def make_coax_hex(nr=8, nt=32, ra=0.5e-3, rb=1.5e-3, lz=0.1e-3):
     """同軸線路の円環を**六面体**で切る : C' = 2 pi eps / ln(b/a)
 
@@ -614,6 +674,11 @@ def main():
         nodes, tets, tris = make_bar_air(**opt)
     elif kind == "plate2d":
         nodes, tets, tris = make_plate2d(**opt)
+    elif kind == "box_prism_warp":
+        nodes, cells = make_box_prism_warp(**opt)
+        write_msh_cells(path, nodes, cells)
+        print("%s : prisms, %d nodes, %d cells" % (path, len(nodes), len(cells)))
+        return 0
     elif kind in ("coax_hex", "box_hex_warp"):
         nodes, hexes, quads = (make_coax_hex(**opt) if kind == "coax_hex"
                                else make_box_hex_warp(**opt))
