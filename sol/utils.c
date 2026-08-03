@@ -47,7 +47,12 @@ void monitor2(FILE *fp, int nthread)
 	fprintf(fp, "%s", ctime(&now));
 	fprintf(fp, "Title = %s\n", Title);
 	fprintf(fp, "Threads = %d\n", nthread);
-	if (MeshMode) {
+	if (MeshMode && (MeshElem == MESHELEM_HEX)) {
+		fprintf(fp, "Mesh = %s (unstructured, 8-node trilinear hexahedra)\n", MeshFile);
+		fprintf(fp, "Nodes = %lld, Hexahedra = %d, Quadrilaterals = %d\n",
+			(long long)nnode, NHex, NQuad);
+	}
+	else if (MeshMode) {
 		fprintf(fp, "Mesh = %s (unstructured, %s tetrahedra)\n", MeshFile,
 			((TetOrder >= 2) ? "10-node quadratic" : "4-node linear"));
 		fprintf(fp, "Nodes = %lld, Tetrahedra = %d, Triangles = %d\n",

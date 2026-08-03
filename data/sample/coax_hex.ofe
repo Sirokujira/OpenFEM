@@ -1,0 +1,31 @@
+OpenFEM 1 0
+title = coaxial line on a hexahedral mesh (curved, non-affine elements)
+#
+# 円環を (r, theta) で切って z に 1 層押し出した**六面体**格子。
+# 要素は台形なので**アフィンでない** (要素内でヤコビアンが変化する)。
+#
+#   python3 mkmesh.py coax_hex coax_hex.msh
+#
+#   C' = 2*pi*eps0*epsr / ln(b/a) = 1.063417e-10 [F/m]   (a=0.5mm, b=1.5mm, epsr=2.1)
+#   L' = mu0/(2*pi) * ln(b/a)     = 2.197225e-07 [H/m]
+#
+# 半径方向 8 分割 (対数等分)、周方向 32 分割で +0.48% (円を内接多角形で
+# 近似する分)。四面体版 (coax_tet、周方向 48 分割) の +0.18% と同じ性質の誤差。
+#
+# **この形状では等パラメトリック写像の検証にはならない。** 回転対称なので
+# 解が theta に依らず、要素行列が 3% 違っても半径方向の成分しか効かないため
+# 相殺する (実測: ヤコビアンを要素中心で 1 回だけ評価する誤りが 1 桁も動かさ
+# なかった)。写像そのものは nodal_test_hex (ゆがんだ格子) で検証する。
+#
+# 物理タグ : 1 = 体積、10 = 外側 r=b (基準電極)、11 = 内側 r=a (ポート 1)
+#
+mesh = coax_hex.msh
+material = 2.1 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+tline = Z
+analysis = C L
+solver = 50000 2000 1e-13
+end

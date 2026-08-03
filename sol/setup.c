@@ -191,6 +191,13 @@ static int setup_unstruct(void)
 	// 辺要素 (E / A) は 1 次四面体の Whitney 形状関数に基づくので、2 次格子を
 	// 渡されると辺上の中間節点がどの要素にも現れず、節点ブロックが特異になる。
 	// 黙って誤答を出すより弾く
+	// 辺要素 (Whitney) も節点要素の自己検証も四面体の形状関数に基づく。
+	// 六面体格子を渡されたら黙って誤答を出さずに弾く
+	if ((MeshElem == MESHELEM_HEX) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
+		printf("%s\n", "*** analysis E / A (edge elements) need a tetrahedral mesh "
+			"(this mesh has hexahedra)");
+		return 1;
+	}
 	if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
 		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh "
 			"(this mesh has 10-node tetrahedra)");
@@ -200,13 +207,25 @@ static int setup_unstruct(void)
 	if (MeshDim == 2) return setup_tri2d();
 
 	// 物理タグ -> 材料番号
-	TetMat = (unsigned char *)malloc((size_t)NTet * sizeof(unsigned char));
-	for (int e = 0; e < NTet; e++) {
-		int m = 0;
-		for (int q = 0; q < NRegion; q++) {
-			if (TetTag[e] == RegionTag[q]) m = RegionMat[q];
+	if (MeshElem == MESHELEM_HEX) {
+		HexMat = (unsigned char *)malloc((size_t)NHex * sizeof(unsigned char));
+		for (int e = 0; e < NHex; e++) {
+			int m = 0;
+			for (int q = 0; q < NRegion; q++) {
+				if (HexTag[e] == RegionTag[q]) m = RegionMat[q];
+			}
+			HexMat[e] = (unsigned char)m;
 		}
-		TetMat[e] = (unsigned char)m;
+	}
+	else {
+		TetMat = (unsigned char *)malloc((size_t)NTet * sizeof(unsigned char));
+		for (int e = 0; e < NTet; e++) {
+			int m = 0;
+			for (int q = 0; q < NRegion; q++) {
+				if (TetTag[e] == RegionTag[q]) m = RegionMat[q];
+			}
+			TetMat[e] = (unsigned char)m;
+		}
 	}
 
 	// 物理タグ -> 電極 (三角形の節点を Dirichlet にする)
@@ -214,6 +233,15 @@ static int setup_unstruct(void)
 	// 同じ値を二度塗るだけになり無害
 	NodeConductor = (signed char *)malloc((size_t)NNode * sizeof(signed char));
 	memset(NodeConductor, -1, (size_t)NNode * sizeof(signed char));
+	// 六面体格子の境界面は四角形になる
+	for (int t = 0; t < NQuad; t++) {
+		for (int q = 0; q < NElectrode; q++) {
+			if (QuadTag[t] != ElecTag[q]) continue;
+			for (int l = 0; l < 4; l++) {
+				NodeConductor[Quad[(t * 4) + l]] = (signed char)ElecCond[q];
+			}
+		}
+	}
 	for (int t = 0; t < NTri; t++) {
 		for (int q = 0; q < NElectrode; q++) {
 			if (TriTag[t] != ElecTag[q]) continue;
