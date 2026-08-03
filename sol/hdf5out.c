@@ -241,29 +241,64 @@ static int write_mesh(void)
 
 		// 要素の節点表。並びは Gmsh のまま (VTK 用の入れ替えはしない) なので、
 		// 属性に「Gmsh の並び」と明記しておく
+		/*
+		要素の節点表。種別が混ざると要素あたりの節点数が違うので、
+		**一様なときは [nc][nen] の長方形、混在のときは平坦 + オフセット表**
+		にする。前者は既存の読み手をそのまま使えるので形を変えない
+		(`nodes_per_cell` 属性の有無で見分けられる)。
+		*/
 		const int p2 = (TetOrder >= 2);
-		const int hex = (MeshElem == MESHELEM_HEX);
-		const int prz = (MeshElem == MESHELEM_PRISM);
-		const int nen = (hex ? 8 : prz ? 6
-		               : ((MeshDim == 2) ? (p2 ? 6 : 3) : (p2 ? 10 : 4)));
-		int32_t *cl = (int32_t *)malloc((size_t)nc * nen * sizeof(int32_t));
-		for (int64_t e = 0; e < nc; e++) {
-			int32_t nd[10];
-			if      (hex)          { for (int l = 0; l < 8; l++) nd[l] = Hex[(e * 8) + l]; }
-			else if (prz)          { for (int l = 0; l < 6; l++) nd[l] = Prism[(e * 6) + l]; }
-			else if (MeshDim == 2) tri_nodes((int)e, nd);
-			else                   tet_nodes((int)e, nd);
-			for (int l = 0; l < nen; l++) cl[(e * nen) + l] = nd[l];
+		int nen = 0, uniform = 1;
+		if (MeshDim == 2) {
+			nen = (p2 ? 6 : 3);
 		}
-		d[0] = (hsize_t)nc;
-		d[1] = (hsize_t)nen;
-		ierr |= write_once(g, "cells", H5T_NATIVE_INT32, cl, 2, d, NULL);
-		free(cl);
+		else {
+			for (int64_t e = 0; e < nc; e++) {
+				int32_t nd[10];
+				const int k = elem3d_nodes((int)e, nd);
+				if (e == 0) nen = k;
+				else if (k != nen) { uniform = 0; break; }
+			}
+		}
+		if (uniform) {
+			int32_t *cl = (int32_t *)malloc((size_t)nc * nen * sizeof(int32_t));
+			for (int64_t e = 0; e < nc; e++) {
+				int32_t nd[10];
+				if (MeshDim == 2) tri_nodes((int)e, nd);
+				else              elem3d_nodes((int)e, nd);
+				for (int l = 0; l < nen; l++) cl[(e * nen) + l] = nd[l];
+			}
+			d[0] = (hsize_t)nc;
+			d[1] = (hsize_t)nen;
+			ierr |= write_once(g, "cells", H5T_NATIVE_INT32, cl, 2, d, NULL);
+			free(cl);
+			attr_int(g, "nodes_per_cell", &nen, 1);
+		}
+		else {
+			int64_t tot = 0;
+			for (int64_t e = 0; e < nc; e++) {
+				int32_t nd[10];
+				tot += elem3d_nodes((int)e, nd);
+			}
+			int32_t *cl = (int32_t *)malloc((size_t)tot * sizeof(int32_t));
+			int32_t *off = (int32_t *)malloc(((size_t)nc + 1) * sizeof(int32_t));
+			int64_t p = 0;
+			for (int64_t e = 0; e < nc; e++) {
+				int32_t nd[10];
+				const int k = elem3d_nodes((int)e, nd);
+				off[e] = (int32_t)p;
+				for (int l = 0; l < k; l++) cl[p++] = nd[l];
+			}
+			off[nc] = (int32_t)p;
+			d[0] = (hsize_t)tot;
+			ierr |= write_once(g, "cells", H5T_NATIVE_INT32, cl, 1, d, NULL);
+			d[0] = (hsize_t)(nc + 1);
+			ierr |= write_once(g, "cell_offset", H5T_NATIVE_INT32, off, 1, d, NULL);
+			free(cl);
+			free(off);
+			attr_str(g, "cell_layout", "flat + cell_offset (the element types are mixed)");
+		}
 		attr_str(g, "cell_node_order", "Gmsh");
-		{
-			const int v = nen;
-			attr_int(g, "nodes_per_cell", &v, 1);
-		}
 	}
 	else {
 		attr_str(g, "type", "rectilinear");
@@ -287,14 +322,8 @@ static int write_mesh(void)
 		}
 		havecond = 1;
 	}
-	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
-		for (int64_t e = 0; e < nc; e++) m[e] = (int32_t)HexMat[e];
-	}
-	else if (MeshMode && (MeshElem == MESHELEM_PRISM)) {
-		for (int64_t e = 0; e < nc; e++) m[e] = (int32_t)PrismMat[e];
-	}
 	else if (MeshMode) {
-		for (int64_t e = 0; e < nc; e++) m[e] = (int32_t)TetMat[e];
+		for (int64_t e = 0; e < nc; e++) m[e] = (int32_t)elem3d_mat((int)e);
 	}
 	else {
 		int64_t p = 0;

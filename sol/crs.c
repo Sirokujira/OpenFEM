@@ -44,9 +44,7 @@ void crs_alloc(crs_t *A)
 			crs_alloc_tri(A);
 			return;
 		}
-		if      (MeshElem == MESHELEM_HEX)   crs_alloc_hex(A);
-		else if (MeshElem == MESHELEM_PRISM) crs_alloc_prism(A);
-		else                                 crs_alloc_tet(A);
+		crs_alloc_elem3d(A);		// 四面体・六面体・角柱 (混在可)
 		return;
 	}
 

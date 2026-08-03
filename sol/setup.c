@@ -207,7 +207,7 @@ static int setup_unstruct(void)
 	if (MeshDim == 2) return setup_tri2d();
 
 	// 物理タグ -> 材料番号
-	if (MeshElem == MESHELEM_HEX) {
+	if (NHex > 0) {
 		HexMat = (unsigned char *)malloc((size_t)NHex * sizeof(unsigned char));
 		for (int e = 0; e < NHex; e++) {
 			int m = 0;
@@ -217,7 +217,7 @@ static int setup_unstruct(void)
 			HexMat[e] = (unsigned char)m;
 		}
 	}
-	else if (MeshElem == MESHELEM_PRISM) {
+	if (NPrism > 0) {
 		PrismMat = (unsigned char *)malloc((size_t)NPrism * sizeof(unsigned char));
 		for (int e = 0; e < NPrism; e++) {
 			int m = 0;
@@ -227,7 +227,7 @@ static int setup_unstruct(void)
 			PrismMat[e] = (unsigned char)m;
 		}
 	}
-	else {
+	if (NTet > 0) {
 		TetMat = (unsigned char *)malloc((size_t)NTet * sizeof(unsigned char));
 		for (int e = 0; e < NTet; e++) {
 			int m = 0;

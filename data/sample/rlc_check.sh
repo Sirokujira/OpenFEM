@@ -748,8 +748,8 @@ awk '/^\$Elements/ { print; getline; print $1 + 1
     "$SRC/box_hex.msh" > "$WORK/mix.msh"
 sed 's/^mesh = .*/mesh = mix.msh/' "$SRC/box_hex.ofe" > "$WORK/mix.ofe"
 mesh_reject "a mesh mixing tetrahedra and hexahedra" mix.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 mix.ofe 2>&1 | grep -q "are mixed"); then
-	echo "  *** it was rejected for a different reason than the mixing" >&2
+if ! (cd "$WORK" && "$OFE" -n 2 mix.ofe 2>&1 | grep -q "conformingly"); then
+	echo "  *** it was rejected for a different reason than the conformity" >&2
 	status=1
 fi
 # analysis は 1 トークン 1 文字。"CL" と続けて書くと先頭しか読まれないので弾く
@@ -795,16 +795,29 @@ res=$(awk '/linear field/ { for (i = 1; i <= NF; i++) if ($i == "error") e = $(i
 	             e, v, w }' "$WORK/ofe.log")
 echo "  distorted mesh : the linear-field identity holds : $res"
 case "$res" in NG*) status=1 ;; esac
-# 角柱と四面体の混在も弾くこと
-awk '/^\$Elements/ { print; getline; print $1 + 1
-                     print "9999 4 2 1 1 1 2 3 4"; next } { print }' \
-    "$SRC/box_prism.msh" > "$WORK/pmix.msh"
-sed 's/^mesh = .*/mesh = pmix.msh/' "$SRC/box_prism.ofe" > "$WORK/pmix.ofe"
-mesh_reject "a mesh mixing prisms and tetrahedra" pmix.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 pmix.ofe 2>&1 | grep -q "are mixed"); then
-	echo "  *** it was rejected for a different reason than the mixing" >&2
-	status=1
-fi
+
+# 要素種別の混在 (角柱 + 四面体)。境界層を角柱、内部を四面体にした形で、
+# 面は三角形どうしなので**適合する**。六面体と四面体の直接の隣接だけは
+# 面上の解が食い違うので弾く (上の [hexahedra] 節で検査している)
+echo "[mixed] mixing element types in one mesh"
+run_case box_mixed
+# 角柱側 er = 4、四面体側 er = 2 の直列。材料を種別ごとに変えてあるので、
+# 要素番号 -> 材料の対応が種別の境目でずれると必ず落ちる
+compare "C (prism er=4 + tet er=2) [F]" "$(value_of C)" 1.180558376e-13 1e-8
+# 混在で一番危ないのは「種別をまたぐ面で節点が共有されない」形。
+# 線形場の恒等式はそれが起きると破れるので、そこを見る
+cp "$SRC/nodal_test_mixed.ofe" "$WORK/"
+(cd "$WORK" && "$OFE" -n 2 nodal_test_mixed.ofe > /dev/null)
+res=$(awk '/linear field/ { for (i = 1; i <= NF; i++) if ($i == "error") e = $(i+2) }
+	/^Nodes =/ { for (i = 1; i <= NF; i++) {
+	                 if ($i == "Tetrahedra") nt = $(i+2)+0
+	                 if ($i == "Prisms") np = $(i+2)+0 } }
+	END { if (e == "") { printf "NG (no report)"; exit }
+	      printf "%s (%s, %d tets + %d prisms)",
+	             (((e + 0) < 1e-12) && (nt > 0) && (np > 0)) ? "OK" : "NG", e, nt, np }' \
+	"$WORK/ofe.log")
+echo "  the linear-field identity holds across the interface : $res"
+case "$res" in NG*) status=1 ;; esac
 
 # Gmsh **バイナリ**形式の読み込み。
 #

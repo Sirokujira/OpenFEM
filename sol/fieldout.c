@@ -27,10 +27,7 @@ int64_t num_cell(void)
 	if (MeshMode) {
 		if (MeshDim == 2) return (int64_t)NTri;
 
-		if (MeshElem == MESHELEM_HEX)   return (int64_t)NHex;
-		if (MeshElem == MESHELEM_PRISM) return (int64_t)NPrism;
-
-		return (int64_t)NTet;
+		return (int64_t)elem3d_count();		// 四面体 -> 六面体 -> 角柱 の連番
 	}
 
 	return ((int64_t)Nx * Ny * Nz);
@@ -122,43 +119,42 @@ void field_cell_grad(const double *u, int kind, double *v)
 			for (int c = 0; c < 3; c++) v[(e * 3) + c] = -d[c];
 		}
 	}
-	else if (MeshMode && (MeshElem == MESHELEM_PRISM)) {
-		for (int e = 0; e < NPrism; e++) {
-			double gn[6][3], d[3] = {0, 0, 0};
-			if (!prism_grad_center(e, gn)) {
-				const int32_t *nd = &Prism[e * 6];
-				for (int a = 0; a < 6; a++) {
-					const double ua = u[nd[a]];
-					for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
-				}
-			}
-			for (int c = 0; c < 3; c++) v[(e * 3) + c] = -d[c];
-		}
-	}
-	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
-		// 六面体は要素中心で等パラメトリック写像の勾配を評価する
-		for (int e = 0; e < NHex; e++) {
-			double gn[8][3], d[3] = {0, 0, 0};
-			if (!hex_grad_center(e, gn)) {
-				const int32_t *nd = &Hex[e * 8];
-				for (int a = 0; a < 8; a++) {
-					const double ua = u[nd[a]];
-					for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
-				}
-			}
-			for (int c = 0; c < 3; c++) v[(e * 3) + c] = -d[c];
-		}
-	}
 	else if (MeshMode) {
-		for (int e = 0; e < NTet; e++) {
-			double gn[10][3], d[3] = {0, 0, 0};
-			int nen = 0;
-			if (!tet_grad_center(e, gn, &nen)) {
-				int32_t nd[10];
-				tet_nodes(e, nd);
-				for (int a = 0; a < nen; a++) {
-					const double ua = u[nd[a]];
-					for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+		// 種別が混ざっていてもよいよう、統一した番号で走査する
+		const int ne = elem3d_count();
+		for (int e = 0; e < ne; e++) {
+			const int kind = elem3d_kind(e);
+			double d[3] = {0, 0, 0};
+			if (kind == MESHELEM_HEX) {
+				double gn[8][3];
+				if (!hex_grad_center(e - NTet, gn)) {
+					const int32_t *nd = &Hex[(e - NTet) * 8];
+					for (int a = 0; a < 8; a++) {
+						const double ua = u[nd[a]];
+						for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+					}
+				}
+			}
+			else if (kind == MESHELEM_PRISM) {
+				double gn[6][3];
+				if (!prism_grad_center(e - NTet - NHex, gn)) {
+					const int32_t *nd = &Prism[(e - NTet - NHex) * 6];
+					for (int a = 0; a < 6; a++) {
+						const double ua = u[nd[a]];
+						for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+					}
+				}
+			}
+			else {
+				double gn[10][3];
+				int nen = 0;
+				if (!tet_grad_center(e, gn, &nen)) {
+					int32_t nd[10];
+					tet_nodes(e, nd);
+					for (int a = 0; a < nen; a++) {
+						const double ua = u[nd[a]];
+						for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+					}
 				}
 			}
 			for (int c = 0; c < 3; c++) v[(e * 3) + c] = -d[c];
@@ -242,62 +238,49 @@ static void write_grid(FILE *fp)
 		// VTK_TRIANGLE = 5, VTK_QUADRATIC_TRIANGLE = 22
 		for (int e = 0; e < NTri; e++) fprintf(fp, "%d\n", ((nen == 6) ? 22 : 5));
 	}
-	else if (MeshMode && (MeshElem == MESHELEM_PRISM)) {
-		fprintf(fp, "DATASET UNSTRUCTURED_GRID\n");
-		fprintf(fp, "POINTS %d double\n", NNode);
-		for (int i = 0; i < NNode; i++) {
-			fprintf(fp, "%.9e %.9e %.9e\n", Xp[i], Yp[i], Zp[i]);
-		}
-		// VTK_WEDGE (13) の節点の並びは Gmsh の prism6 と同じ
-		fprintf(fp, "\nCELLS %d %d\n", NPrism, 7 * NPrism);
-		for (int e = 0; e < NPrism; e++) {
-			fprintf(fp, "6");
-			for (int l = 0; l < 6; l++) fprintf(fp, " %d", Prism[(e * 6) + l]);
-			fprintf(fp, "\n");
-		}
-		fprintf(fp, "\nCELL_TYPES %d\n", NPrism);
-		for (int e = 0; e < NPrism; e++) fprintf(fp, "%d\n", 13);
-	}
-	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
-		fprintf(fp, "DATASET UNSTRUCTURED_GRID\n");
-		fprintf(fp, "POINTS %d double\n", NNode);
-		for (int i = 0; i < NNode; i++) {
-			fprintf(fp, "%.9e %.9e %.9e\n", Xp[i], Yp[i], Zp[i]);
-		}
-		// VTK_HEXAHEDRON (12) の節点の並びは Gmsh の hex8 と同じ
-		// (下面を反時計回り、その上に上面) なので並べ替えは要らない
-		fprintf(fp, "\nCELLS %d %d\n", NHex, 9 * NHex);
-		for (int e = 0; e < NHex; e++) {
-			fprintf(fp, "8");
-			for (int l = 0; l < 8; l++) fprintf(fp, " %d", Hex[(e * 8) + l]);
-			fprintf(fp, "\n");
-		}
-		fprintf(fp, "\nCELL_TYPES %d\n", NHex);
-		for (int e = 0; e < NHex; e++) fprintf(fp, "%d\n", 12);
-	}
 	else if (MeshMode) {
+		/*
+		3 次元の非構造格子 (四面体・六面体・角柱、混在可)。
+		VTK の CELLS は要素ごとに節点数を書けるので、種別が混ざっていても
+		そのまま並べられる。**節点の並びは Gmsh と VTK で同じ**なので
+		入れ替えは要らない (2 次四面体だけは中間節点の並びが違う)。
+		  VTK_TETRA 10 / VTK_QUADRATIC_TETRA 24 / VTK_HEXAHEDRON 12 / VTK_WEDGE 13
+		*/
+		static const int g2v[6] = {0, 1, 2, 3, 5, 4};
+		const int p2 = (TetOrder >= 2);
+		const int ne = elem3d_count();
 		fprintf(fp, "DATASET UNSTRUCTURED_GRID\n");
 		fprintf(fp, "POINTS %d double\n", NNode);
 		for (int i = 0; i < NNode; i++) {
 			fprintf(fp, "%.9e %.9e %.9e\n", Xp[i], Yp[i], Zp[i]);
 		}
-		// VTK_QUADRATIC_TETRA (24) の中間節点の並びは Gmsh の tet10 と違う。
-		//   VTK  : (0,1) (1,2) (0,2) (0,3) (1,3) (2,3)
-		//   Gmsh : (0,1) (1,2) (2,0) (3,0) (3,2) (3,1)
-		// 頂点からの並べ替えは最後の 2 つの入れ替えになる
-		static const int g2v[6] = {0, 1, 2, 3, 5, 4};
-		const int nen = ((TetOrder >= 2) ? 10 : 4);
-		fprintf(fp, "\nCELLS %d %d\n", NTet, (nen + 1) * NTet);
-		for (int e = 0; e < NTet; e++) {
+		int64_t total = 0;
+		for (int e = 0; e < ne; e++) {
 			int32_t nd[10];
-			tet_nodes(e, nd);
-			fprintf(fp, "%d %d %d %d %d", nen, nd[0], nd[1], nd[2], nd[3]);
-			for (int l = 4; l < nen; l++) fprintf(fp, " %d", nd[4 + g2v[l - 4]]);
+			total += elem3d_nodes(e, nd) + 1;
+		}
+		fprintf(fp, "\nCELLS %d %lld\n", ne, (long long)total);
+		for (int e = 0; e < ne; e++) {
+			int32_t nd[10];
+			const int nen = elem3d_nodes(e, nd);
+			fprintf(fp, "%d", nen);
+			if ((elem3d_kind(e) == MESHELEM_TET) && (nen == 10)) {
+				// VTK_QUADRATIC_TETRA は中間節点の最後の 2 つが Gmsh と逆
+				for (int l = 0; l < 4; l++) fprintf(fp, " %d", nd[l]);
+				for (int l = 4; l < 10; l++) fprintf(fp, " %d", nd[4 + g2v[l - 4]]);
+			}
+			else {
+				for (int l = 0; l < nen; l++) fprintf(fp, " %d", nd[l]);
+			}
 			fprintf(fp, "\n");
 		}
-		fprintf(fp, "\nCELL_TYPES %d\n", NTet);
-		// VTK_TETRA = 10, VTK_QUADRATIC_TETRA = 24
-		for (int e = 0; e < NTet; e++) fprintf(fp, "%d\n", ((nen == 10) ? 24 : 10));
+		fprintf(fp, "\nCELL_TYPES %d\n", ne);
+		for (int e = 0; e < ne; e++) {
+			const int kind = elem3d_kind(e);
+			const int ty = ((kind == MESHELEM_HEX) ? 12 : (kind == MESHELEM_PRISM) ? 13
+			              : (p2 ? 24 : 10));
+			fprintf(fp, "%d\n", ty);
+		}
 	}
 	else {
 		fprintf(fp, "DATASET RECTILINEAR_GRID\n");
@@ -362,14 +345,9 @@ static void write_cell_int(FILE *fp, const char *name, int structured_from_cell)
 			fprintf(fp, "%d\n", (structured_from_cell ? (int)TriCond[e] : (int)TriMat[e]));
 		}
 	}
-	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
-		for (int e = 0; e < NHex; e++) fprintf(fp, "%d\n", (int)HexMat[e]);
-	}
-	else if (MeshMode && (MeshElem == MESHELEM_PRISM)) {
-		for (int e = 0; e < NPrism; e++) fprintf(fp, "%d\n", (int)PrismMat[e]);
-	}
 	else if (MeshMode) {
-		for (int e = 0; e < NTet; e++) fprintf(fp, "%d\n", (int)TetMat[e]);
+		const int ne = elem3d_count();
+		for (int e = 0; e < ne; e++) fprintf(fp, "%d\n", elem3d_mat(e));
 	}
 	else {
 		for (int k = 0; k < Nz; k++) {
