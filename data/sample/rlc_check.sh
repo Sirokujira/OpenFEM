@@ -1704,6 +1704,39 @@ case "$h5msg" in
 	echo "  the snapshots differ from point to point (skin effect) : $res"
 	case "$res" in NG*) status=1 ;; esac
 
+	# (d) 要素種別が混在する格子の /mesh。均一な格子では cells が
+	# [ncell][nen] の矩形だが、混在では要素ごとに節点数が違うので平坦化して
+	# cell_offset[ncell+1] を添える。**この分岐は混在格子のファイルが無いと
+	# 一度も実行されない** (形式の分岐は通るファイルが無いと死んだコードになる)。
+	#
+	# 閉形式は要らない。同じ連結を ofe_field.vtk にも書いているので、
+	# **2 つの出口が食い違わないこと**を恒等式にすれば足りる (一番起きやすい
+	# 壊れ方がまさにそれ)。VTK の CELLS は行頭に節点数が付くので、それを
+	# 落とした並びが /mesh/cells に、累積和が /mesh/cell_offset に一致する。
+	sed 's/^analysis = /hdf5 = 1\nfieldout = 1\nanalysis = /' \
+	    "$SRC/box_mixed.ofe" > "$WORK/h5mix.ofe"
+	(cd "$WORK" && "$OFE" -n 2 h5mix.ofe > /dev/null)
+	awk '/^CELLS /{f = 1; next} f && /^CELL_TYPES/{exit}
+	     f && NF { for (i = 2; i <= NF; i++) print $i }' \
+	    "$WORK/ofe_field.vtk" > "$WORK/vtkcells.txt"
+	awk '/^CELLS /{f = 1; s = 0; print s; next} f && /^CELL_TYPES/{exit}
+	     f && NF { s += $1; print s }' "$WORK/ofe_field.vtk" > "$WORK/vtkoff.txt"
+	H5FMT="%d"
+	h5v /mesh/cells > "$WORK/h5cells.txt"
+	h5v /mesh/cell_offset > "$WORK/h5off.txt"
+	same_nums "mixed mesh: /mesh/cells == ofe_field.vtk" \
+		"$WORK/h5cells.txt" "$WORK/vtkcells.txt" "%d"
+	same_nums "mixed mesh: /mesh/cell_offset == ofe_field.vtk" \
+		"$WORK/h5off.txt" "$WORK/vtkoff.txt" "%d"
+	# **節点数が要素ごとに違うことそのもの**を見る。ここを見ないと、
+	# 混在なのに全要素を同じ節点数として書く誤りが上の 2 つを通ってしまう
+	# (offset も cells も自分自身と突き合わせているだけになるため)
+	res=$(awk 'NR > 1 { d = $1 - p; if (d != f && NR > 2) mixed = 1; f = d }
+	           { p = $1 } END { printf "%s (%d cells)", (mixed ? "OK" : "NG"), NR - 1 }' \
+		"$WORK/h5off.txt")
+	echo "  mixed mesh: the cells really have different node counts : $res"
+	case "$res" in NG*) status=1 ;; esac
+
 	fi
 	;;
 esac
