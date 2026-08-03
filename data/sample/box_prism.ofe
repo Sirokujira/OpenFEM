@@ -1,0 +1,30 @@
+OpenFEM 1 0
+title = parallel plate capacitor on a prism (wedge) mesh
+#
+# 非構造格子 (**角柱**) の検証。box_prism.msh は本物の gmsh (4.12.1) が
+# box_prism.geo から作った 6 節点角柱の格子 (1mm x 1mm x 0.2mm)。
+# 三角形の面を Recombine せずに押し出すと角柱になる。
+#
+#   gmsh -3 box_prism.geo -o box_prism.msh -format msh22
+#
+# 局所節点の並び (下面の三角形 0,1,2 の真上に上面 3,4,5) は形式の規約なので、
+# 自前で書かずに**実際のツールが出した並び**で検証する。
+#
+# 電界は 1 次元なので角柱要素で厳密に表現でき、閉形式と全桁一致する:
+#
+#   C = eps0 * 4.0 * (1e-3 * 1e-3) / 0.2e-3 = 1.77083756e-13 [F]
+#
+# box_prism_rot.msh は同じ格子を剛体回転 (z 30 度 -> x 20 度) したもの。
+# 合同な離散問題なので答えは全桁一致しなければならない。
+#
+# 物理タグ : 1 = 体積、10 = z 下面 (基準電極)、11 = z 上面 (ポート 1)
+#
+mesh = box_prism.msh
+material = 4.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = C
+solver = 50000 2000 1e-13
+end

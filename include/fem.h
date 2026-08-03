@@ -204,6 +204,7 @@ EXTERN int *TriTag;				// [NTri] 物理タグ
 // Gmsh / VTK と同じ「下面を反時計回り、その上に上面」。境界面は四角形。
 #define MESHELEM_TET (0)
 #define MESHELEM_HEX (1)
+#define MESHELEM_PRISM (2)
 EXTERN int MeshElem;
 EXTERN int NHex;				// 六面体数
 EXTERN int32_t *Hex;			// [8*NHex] 節点番号
@@ -212,6 +213,14 @@ EXTERN unsigned char *HexMat;	// [NHex] 材料番号
 EXTERN int NQuad;				// 四角形数 (電極面の指定に使う)
 EXTERN int32_t *Quad;			// [4*NQuad]
 EXTERN int *QuadTag;			// [NQuad] 物理タグ
+
+// 角柱 (6 節点、三角形を押し出した形)。局所の並びは Gmsh / VTK と同じ
+// 「下面の三角形 (0,1,2)、その真上に上面 (3,4,5)」。境界面は三角形と四角形の
+// 両方になる (上下面が三角形、側面が四角形)
+EXTERN int NPrism;				// 角柱数
+EXTERN int32_t *Prism;			// [6*NPrism] 節点番号
+EXTERN int *PrismTag;			// [NPrism] 物理タグ
+EXTERN unsigned char *PrismMat;	// [NPrism] 材料番号
 
 // 格子の次元 (3 : 四面体、2 : 断面 2 次元の三角形)。2 のときは三角形が
 // 体積要素になり、M / F (断面 2 次元の定式化) を非構造格子で解ける。

@@ -769,6 +769,43 @@ if ! (cd "$WORK" && "$OFE" -n 2 hexedge.ofe 2>&1 | grep -q "need a tetrahedral m
 	status=1
 fi
 
+# 角柱 (6 節点、三角形を押し出した等パラメトリック要素)。
+# 検査の分け方は六面体と同じで、**ゆがんだ格子でだけ落ちる誤り**があるのが要点
+echo "[prisms] 6-node isoparametric prism (wedge) meshes"
+run_case box_prism
+compare "C (prism box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/pra.csv"
+sed 's/^mesh = .*/mesh = box_prism_rot.msh/' "$SRC/box_prism.ofe" > "$WORK/prrot.ofe"
+(cd "$WORK" && "$OFE" -n 2 prrot.ofe > /dev/null && "$OFE_POST" > /dev/null)
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/prb.csv"
+if cmp -s "$WORK/pra.csv" "$WORK/prb.csv"; then
+	echo "  rigidly rotated mesh gives the identical answer : OK"
+else
+	echo "  rigidly rotated mesh differs -> NG" >&2
+	status=1
+fi
+cp "$SRC/nodal_test_prism.ofe" "$WORK/"
+(cd "$WORK" && "$OFE" -n 2 nodal_test_prism.ofe > /dev/null)
+res=$(awk '/linear field/ { for (i = 1; i <= NF; i++) if ($i == "error") e = $(i+2) }
+	/rel. diff/ { for (i = 1; i <= NF; i++) if ($i == "diff") v = $(i+2) }
+	/^  warp/ { w = $3 }
+	END { if ((e == "") || (v == "")) { printf "NG (no report)"; exit }
+	      printf "%s (linear %s, volume %s, warp %s)",
+	             (((e + 0) < 1e-12) && ((v + 0) < 1e-12) && ((w + 0) > 1e-3)) ? "OK" : "NG",
+	             e, v, w }' "$WORK/ofe.log")
+echo "  distorted mesh : the linear-field identity holds : $res"
+case "$res" in NG*) status=1 ;; esac
+# 角柱と四面体の混在も弾くこと
+awk '/^\$Elements/ { print; getline; print $1 + 1
+                     print "9999 4 2 1 1 1 2 3 4"; next } { print }' \
+    "$SRC/box_prism.msh" > "$WORK/pmix.msh"
+sed 's/^mesh = .*/mesh = pmix.msh/' "$SRC/box_prism.ofe" > "$WORK/pmix.ofe"
+mesh_reject "a mesh mixing prisms and tetrahedra" pmix.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 pmix.ofe 2>&1 | grep -q "are mixed"); then
+	echo "  *** it was rejected for a different reason than the mixing" >&2
+	status=1
+fi
+
 # Gmsh **バイナリ**形式の読み込み。
 #
 # 検証用のファイルは**本物の gmsh に作らせてある** (4.12.1):

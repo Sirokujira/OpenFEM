@@ -640,8 +640,9 @@ static void assemble_core(crs_t *A, int mode, const double *coefcell)
 void assemble(crs_t *A, int mode)
 {
 	if (MeshMode) {
-		if (MeshElem == MESHELEM_HEX) assemble_hex(A, mode);
-		else                          assemble_tet(A, mode);
+		if      (MeshElem == MESHELEM_HEX)   assemble_hex(A, mode);
+		else if (MeshElem == MESHELEM_PRISM) assemble_prism(A, mode);
+		else                                 assemble_tet(A, mode);
 		return;
 	}
 	assemble_core(A, mode, NULL);

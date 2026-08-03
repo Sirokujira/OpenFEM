@@ -44,8 +44,9 @@ void crs_alloc(crs_t *A)
 			crs_alloc_tri(A);
 			return;
 		}
-		if (MeshElem == MESHELEM_HEX) crs_alloc_hex(A);
-		else                          crs_alloc_tet(A);
+		if      (MeshElem == MESHELEM_HEX)   crs_alloc_hex(A);
+		else if (MeshElem == MESHELEM_PRISM) crs_alloc_prism(A);
+		else                                 crs_alloc_tet(A);
 		return;
 	}
 

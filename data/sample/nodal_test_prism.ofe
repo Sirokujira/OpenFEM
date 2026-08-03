@@ -1,0 +1,29 @@
+OpenFEM 1 0
+title = prism element self test (linear field identity on a distorted mesh)
+#
+# 角柱 (6 節点、等パラメトリック) の自己検証。
+#
+#   python3 mkmesh.py box_prism_warp box_prism_warp.msh
+#
+# 線形場 phi = a.r は角柱要素で厳密に補間できるので grad phi_h = a が要素内で
+# 一定になり、phi^T K phi = (a^T C a) * V が厳密に成り立つ。
+# C は異方性、a は軸に平行でない向きにとる。
+#
+# **上下の三角形が平行移動の関係だと意味がない。** その形ではヤコビアンが
+# zeta に依らなくなるので、「J を要素中心で 1 回だけ評価する」という手抜きが
+# 厳密に正しくなってしまう。実測: この誤りは直方体でも剛体回転でも答えを
+# 1 桁も動かさず、ゆがんだ格子でだけ 3.6% ずれた。
+#
+# 体積は 6 点則 (三角形 3 点 x zeta 2 点) と 18 点則 (三角形 6 点 x zeta 3 点)
+# の両方で積分して一致を見る。**これは積分点数の誤りを見る検査で、
+# ヤコビアンの誤りは検出しない** (両方が同じ J を使うため)。実測でも定数
+# ヤコビアンの変異は体積側を素通りし、線形場の恒等式だけが落ちた。
+#
+mesh = box_prism_warp.msh
+material = 4.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end
