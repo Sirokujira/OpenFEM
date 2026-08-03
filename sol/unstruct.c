@@ -84,13 +84,46 @@ static void elem_reset(void)
 	Tet2 = NULL;
 	Tri2 = NULL;
 	TetOrder = 0;			// 最初に出た四面体で決まる
+	NHex = 0;
+	Hex = NULL;
+	HexTag = NULL;
+	NQuad = 0;
+	Quad = NULL;
+	QuadTag = NULL;
+	MeshElem = MESHELEM_TET;
 }
 
 
-// 要素 1 個を格納する。type は Gmsh の要素型 (4/11 = 四面体、2/9 = 三角形)
+// 要素 1 個を格納する。type は Gmsh の要素型
+// (4/11 = 四面体、2/9 = 三角形、5 = 六面体、3 = 四角形)
 static int elem_store(int type, int tag, const int32_t *nd)
 {
 	const int order = ((type == 11) || (type == 9)) ? 2 : 1;
+
+	if (type == 5) {
+		// 六面体 (8 節点)。局所の並びは Gmsh のまま使う
+		if (NHex % ARRAY_INC == 0) {
+			Hex = (int32_t *)realloc(Hex, (size_t)(NHex + ARRAY_INC) * 8 * sizeof(int32_t));
+			HexTag = (int *)realloc(HexTag, (size_t)(NHex + ARRAY_INC) * sizeof(int));
+		}
+		for (int l = 0; l < 8; l++) Hex[(NHex * 8) + l] = nd[l];
+		HexTag[NHex] = tag;
+		NHex++;
+
+		return 0;
+	}
+	if (type == 3) {
+		// 四角形 (境界面)。六面体格子の電極面はこれになる
+		if (NQuad % ARRAY_INC == 0) {
+			Quad = (int32_t *)realloc(Quad, (size_t)(NQuad + ARRAY_INC) * 4 * sizeof(int32_t));
+			QuadTag = (int *)realloc(QuadTag, (size_t)(NQuad + ARRAY_INC) * sizeof(int));
+		}
+		for (int l = 0; l < 4; l++) Quad[(NQuad * 4) + l] = nd[l];
+		QuadTag[NQuad] = tag;
+		NQuad++;
+
+		return 0;
+	}
 
 	if ((type == 4) || (type == 11)) {
 		// 四面体。次数は最初の 1 個で決め、以後は混在を許さない
@@ -137,6 +170,28 @@ static int elem_store(int type, int tag, const int32_t *nd)
 // 全要素を読んだあとの整合性検査 (格子の次元と次数)
 static int elem_finish(void)
 {
+	// **四面体と六面体の混在は弾く。** 要素行列も CRS も要素種別で分岐して
+	// おり、混在させると「どちらの経路を通ったか」で答えが変わる
+	if ((NTet > 0) && (NHex > 0)) {
+		printf("*** mesh : tetrahedra (%d) and hexahedra (%d) are mixed "
+			"(one element type per mesh)\n", NTet, NHex);
+		return 1;
+	}
+	if (NHex > 0) {
+		// 六面体格子。2 次の六面体 (Gmsh の型 17 / 12) は未対応で、
+		// elem_store に来ないので NHex には入らない
+		MeshElem = MESHELEM_HEX;
+		MeshDim = 3;
+		TetOrder = 1;
+		if (NQuad < 1) {
+			printf("%s\n", "*** mesh : a hexahedral mesh needs quadrilateral "
+				"boundary faces for the electrodes");
+			return 1;
+		}
+
+		return 0;
+	}
+
 	// 四面体が 1 つも無ければ断面 2 次元の格子として扱う (三角形が体積要素)。
 	// M / F は断面 2 次元の定式化なので、この形でしか非構造格子に載らない
 	MeshDim = ((NTet > 0) ? 3 : 2);
@@ -203,7 +258,8 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 
 		// 節点数 : 四面体 (型 4 / 11) と三角形 (型 2 / 9)
 		const int nn = ((type == 4) ? 4 : (type == 11) ? 10
-		              : (type == 2) ? 3 : (type == 9) ? 6 : 0);
+		              : (type == 2) ? 3 : (type == 9) ? 6
+		              : (type == 5) ? 8 : (type == 3) ? 4 : 0);
 		if (nn == 0) continue;			// 点・線分など、使わない要素型
 		if (nv < off + nn) continue;
 
@@ -370,7 +426,8 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		if (fscanf(fp, "%ld %ld %ld %ld", &dim, &tag, &type, &cnt) != 4) return 1;
 
 		const int nn = ((type == 4) ? 4 : (type == 11) ? 10
-		              : (type == 2) ? 3 : (type == 9) ? 6 : 0);
+		              : (type == 2) ? 3 : (type == 9) ? 6
+		              : (type == 5) ? 8 : (type == 3) ? 4 : 0);
 		// 物理タグはエンティティ側にある (2.2 と違い要素の行には無い)
 		const int phys = ent_phys((int)dim, tag);
 
@@ -398,8 +455,8 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		}
 	}
 
-	if ((NTet < 1) && (NTri < 1)) {
-		printf("%s\n", "*** mesh : no tetrahedron and no triangle found");
+	if ((NTet < 1) && (NTri < 1) && (NHex < 1)) {
+		printf("%s\n", "*** mesh : no tetrahedron, hexahedron or triangle found");
 		return 1;
 	}
 
@@ -538,7 +595,8 @@ static int read_elements_bin22(FILE *fp, const int32_t *idmap, int32_t maxid)
 			printf("%s\n", "*** mesh : binary element blocks overrun the count");
 			return 1;
 		}
-		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9));
+		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9)
+		              || (type == 5) || (type == 3));
 
 		for (long e = 0; e < cnt; e++) {
 			int32_t etag = 0;
@@ -701,7 +759,8 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		}
 		// 物理タグはエンティティ側にある (2.2 と違い要素には無い)
 		const int phys = ent_phys((int)dim, tag);
-		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9));
+		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9)
+		              || (type == 5) || (type == 3));
 
 		for (int64_t e = 0; e < cnt; e++) {
 			int64_t etag = 0;
@@ -722,8 +781,8 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		}
 	}
 
-	if ((NTet < 1) && (NTri < 1)) {
-		printf("%s\n", "*** mesh : no tetrahedron and no triangle found");
+	if ((NTet < 1) && (NTri < 1) && (NHex < 1)) {
+		printf("%s\n", "*** mesh : no tetrahedron, hexahedron or triangle found");
 		return 1;
 	}
 
@@ -938,18 +997,24 @@ int tet_nodes(int e, int32_t nd[10])
 }
 
 
-// 四面体の連結から節点の隣接関係を作る (対角成分を含む)
-void crs_alloc_tet(crs_t *A)
+/*
+要素の連結から節点の隣接関係を作る (対角成分を含む)。
+
+四面体でも六面体でも手順は同じ (要素あたりの節点数と取り出し方だけが違う)
+ので、`get` に要素の節点を書き出す関数を渡して共通化する。
+**四面体の経路は結果も並び順もこれまでと同一** (既存の回帰がバイト単位で
+一致することで確かめている)。
+*/
+static void crs_alloc_conn(crs_t *A, int nelem, int nen, void (*get)(int, int32_t *))
 {
 	const int n = NNode;
-	const int nen = ((TetOrder >= 2) ? 10 : 4);		// 要素あたりの節点数
 
 	// 節点毎の要素数を数える
 	int *cnt = (int *)malloc((size_t)n * sizeof(int));
 	memset(cnt, 0, (size_t)n * sizeof(int));
-	for (int e = 0; e < NTet; e++) {
+	for (int e = 0; e < nelem; e++) {
 		int32_t nd[10];
-		tet_nodes(e, nd);
+		get(e, nd);
 		for (int l = 0; l < nen; l++) cnt[nd[l]]++;
 	}
 	int64_t *nptr = (int64_t *)malloc(((size_t)n + 1) * sizeof(int64_t));
@@ -957,9 +1022,9 @@ void crs_alloc_tet(crs_t *A)
 	for (int i = 0; i < n; i++) nptr[i + 1] = nptr[i] + cnt[i];
 	int32_t *nlist = (int32_t *)malloc((size_t)nptr[n] * sizeof(int32_t));
 	memset(cnt, 0, (size_t)n * sizeof(int));
-	for (int e = 0; e < NTet; e++) {
+	for (int e = 0; e < nelem; e++) {
 		int32_t nd[10];
-		tet_nodes(e, nd);
+		get(e, nd);
 		for (int l = 0; l < nen; l++) {
 			const int32_t i = nd[l];
 			nlist[nptr[i] + cnt[i]] = (int32_t)e;
@@ -985,7 +1050,7 @@ void crs_alloc_tet(crs_t *A)
 		int m = 0;
 		for (int64_t p = p0; p < p1; p++) {
 			int32_t nd[10];
-			tet_nodes(nlist[p], nd);
+			get(nlist[p], nd);
 			for (int l = 0; l < nen; l++) work[m++] = nd[l];
 		}
 		qsort(work, (size_t)m, sizeof(int32_t), cmp_int32);
@@ -1007,7 +1072,7 @@ void crs_alloc_tet(crs_t *A)
 		int m = 0;
 		for (int64_t p = p0; p < p1; p++) {
 			int32_t nd[10];
-			tet_nodes(nlist[p], nd);
+			get(nlist[p], nd);
 			for (int l = 0; l < nen; l++) work[m++] = nd[l];
 		}
 		qsort(work, (size_t)m, sizeof(int32_t), cmp_int32);
@@ -1024,6 +1089,30 @@ void crs_alloc_tet(crs_t *A)
 	free(rown);
 
 	crs_zero(A);
+}
+
+
+static void get_tet(int e, int32_t *nd)
+{
+	tet_nodes(e, nd);
+}
+
+
+static void get_hex(int e, int32_t *nd)
+{
+	for (int l = 0; l < 8; l++) nd[l] = Hex[(e * 8) + l];
+}
+
+
+void crs_alloc_tet(crs_t *A)
+{
+	crs_alloc_conn(A, NTet, ((TetOrder >= 2) ? 10 : 4), get_tet);
+}
+
+
+void crs_alloc_hex(crs_t *A)
+{
+	crs_alloc_conn(A, NHex, 8, get_hex);
 }
 
 
@@ -1263,6 +1352,200 @@ int tet_grad_center(int e, double gn[10][3], int *nen)
 //   K_ij = ∫ (∇N_i)^T C (∇N_j) dV
 // 1 次四面体では被積分関数が一定なので体積を掛けるだけで厳密。
 // 2 次四面体は Gauss 積分 (tet10_element)。
+/*
+六面体 (8 節点、三重線形の等パラメトリック要素)。
+
+局所節点の並びは **Gmsh / VTK と同じ**「下面を反時計回り、その上に上面」で、
+局所座標 (ξ, η, ζ) ∈ [-1,1]^3 の符号は下の HEX_SGN のとおり。構造格子側の
+局所番号 (i,j,k のビット) とは並びが違うので、表を共有してはいけない。
+
+  N_a = (1 + ξ_a ξ)(1 + η_a η)(1 + ζ_a ζ) / 8
+
+積分は各方向 2 点の Gauss-Legendre (計 8 点)。**直方体では厳密**で、
+一般の六面体でも三重線形要素の標準の選択。ヤコビアンは 8 節点すべてから
+作る (等パラメトリック) ので、平行六面体でない要素も正しく積分できる。
+
+det の符号は節点の並び順で決まるので絶対値で潰さず、**要素内で符号が一定か
+だけを見る** (裏返った要素の検出。四面体の 2 次要素と同じ規約)。
+*/
+static const signed char HEX_SGN[8][3] = {
+	{-1, -1, -1}, {+1, -1, -1}, {+1, +1, -1}, {-1, +1, -1},
+	{-1, -1, +1}, {+1, -1, +1}, {+1, +1, +1}, {-1, +1, +1}
+};
+
+
+/*
+Gauss 点 q での物理座標の勾配 g[a][i] = ∂N_a/∂x_i と |det J| を求める。
+q < 0 のときは要素中心 (ξ = η = ζ = 0) で評価する (場の出力で使う)。
+戻り値 : 0 = 正常、1 = 退化 (det = 0)
+*/
+static int hex_shape(const int32_t *nd, int q, double g[8][3], double *det)
+{
+	const double gp = 1.0 / sqrt(3.0);
+	const double xi  = ((q < 0) ? 0 : (gp * HEX_SGN[q][0]));
+	const double eta = ((q < 0) ? 0 : (gp * HEX_SGN[q][1]));
+	const double ze  = ((q < 0) ? 0 : (gp * HEX_SGN[q][2]));
+
+	// 局所座標での微分
+	double dn[8][3];
+	for (int a = 0; a < 8; a++) {
+		const double sx = HEX_SGN[a][0], sy = HEX_SGN[a][1], sz = HEX_SGN[a][2];
+		dn[a][0] = sx * (1 + (sy * eta)) * (1 + (sz * ze)) / 8;
+		dn[a][1] = sy * (1 + (sx * xi))  * (1 + (sz * ze)) / 8;
+		dn[a][2] = sz * (1 + (sx * xi))  * (1 + (sy * eta)) / 8;
+	}
+
+	// ヤコビアン J[i][j] = ∂x_i/∂ξ_j = Σ_a x_a[i] ∂N_a/∂ξ_j
+	double jm[3][3];
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) jm[i][j] = 0;
+	}
+	for (int a = 0; a < 8; a++) {
+		const int32_t v = nd[a];
+		const double p[3] = {Xp[v], Yp[v], Zp[v]};
+		for (int i = 0; i < 3; i++) {
+			for (int j = 0; j < 3; j++) jm[i][j] += p[i] * dn[a][j];
+		}
+	}
+	const double d = (jm[0][0] * ((jm[1][1] * jm[2][2]) - (jm[1][2] * jm[2][1])))
+	               - (jm[0][1] * ((jm[1][0] * jm[2][2]) - (jm[1][2] * jm[2][0])))
+	               + (jm[0][2] * ((jm[1][0] * jm[2][1]) - (jm[1][1] * jm[2][0])));
+	if (d == 0) return 1;
+
+	// 逆行列 ji[j][i] = ∂ξ_j/∂x_i
+	double ji[3][3];
+	ji[0][0] = ((jm[1][1] * jm[2][2]) - (jm[1][2] * jm[2][1])) / d;
+	ji[0][1] = ((jm[0][2] * jm[2][1]) - (jm[0][1] * jm[2][2])) / d;
+	ji[0][2] = ((jm[0][1] * jm[1][2]) - (jm[0][2] * jm[1][1])) / d;
+	ji[1][0] = ((jm[1][2] * jm[2][0]) - (jm[1][0] * jm[2][2])) / d;
+	ji[1][1] = ((jm[0][0] * jm[2][2]) - (jm[0][2] * jm[2][0])) / d;
+	ji[1][2] = ((jm[0][2] * jm[1][0]) - (jm[0][0] * jm[1][2])) / d;
+	ji[2][0] = ((jm[1][0] * jm[2][1]) - (jm[1][1] * jm[2][0])) / d;
+	ji[2][1] = ((jm[0][1] * jm[2][0]) - (jm[0][0] * jm[2][1])) / d;
+	ji[2][2] = ((jm[0][0] * jm[1][1]) - (jm[0][1] * jm[1][0])) / d;
+
+	// ∂N_a/∂x_i = Σ_j (∂N_a/∂ξ_j)(∂ξ_j/∂x_i)
+	// ji は転置の形 (ji[j][i]) で持っているので、添字を取り違えないこと。
+	// 直交格子では ji が対角になって取り違えても答えが同じになるため、
+	// 検証には**軸に平行でない六面体**が要る
+	for (int a = 0; a < 8; a++) {
+		for (int i = 0; i < 3; i++) {
+			g[a][i] = (dn[a][0] * ji[0][i]) + (dn[a][1] * ji[1][i]) + (dn[a][2] * ji[2][i]);
+		}
+	}
+	*det = d;
+
+	return 0;
+}
+
+
+// 3 点 Gauss-Legendre で積分した体積 (2 点則の検算に使う独立な計算)
+static double hex_volume3(const int32_t *nd)
+{
+	const double gx[3] = {-0.7745966692414834, 0.0, 0.7745966692414834};
+	const double gw[3] = {5.0 / 9, 8.0 / 9, 5.0 / 9};
+	double v = 0;
+
+	for (int i = 0; i < 3; i++) {
+	for (int j = 0; j < 3; j++) {
+	for (int k = 0; k < 3; k++) {
+		double dn[8][3];
+		for (int b = 0; b < 8; b++) {
+			const double sx = HEX_SGN[b][0], sy = HEX_SGN[b][1], sz = HEX_SGN[b][2];
+			dn[b][0] = sx * (1 + (sy * gx[j])) * (1 + (sz * gx[k])) / 8;
+			dn[b][1] = sy * (1 + (sx * gx[i])) * (1 + (sz * gx[k])) / 8;
+			dn[b][2] = sz * (1 + (sx * gx[i])) * (1 + (sy * gx[j])) / 8;
+		}
+		double jm[3][3];
+		for (int p = 0; p < 3; p++) {
+			for (int q = 0; q < 3; q++) jm[p][q] = 0;
+		}
+		for (int b = 0; b < 8; b++) {
+			const int32_t v2 = nd[b];
+			const double pt[3] = {Xp[v2], Yp[v2], Zp[v2]};
+			for (int p = 0; p < 3; p++) {
+				for (int q = 0; q < 3; q++) jm[p][q] += pt[p] * dn[b][q];
+			}
+		}
+		const double d = (jm[0][0] * ((jm[1][1] * jm[2][2]) - (jm[1][2] * jm[2][1])))
+		               - (jm[0][1] * ((jm[1][0] * jm[2][2]) - (jm[1][2] * jm[2][0])))
+		               + (jm[0][2] * ((jm[1][0] * jm[2][1]) - (jm[1][1] * jm[2][0])));
+		v += gw[i] * gw[j] * gw[k] * ((d > 0) ? d : -d);
+	}
+	}
+	}
+
+	return v;
+}
+
+
+// 六面体の要素行列。vol には体積 Σ w |det J| を返す
+static int hex_element(const int32_t *nd, const double c[6], double ke[8][8], double *vol)
+{
+	double v = 0;
+	int sgn = 0;
+
+	for (int l = 0; l < 8; l++) {
+		for (int m = 0; m < 8; m++) ke[l][m] = 0;
+	}
+
+	for (int q = 0; q < 8; q++) {
+		double g[8][3], det;
+		if (hex_shape(nd, q, g, &det)) return 1;
+		const int sq = ((det > 0) ? 1 : -1);
+		if (q == 0) sgn = sq;
+		else if (sq != sgn) return 1;			// 要素内で符号が変わる = 裏返り
+		const double w = ((det > 0) ? det : -det);	// 重みは 1
+		v += w;
+		for (int l = 0; l < 8; l++) {
+			for (int m = 0; m < 8; m++) {
+				ke[l][m] += w * ((c[0] * g[l][0] * g[m][0])
+				               + (c[1] * g[l][1] * g[m][1])
+				               + (c[2] * g[l][2] * g[m][2])
+				               + (c[3] * ((g[l][0] * g[m][1]) + (g[l][1] * g[m][0])))
+				               + (c[4] * ((g[l][1] * g[m][2]) + (g[l][2] * g[m][1])))
+				               + (c[5] * ((g[l][2] * g[m][0]) + (g[l][0] * g[m][2]))));
+			}
+		}
+	}
+	*vol = v;
+
+	return 0;
+}
+
+
+// 要素中心での勾配 (場の出力用)。戻り値 0 = 正常
+int hex_grad_center(int e, double g[8][3])
+{
+	double det;
+
+	return hex_shape(&Hex[e * 8], -1, g, &det);
+}
+
+
+void assemble_hex(crs_t *A, int mode)
+{
+	crs_zero(A);
+
+	for (int e = 0; e < NHex; e++) {
+		double c[6];
+		material_coef_pub(HexMat[e], mode, c);
+		if ((c[0] <= 0) && (c[1] <= 0) && (c[2] <= 0)) continue;
+
+		const int32_t *nd = &Hex[e * 8];
+		double ke[8][8], vol;
+		if (hex_element(nd, c, ke, &vol)) continue;
+
+		for (int l = 0; l < 8; l++) {
+			for (int m = 0; m < 8; m++) {
+				const int64_t p = crs_find(A, nd[l], nd[m]);
+				if (p >= 0) A->val[p] += ke[l][m];
+			}
+		}
+	}
+}
+
+
 void assemble_tet(crs_t *A, int mode)
 {
 	crs_zero(A);
@@ -1331,9 +1614,149 @@ void assemble_tet(crs_t *A, int mode)
 //  ・中間節点が辺の中点に無い (曲がった) 格子では 2 次の φ の補間が厳密で
 //    なくなるので、その検査は飛ばして体積だけ見る。曲面の等パラメトリック
 //    写像は「積分した体積が解析値と合うか」で別に検証する。
+/*
+六面体の自己検証 (analysis = P)。
+
+**線形場の恒等式**を機械精度で見る:
+
+	φ(r) = a・r  は等パラメトリック三重線形要素で**厳密に補間できる**
+	(φ_h = Σ N_a (a・x_a) = a・Σ N_a x_a = a・x(ξ))。したがって ∇φ_h = a が
+	要素内で一定になり、
+		φᵀKφ = ∫ (∇φ)ᵀ C (∇φ) dV = (aᵀ C a) V
+	が厳密に成り立つ。
+
+**ゆがんだ六面体でないと意味がない。** 平行六面体ではヤコビアンが要素内で
+一定になるため、「J を要素中心で 1 回だけ評価する」という誤り (等パラメトリック
+要素で最も踏みやすい手抜き) が厳密に正しくなってしまう。実測: 剛体回転した
+直方体でも同軸 (回転対称) でも、この誤りは答えを 1 桁も動かさなかった
+(同軸は φ が θ に依らないので、要素行列が 3% 違っても радиальный 成分だけが
+効いて相殺する)。ゆがんだ格子でだけ 1.6% ずれる。
+
+体積は **2 点則と 3 点則の両方**で積分して一致を見る。detJ は各方向 2 次までの
+多項式なので 2 点 Gauss で厳密であり、点数を落とす誤りはここで落ちる
+(線形場の恒等式は左右が同じ体積を使うので、それだけでは検出できない)。
+*/
+static int nodal_test_hex(FILE *fp_log)
+{
+	int ierr = 0;
+
+	fprintf(fp_log, "\n=== nodal element (hexahedron) self test ===\n");
+	fprintf(fp_log, "  nodes = %d, hexahedra = %d, nodes per element = 8\n", NNode, NHex);
+
+	// 異方性テンソル (等方性だと C の非対角成分が一度も実行されない)
+	const double c[6] = {2.0, 3.0, 1.5, 0.4, 0.3, 0.2};
+	// 軸に平行でない試験場 (軸平行だと C の 1 成分しか見ない)
+	const double a[3] = {0.7, -1.3, 0.9};
+
+	double aca = 0;
+	{
+		const double cm[3][3] = {{c[0], c[3], c[5]}, {c[3], c[1], c[4]}, {c[5], c[4], c[2]}};
+		for (int i = 0; i < 3; i++) {
+			for (int j = 0; j < 3; j++) aca += a[i] * cm[i][j] * a[j];
+		}
+	}
+
+	// ゆがみ (要素が平行六面体からどれだけ離れているか)。
+	// 平行六面体では対角の和 x0 - x1 + x2 - x3 (下面) 等が 0 になる
+	double warp = 0, hmax = 0;
+	for (int e = 0; e < NHex; e++) {
+		const int32_t *nd = &Hex[e * 8];
+		double h = 0;
+		for (int l = 0; l < 8; l++) {
+			for (int m = l + 1; m < 8; m++) {
+				const double dx = Xp[nd[m]] - Xp[nd[l]];
+				const double dy = Yp[nd[m]] - Yp[nd[l]];
+				const double dz = Zp[nd[m]] - Zp[nd[l]];
+				const double d = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+				if (d > h) h = d;
+			}
+		}
+		if (h > hmax) hmax = h;
+		if (h <= 0) continue;
+		// 三重線形写像の非アフィン成分 (符号つきの頂点和)
+		for (int cdim = 0; cdim < 3; cdim++) {
+			const double *p = ((cdim == 0) ? Xp : (cdim == 1) ? Yp : Zp);
+			double sum = 0;
+			for (int l = 0; l < 8; l++) {
+				const int sg = HEX_SGN[l][0] * HEX_SGN[l][1] * HEX_SGN[l][2];
+				sum += sg * p[nd[l]];
+			}
+			const double d = fabs(sum) / h;
+			if (d > warp) warp = d;
+		}
+	}
+	fprintf(fp_log, "  warp = %.3e (0 = parallelepiped; the test needs a distorted mesh)\n", warp);
+	if (warp < 1e-9) {
+		fprintf(fp_log, "*** warning : this mesh has no distorted element, so the "
+			"isoparametric mapping is not really exercised\n");
+	}
+
+	// 体積 : 2 点則と 3 点則で一致すること (detJ は 2 点で厳密)
+	double v2 = 0, v3 = 0;
+	for (int e = 0; e < NHex; e++) {
+		const int32_t *nd = &Hex[e * 8];
+		for (int q = 0; q < 8; q++) {
+			double g[8][3], det;
+			if (hex_shape(nd, q, g, &det)) continue;
+			v2 += ((det > 0) ? det : -det);
+		}
+		v3 += hex_volume3(nd);
+	}
+	const double vdif = ((v2 > 0) ? (fabs(v3 - v2) / v2) : 0);
+	fprintf(fp_log, "  volume = %.10e (2-point rule), %.10e (3-point rule), rel. diff = %.2e\n",
+		v2, v3, vdif);
+	if (vdif > 1e-12) {
+		fprintf(fp_log, "*** the two quadrature rules disagree on the volume\n");
+		ierr = 1;
+	}
+
+	// 線形場の恒等式
+	crs_t A;
+	crs_alloc(&A);
+	{
+		// material_coef_pub を通さずに直接この c で組む
+		crs_zero(&A);
+		for (int e = 0; e < NHex; e++) {
+			const int32_t *nd = &Hex[e * 8];
+			double ke[8][8], vol;
+			if (hex_element(nd, c, ke, &vol)) continue;
+			for (int l = 0; l < 8; l++) {
+				for (int m = 0; m < 8; m++) {
+					const int64_t p = crs_find(&A, nd[l], nd[m]);
+					if (p >= 0) A.val[p] += ke[l][m];
+				}
+			}
+		}
+	}
+	double *phi = (double *)malloc((size_t)NNode * sizeof(double));
+	for (int i = 0; i < NNode; i++) {
+		phi[i] = (a[0] * Xp[i]) + (a[1] * Yp[i]) + (a[2] * Zp[i]);
+	}
+	double quad = 0;
+	for (int i = 0; i < NNode; i++) {
+		quad += phi[i] * crs_row_dot(&A, i, phi);
+	}
+	const double want = aca * v2;
+	const double err = ((want != 0) ? (fabs(quad - want) / fabs(want)) : 0);
+	fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, "
+		"rel. error = %.2e\n", quad, want, err);
+	if (err > 1e-12) {
+		fprintf(fp_log, "*** the linear-field identity failed\n");
+		ierr = 1;
+	}
+
+	free(phi);
+	crs_free(&A);
+
+	return ierr;
+}
+
+
 int solve_nodal_test(FILE *fp_log)
 {
 	int ierr = 0;
+
+	if (MeshElem == MESHELEM_HEX) return nodal_test_hex(fp_log);
 
 	fprintf(fp_log, "\n=== nodal element (P%d) self test ===\n", TetOrder);
 	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, nodes per element = %d\n",

@@ -697,6 +697,78 @@ if ! (cd "$WORK" && "$OFE" -n 2 bin.ofe 2>&1 | grep -q "content is ASCII"); then
 	status=1
 fi
 
+# 六面体 (8 節点、等パラメトリック) の非構造格子。
+#
+# 検証は 3 段に分ける。**どの検査がどの誤りで落ちるか**が違うため:
+#   (a) 直方体   : 閉形式と全桁一致 (要素・組み立て・電極が通っていること)
+#   (b) 剛体回転 : (a) と全桁一致。回すと軸に平行でなくなるので、ヤコビアンの
+#                  逆行列の転置はここでだけ落ちる (実測 -17.7%)
+#   (c) ゆがみ   : analysis = P の線形場の恒等式。**平行六面体では
+#                  ヤコビアンが要素内で一定**になるので、(a) も (b) も
+#                  「J を要素中心で 1 回だけ評価する」誤りを検出できない
+#                  (実測: どちらも 1 桁も動かない)。ゆがんだ格子でだけ 4.7% ずれる
+#   (d) 同軸     : 曲がった (アフィンでない) 形状で閉形式と比較。ただし回転対称
+#                  なので (c) の誤りはここでも検出できない (要素行列が 3% 違っても
+#                  解が theta に依らず相殺する)
+echo "[hexahedra] 8-node isoparametric hexahedral meshes"
+run_case box_hex
+compare "C (hex box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/hexa.csv"
+# 剛体回転しても合同な離散問題なので全桁一致すること
+sed 's/^mesh = .*/mesh = box_hex_rot.msh/' "$SRC/box_hex.ofe" > "$WORK/hexrot.ofe"
+(cd "$WORK" && "$OFE" -n 2 hexrot.ofe > /dev/null && "$OFE_POST" > /dev/null)
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/hexb.csv"
+if cmp -s "$WORK/hexa.csv" "$WORK/hexb.csv"; then
+	echo "  rigidly rotated mesh gives the identical answer : OK"
+else
+	echo "  rigidly rotated mesh differs -> NG" >&2
+	diff "$WORK/hexa.csv" "$WORK/hexb.csv" | head -4 >&2
+	status=1
+fi
+# ゆがんだ格子での自己検証 (analysis = P)。恒等式は機械精度で成り立つ
+cp "$SRC/nodal_test_hex.ofe" "$WORK/"
+(cd "$WORK" && "$OFE" -n 2 nodal_test_hex.ofe > /dev/null)
+res=$(awk '/linear field/ { for (i = 1; i <= NF; i++) if ($i == "error") e = $(i+2) }
+	/rel. diff/ { for (i = 1; i <= NF; i++) if ($i == "diff") v = $(i+2) }
+	/^  warp/ { w = $3 }
+	END { if ((e == "") || (v == "")) { printf "NG (no report)"; exit }
+	      printf "%s (linear %s, volume %s, warp %s)",
+	             (((e + 0) < 1e-12) && ((v + 0) < 1e-12) && ((w + 0) > 1e-3)) ? "OK" : "NG",
+	             e, v, w }' "$WORK/ofe.log")
+echo "  distorted mesh : the linear-field identity holds : $res"
+case "$res" in NG*) status=1 ;; esac
+# 曲がった (アフィンでない) 六面体を閉形式と比べる
+run_case coax_hex
+compare "C' (hex coax) [F/m]" "$(value_of C)" 1.063417e-10 0.01
+compare "L' (hex coax) [H/m]" "$(value_of L)" 2.197225e-07 0.01
+# 四面体と六面体の混在は弾くこと (要素種別で分岐しているので黙って通してはいけない)。
+# 六面体の格子に四面体を 1 個だけ足す
+awk '/^\$Elements/ { print; getline; print $1 + 1
+                     print "9999 4 2 1 1 1 2 3 4"; next } { print }' \
+    "$SRC/box_hex.msh" > "$WORK/mix.msh"
+sed 's/^mesh = .*/mesh = mix.msh/' "$SRC/box_hex.ofe" > "$WORK/mix.ofe"
+mesh_reject "a mesh mixing tetrahedra and hexahedra" mix.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 mix.ofe 2>&1 | grep -q "are mixed"); then
+	echo "  *** it was rejected for a different reason than the mixing" >&2
+	status=1
+fi
+# analysis は 1 トークン 1 文字。"CL" と続けて書くと先頭しか読まれないので弾く
+sed 's/^analysis = .*/analysis = CL/' "$SRC/box_hex.ofe" > "$WORK/an.ofe"
+mesh_reject "analysis = CL (letters not separated)" an.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 an.ofe 2>&1 | grep -q "separated by spaces"); then
+	echo "  *** it was rejected for a different reason than the analysis spelling" >&2
+	status=1
+fi
+# 辺要素 (E / A) は四面体の形状関数に基づくので六面体格子を弾くこと
+sed -e 's/^analysis = .*/analysis = A/' \
+    -e 's/^material = .*/material = 1.0 5.8e7/' \
+    -e 's/^solver = .*/frequency = 1e4\nvoltage = 1.0/' "$SRC/box_hex.ofe" > "$WORK/hexedge.ofe"
+mesh_reject "analysis A on a hexahedral mesh" hexedge.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 hexedge.ofe 2>&1 | grep -q "need a tetrahedral mesh"); then
+	echo "  *** it was rejected for a different reason than the element type" >&2
+	status=1
+fi
+
 # Gmsh **バイナリ**形式の読み込み。
 #
 # 検証用のファイルは**本物の gmsh に作らせてある** (4.12.1):

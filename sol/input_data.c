@@ -945,6 +945,13 @@ int input_data(FILE *fp)
 			// analysis = C L R (部分集合)
 			Analysis = 0;
 			for (int n = 0; n < nval; n++) {
+				// **1 トークン 1 文字**。"CL" と続けて書くと先頭の C だけが
+				// 読まれて L が黙って落ちる (実際に踏んだ) ので弾く
+				if (token[2 + n][1] != '\0') {
+					printf("*** analysis : write the letters separated by spaces "
+						"(\"C L\", not \"%s\")\n", token[2 + n]);
+					return 1;
+				}
 				const int c = toupper((int)token[2 + n][0]);
 				if      (c == 'C') Analysis |= ANALYSIS_C;
 				else if (c == 'L') Analysis |= ANALYSIS_L;

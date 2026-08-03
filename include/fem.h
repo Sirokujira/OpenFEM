@@ -199,6 +199,20 @@ EXTERN int NTri;				// 三角形数 (電極面の指定に使う)
 EXTERN int32_t *Tri;			// [3*NTri]
 EXTERN int *TriTag;				// [NTri] 物理タグ
 
+// 非構造格子の要素種別 (0 : 四面体, 1 : 六面体)。**混在は弾く**。
+// 六面体は 8 節点 (三重線形、等パラメトリック) で、局所の並びは
+// Gmsh / VTK と同じ「下面を反時計回り、その上に上面」。境界面は四角形。
+#define MESHELEM_TET (0)
+#define MESHELEM_HEX (1)
+EXTERN int MeshElem;
+EXTERN int NHex;				// 六面体数
+EXTERN int32_t *Hex;			// [8*NHex] 節点番号
+EXTERN int *HexTag;				// [NHex] 物理タグ
+EXTERN unsigned char *HexMat;	// [NHex] 材料番号
+EXTERN int NQuad;				// 四角形数 (電極面の指定に使う)
+EXTERN int32_t *Quad;			// [4*NQuad]
+EXTERN int *QuadTag;			// [NQuad] 物理タグ
+
 // 格子の次元 (3 : 四面体、2 : 断面 2 次元の三角形)。2 のときは三角形が
 // 体積要素になり、M / F (断面 2 次元の定式化) を非構造格子で解ける。
 // 面は伝送線路軸 Tline に垂直で、その軸の座標は一定でなければならない

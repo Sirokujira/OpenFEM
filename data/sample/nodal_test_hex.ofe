@@ -1,0 +1,31 @@
+OpenFEM 1 0
+title = hexahedral element self test (linear field identity on a distorted mesh)
+#
+# 六面体 (8 節点、等パラメトリック) の自己検証。
+#
+#   python3 mkmesh.py box_hex_warp box_hex_warp.msh
+#
+# 線形場 phi = a.r は三重線形要素で**厳密に補間できる** (phi_h = a.x(xi)) ので
+# grad phi_h = a が要素内で一定になり、
+#
+#   phi^T K phi = (a^T C a) * V
+#
+# が厳密に成り立つ。C は異方性 (非対角成分あり)、a は軸に平行でない向きにとる。
+#
+# **格子がゆがんでいないと意味がない。** 平行六面体ではヤコビアンが要素内で
+# 一定になるので、「J を要素中心で 1 回だけ評価する」という手抜きが厳密に
+# 正しくなってしまう。実測でこの誤りは、剛体回転した直方体でも回転対称な
+# 同軸でも答えを 1 桁も動かさず、ゆがんだ格子でだけ 4.7% ずれた。
+#
+# 体積は 2 点則と 3 点則の両方で積分して一致を見る (detJ は各方向 2 次までの
+# 多項式なので 2 点 Gauss で厳密)。線形場の恒等式は左右が同じ体積を使うため、
+# 点数を落とす誤りはそれだけでは検出できない。
+#
+mesh = box_hex_warp.msh
+material = 4.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end

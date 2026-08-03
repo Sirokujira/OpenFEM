@@ -58,6 +58,7 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
 """
 
 import math
+import random
 import sys
 
 
@@ -137,6 +138,110 @@ def write_msh41(path, nodes, tets, tris):
                 eid += 1
                 f.write("%d %s\n" % (eid, " ".join(str(v + 1) for v in n)))
         f.write("$EndElements\n")
+
+
+def write_msh_hex(path, nodes, hexes, quads):
+    """六面体格子を Gmsh ASCII 2.2 で書く (型 5 = hex8、型 3 = quad4)
+
+    hex8 の局所節点の並びは Gmsh の規約 (**下面を反時計回り、その上に上面**)。
+    VTK_HEXAHEDRON も同じ並びなので、書き出しでの並べ替えは要らない。
+    向きが逆でもソルバー側は |det J| を使い符号の一定性だけを見るので解ける。
+    """
+    with open(path, "w") as f:
+        f.write("$MeshFormat\n2.2 0 8\n$EndMeshFormat\n")
+        f.write("$Nodes\n%d\n" % len(nodes))
+        for i, (x, y, z) in enumerate(nodes):
+            f.write("%d %.16g %.16g %.16g\n" % (i + 1, x, y, z))
+        f.write("$EndNodes\n")
+        f.write("$Elements\n%d\n" % (len(hexes) + len(quads)))
+        e = 0
+        for lst, ty in ((quads, 3), (hexes, 5)):
+            for tag, n in lst:
+                e += 1
+                f.write("%d %d 2 %d %d %s\n" % (e, ty, tag, tag,
+                                                 " ".join(str(v + 1) for v in n)))
+        f.write("$EndElements\n")
+
+
+def make_coax_hex(nr=8, nt=32, ra=0.5e-3, rb=1.5e-3, lz=0.1e-3):
+    """同軸線路の円環を**六面体**で切る : C' = 2 pi eps / ln(b/a)
+
+    (r, theta) の構造格子を z に 1 層押し出す。要素は台形 (r 方向に幅が変わる)
+    なので**アフィンでない** — 要素内でヤコビアンが変化する。等パラメトリック
+    写像を Gauss 点毎に評価していないと、この形でだけ誤差が出る
+    (剛体回転した直方体はアフィンなので、そちらでは検出できない)。
+
+    物理タグ : 1 = 体積、10 = 外側 r=b (電極 0)、11 = 内側 r=a (電極 1)
+    """
+    nodes = []
+    idx = {}
+    for i in range(nr + 1):
+        # 半径方向は対数等分にすると場の変化に合う (四面体版と同じ)
+        r = ra * ((rb / ra) ** (i / nr))
+        for j in range(nt):
+            th = 2 * math.pi * j / nt
+            for k in range(2):
+                idx[(i, j, k)] = len(nodes)
+                nodes.append((r * math.cos(th), r * math.sin(th), lz * k))
+
+    hexes, quads = [], []
+    for i in range(nr):
+        for j in range(nt):
+            jn = (j + 1) % nt			# 周方向は閉じる
+            # 下面 (k=0) を反時計回りに、その上に上面 (k=1)
+            b0 = [idx[(i, j, 0)], idx[(i + 1, j, 0)], idx[(i + 1, jn, 0)], idx[(i, jn, 0)]]
+            t0 = [idx[(i, j, 1)], idx[(i + 1, j, 1)], idx[(i + 1, jn, 1)], idx[(i, jn, 1)]]
+            hexes.append((1, b0 + t0))
+    # 電極面 (内外の円筒面)
+    for j in range(nt):
+        jn = (j + 1) % nt
+        quads.append((11, [idx[(0, j, 0)], idx[(0, jn, 0)],
+                           idx[(0, jn, 1)], idx[(0, j, 1)]]))
+        quads.append((10, [idx[(nr, j, 0)], idx[(nr, jn, 0)],
+                           idx[(nr, jn, 1)], idx[(nr, j, 1)]]))
+
+    return nodes, hexes, quads
+
+
+def make_box_hex_warp(nx=3, ny=3, nz=3, lx=1e-3, ly=1e-3, lz=0.2e-3, seed=20260803):
+    """**ゆがんだ**六面体格子 (等パラメトリック写像の自己検証用)
+
+    内部節点だけを乱数で動かす (境界面は平面のまま = 電極が平面を保つ)。
+    平行六面体では要素内でヤコビアンが一定になり、「J を要素中心で 1 回だけ
+    評価する」という手抜きが厳密に正しくなってしまうため、写像の検証には
+    **アフィンでない要素**が要る。乱数の種は固定して結果を再現可能にする。
+
+    物理タグ : 1 = 体積、10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
+    """
+    rnd = random.Random(seed)
+    nodes = []
+    idx = {}
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            for k in range(nz + 1):
+                x, y, z = lx * i / nx, ly * j / ny, lz * k / nz
+                if 0 < i < nx: x += 0.30 * (rnd.random() - 0.5) * lx / nx
+                if 0 < j < ny: y += 0.30 * (rnd.random() - 0.5) * ly / ny
+                if 0 < k < nz: z += 0.30 * (rnd.random() - 0.5) * lz / nz
+                idx[(i, j, k)] = len(nodes)
+                nodes.append((x, y, z))
+
+    hexes, quads = [], []
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                b = [idx[(i, j, k)], idx[(i + 1, j, k)],
+                     idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)]]
+                t = [idx[(i, j, k + 1)], idx[(i + 1, j, k + 1)],
+                     idx[(i + 1, j + 1, k + 1)], idx[(i, j + 1, k + 1)]]
+                hexes.append((1, b + t))
+    for i in range(nx):
+        for j in range(ny):
+            for k, tag in ((0, 10), (nz, 11)):
+                quads.append((tag, [idx[(i, j, k)], idx[(i + 1, j, k)],
+                                    idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)]]))
+
+    return nodes, hexes, quads
 
 
 # 2 次要素の辺の並び (Gmsh の tet10 / tri6)
@@ -509,6 +614,13 @@ def main():
         nodes, tets, tris = make_bar_air(**opt)
     elif kind == "plate2d":
         nodes, tets, tris = make_plate2d(**opt)
+    elif kind in ("coax_hex", "box_hex_warp"):
+        nodes, hexes, quads = (make_coax_hex(**opt) if kind == "coax_hex"
+                               else make_box_hex_warp(**opt))
+        write_msh_hex(path, nodes, hexes, quads)
+        print("%s : hexahedra, %d nodes, %d hexes, %d quads"
+              % (path, len(nodes), len(hexes), len(quads)))
+        return 0
     else:
         print("unknown mesh kind: %s" % kind)
         return 1

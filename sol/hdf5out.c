@@ -242,12 +242,14 @@ static int write_mesh(void)
 		// 要素の節点表。並びは Gmsh のまま (VTK 用の入れ替えはしない) なので、
 		// 属性に「Gmsh の並び」と明記しておく
 		const int p2 = (TetOrder >= 2);
-		const int nen = ((MeshDim == 2) ? (p2 ? 6 : 3) : (p2 ? 10 : 4));
+		const int hex = (MeshElem == MESHELEM_HEX);
+		const int nen = (hex ? 8 : ((MeshDim == 2) ? (p2 ? 6 : 3) : (p2 ? 10 : 4)));
 		int32_t *cl = (int32_t *)malloc((size_t)nc * nen * sizeof(int32_t));
 		for (int64_t e = 0; e < nc; e++) {
 			int32_t nd[10];
-			if (MeshDim == 2) tri_nodes((int)e, nd);
-			else              tet_nodes((int)e, nd);
+			if      (hex)          { for (int l = 0; l < 8; l++) nd[l] = Hex[(e * 8) + l]; }
+			else if (MeshDim == 2) tri_nodes((int)e, nd);
+			else                   tet_nodes((int)e, nd);
 			for (int l = 0; l < nen; l++) cl[(e * nen) + l] = nd[l];
 		}
 		d[0] = (hsize_t)nc;
@@ -281,6 +283,9 @@ static int write_mesh(void)
 			cd[e] = (int32_t)TriCond[e];
 		}
 		havecond = 1;
+	}
+	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
+		for (int64_t e = 0; e < nc; e++) m[e] = (int32_t)HexMat[e];
 	}
 	else if (MeshMode) {
 		for (int64_t e = 0; e < nc; e++) m[e] = (int32_t)TetMat[e];

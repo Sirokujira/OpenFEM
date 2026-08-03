@@ -24,7 +24,11 @@ fieldout.c
 
 int64_t num_cell(void)
 {
-	if (MeshMode) return ((MeshDim == 2) ? (int64_t)NTri : (int64_t)NTet);
+	if (MeshMode) {
+		if (MeshDim == 2) return (int64_t)NTri;
+
+		return ((MeshElem == MESHELEM_HEX) ? (int64_t)NHex : (int64_t)NTet);
+	}
 
 	return ((int64_t)Nx * Ny * Nz);
 }
@@ -110,6 +114,20 @@ void field_cell_grad(const double *u, int kind, double *v)
 				for (int a = 0; a < nen; a++) {
 					d[p] += u[nd[a]] * gn[a][0];
 					d[q] += u[nd[a]] * gn[a][1];
+				}
+			}
+			for (int c = 0; c < 3; c++) v[(e * 3) + c] = -d[c];
+		}
+	}
+	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
+		// 六面体は要素中心で等パラメトリック写像の勾配を評価する
+		for (int e = 0; e < NHex; e++) {
+			double gn[8][3], d[3] = {0, 0, 0};
+			if (!hex_grad_center(e, gn)) {
+				const int32_t *nd = &Hex[e * 8];
+				for (int a = 0; a < 8; a++) {
+					const double ua = u[nd[a]];
+					for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
 				}
 			}
 			for (int c = 0; c < 3; c++) v[(e * 3) + c] = -d[c];
@@ -208,6 +226,23 @@ static void write_grid(FILE *fp)
 		// VTK_TRIANGLE = 5, VTK_QUADRATIC_TRIANGLE = 22
 		for (int e = 0; e < NTri; e++) fprintf(fp, "%d\n", ((nen == 6) ? 22 : 5));
 	}
+	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
+		fprintf(fp, "DATASET UNSTRUCTURED_GRID\n");
+		fprintf(fp, "POINTS %d double\n", NNode);
+		for (int i = 0; i < NNode; i++) {
+			fprintf(fp, "%.9e %.9e %.9e\n", Xp[i], Yp[i], Zp[i]);
+		}
+		// VTK_HEXAHEDRON (12) の節点の並びは Gmsh の hex8 と同じ
+		// (下面を反時計回り、その上に上面) なので並べ替えは要らない
+		fprintf(fp, "\nCELLS %d %d\n", NHex, 9 * NHex);
+		for (int e = 0; e < NHex; e++) {
+			fprintf(fp, "8");
+			for (int l = 0; l < 8; l++) fprintf(fp, " %d", Hex[(e * 8) + l]);
+			fprintf(fp, "\n");
+		}
+		fprintf(fp, "\nCELL_TYPES %d\n", NHex);
+		for (int e = 0; e < NHex; e++) fprintf(fp, "%d\n", 12);
+	}
 	else if (MeshMode) {
 		fprintf(fp, "DATASET UNSTRUCTURED_GRID\n");
 		fprintf(fp, "POINTS %d double\n", NNode);
@@ -294,6 +329,9 @@ static void write_cell_int(FILE *fp, const char *name, int structured_from_cell)
 		for (int e = 0; e < NTri; e++) {
 			fprintf(fp, "%d\n", (structured_from_cell ? (int)TriCond[e] : (int)TriMat[e]));
 		}
+	}
+	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
+		for (int e = 0; e < NHex; e++) fprintf(fp, "%d\n", (int)HexMat[e]);
 	}
 	else if (MeshMode) {
 		for (int e = 0; e < NTet; e++) fprintf(fp, "%d\n", (int)TetMat[e]);
