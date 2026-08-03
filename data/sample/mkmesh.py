@@ -182,6 +182,62 @@ def write_msh_cells(path, nodes, cells):
         f.write("$EndElements\n")
 
 
+def make_box_mixed(nx=3, ny=3, nz=4, lx=1e-3, ly=1e-3, lz=0.2e-3, warp=0, seed=20260803):
+    """**角柱 + 四面体**の混在格子 (境界層を角柱、内部を四面体にした形)
+
+    下 2 層を角柱、上の層を四面体にする。境界面は三角形どうしで接するので
+    **適合する** (どちらも面上で 1 次)。六面体と四面体は四角形面と三角形面で
+    面上の解が食い違うため直接は隣り合わせにできない (ソルバー側で弾く)。
+
+    warp = 1 で内部節点を乱数で動かす (等パラメトリック写像の検証用)。
+
+    **角柱と四面体で物理タグを分ける** (1 / 2)。同じタグにすると要素番号から
+    材料を引く経路 (種別ごとに配列が別で添字のずれ方も違う) が単一材料になり、
+    添字を取り違えても答えが変わらない。
+
+    物理タグ : 1 = 角柱の領域、2 = 四面体の領域、
+               10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
+    """
+    rnd = random.Random(seed)
+    nodes = []
+    idx = {}
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            for k in range(nz + 1):
+                x, y, z = lx * i / nx, ly * j / ny, lz * k / nz
+                if warp:
+                    if 0 < i < nx: x += 0.30 * (rnd.random() - 0.5) * lx / nx
+                    if 0 < j < ny: y += 0.30 * (rnd.random() - 0.5) * ly / ny
+                    if 0 < k < nz: z += 0.30 * (rnd.random() - 0.5) * lz / nz
+                idx[(i, j, k)] = len(nodes)
+                nodes.append((x, y, z))
+
+    # 四角柱を対角線で 2 つの三角柱に割る (角柱と四面体で同じ三角形分割を使う)
+    tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
+    nprism = 2                          # 下から 2 層を角柱に
+    cells = []
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                for tri in tris:
+                    b = [idx[(i + a, j + c, k)] for a, c in tri]
+                    t = [idx[(i + a, j + c, k + 1)] for a, c in tri]
+                    if k < nprism:
+                        cells.append((1, 6, b + t))
+                    else:
+                        # 三角柱を 3 四面体に割る (面が三角形で揃うので適合)
+                        p = b + t
+                        for q in ((0, 1, 2, 5), (0, 1, 5, 4), (0, 4, 5, 3)):
+                            cells.append((2, 4, [p[q[0]], p[q[1]], p[q[2]], p[q[3]]]))
+    for i in range(nx):
+        for j in range(ny):
+            for k, tag in ((0, 10), (nz, 11)):
+                for tri in tris:
+                    cells.append((tag, 2, [idx[(i + a, j + c, k)] for a, c in tri]))
+
+    return nodes, cells
+
+
 def make_box_prism_warp(nx=3, ny=3, nz=3, lx=1e-3, ly=1e-3, lz=0.2e-3, seed=20260803):
     """**ゆがんだ**角柱格子 (等パラメトリック写像の自己検証用)
 
@@ -674,8 +730,9 @@ def main():
         nodes, tets, tris = make_bar_air(**opt)
     elif kind == "plate2d":
         nodes, tets, tris = make_plate2d(**opt)
-    elif kind == "box_prism_warp":
-        nodes, cells = make_box_prism_warp(**opt)
+    elif kind in ("box_prism_warp", "box_mixed"):
+        nodes, cells = (make_box_prism_warp(**opt) if kind == "box_prism_warp"
+                        else make_box_mixed(**opt))
         write_msh_cells(path, nodes, cells)
         print("%s : prisms, %d nodes, %d cells" % (path, len(nodes), len(cells)))
         return 0

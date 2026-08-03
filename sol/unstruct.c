@@ -187,12 +187,51 @@ static int elem_finish(void)
 {
 	// **四面体と六面体の混在は弾く。** 要素行列も CRS も要素種別で分岐して
 	// おり、混在させると「どちらの経路を通ったか」で答えが変わる
+	/*
+	3 次元の要素種別を決める。**混在 (四面体 + 六面体 + 角柱) を許す。**
+
+	要素は「四面体 -> 六面体 -> 角柱」の連番で扱う (`elem3d_*`)。純粋な
+	四面体格子ではこの順序が従来と完全に一致するので、既存の答えはビット単位で
+	変わらない。2 次要素は四面体にしかないので、混ざるときは 1 次に限る。
+	*/
 	{
 		const int nk = ((NTet > 0) ? 1 : 0) + ((NHex > 0) ? 1 : 0) + ((NPrism > 0) ? 1 : 0);
 		if (nk > 1) {
-			printf("*** mesh : %d tetrahedra, %d hexahedra and %d prisms are mixed "
-				"(one element type per mesh)\n", NTet, NHex, NPrism);
-			return 1;
+			/*
+			**六面体と四面体は直接隣り合わせにできない。**
+			六面体の面は四角形で、その上の解は双 1 次 (xy の項を持つ)。
+			四面体の面は三角形で解は 1 次なので、六面体の四角形面を三角形 2 枚で
+			覆っても**面上の解が一致しない** (節点は合っていても要素間で場が
+			食い違う)。これを埋めるための要素がピラミッドで、それが無い以上は
+			黙って通さずに弾く。
+
+			角柱を挟むのは問題ない:
+			  四面体 - 角柱 : 三角形の面どうし (どちらも 1 次) -> 適合
+			  六面体 - 角柱 : 四角形の面どうし (どちらも双 1 次) -> 適合
+			境界層を角柱で切って内部を四面体にする、という一番よくある形は通る。
+			*/
+			if ((NTet > 0) && (NHex > 0)) {
+				printf("%s\n", "*** mesh : hexahedra and tetrahedra cannot share a "
+					"face conformingly (the quadrilateral face carries a bilinear "
+					"trace, the triangular face a linear one); put prisms between "
+					"them, or use one element type");
+				return 1;
+			}
+			if (TetOrder >= 2) {
+				printf("%s\n", "*** mesh : 10-node tetrahedra cannot be mixed with "
+					"hexahedra or prisms (the other types are first order)");
+				return 1;
+			}
+			MeshElem = MESHELEM_MIXED;
+			MeshDim = 3;
+			TetOrder = 1;
+			if ((NTri < 1) && (NQuad < 1)) {
+				printf("%s\n", "*** mesh : a mixed mesh needs triangular or "
+					"quadrilateral boundary faces for the electrodes");
+				return 1;
+			}
+
+			return 0;
 		}
 	}
 	if (NPrism > 0) {
@@ -1036,7 +1075,7 @@ int tet_nodes(int e, int32_t nd[10])
 **四面体の経路は結果も並び順もこれまでと同一** (既存の回帰がバイト単位で
 一致することで確かめている)。
 */
-static void crs_alloc_conn(crs_t *A, int nelem, int nen, void (*get)(int, int32_t *))
+static void crs_alloc_conn(crs_t *A, int nelem, int nenmax, int (*get)(int, int32_t *))
 {
 	const int n = NNode;
 
@@ -1045,7 +1084,7 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nen, void (*get)(int, int32_
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < nelem; e++) {
 		int32_t nd[10];
-		get(e, nd);
+		const int nen = get(e, nd);
 		for (int l = 0; l < nen; l++) cnt[nd[l]]++;
 	}
 	int64_t *nptr = (int64_t *)malloc(((size_t)n + 1) * sizeof(int64_t));
@@ -1055,7 +1094,7 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nen, void (*get)(int, int32_
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < nelem; e++) {
 		int32_t nd[10];
-		get(e, nd);
+		const int nen = get(e, nd);
 		for (int l = 0; l < nen; l++) {
 			const int32_t i = nd[l];
 			nlist[nptr[i] + cnt[i]] = (int32_t)e;
@@ -1073,7 +1112,7 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nen, void (*get)(int, int32_
 
 	for (int i = 0; i < n; i++) {
 		const int64_t p0 = nptr[i], p1 = nptr[i + 1];
-		const int need = (int)(p1 - p0) * nen;
+		const int need = (int)(p1 - p0) * nenmax;
 		if (need > cap) {
 			cap = need;
 			work = (int32_t *)realloc(work, (size_t)cap * sizeof(int32_t));
@@ -1081,7 +1120,7 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nen, void (*get)(int, int32_
 		int m = 0;
 		for (int64_t p = p0; p < p1; p++) {
 			int32_t nd[10];
-			get(nlist[p], nd);
+			const int nen = get(nlist[p], nd);
 			for (int l = 0; l < nen; l++) work[m++] = nd[l];
 		}
 		qsort(work, (size_t)m, sizeof(int32_t), cmp_int32);
@@ -1103,7 +1142,7 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nen, void (*get)(int, int32_
 		int m = 0;
 		for (int64_t p = p0; p < p1; p++) {
 			int32_t nd[10];
-			get(nlist[p], nd);
+			const int nen = get(nlist[p], nd);
 			for (int l = 0; l < nen; l++) work[m++] = nd[l];
 		}
 		qsort(work, (size_t)m, sizeof(int32_t), cmp_int32);
@@ -1123,15 +1162,68 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nen, void (*get)(int, int32_
 }
 
 
-static void get_tet(int e, int32_t *nd)
+/*
+3 次元要素の統一した見方 (種別の混在を許すため)。
+
+番号は **「四面体 -> 六面体 -> 角柱」の連番**。この順序は変えないこと:
+材料・場の出力・HDF5 がこの順に並ぶ。純粋な四面体格子ではこの並びが
+従来と完全に一致するので、既存の答えがビット単位で変わらない。
+*/
+int elem3d_count(void)
 {
-	tet_nodes(e, nd);
+	return (NTet + NHex + NPrism);
 }
 
 
-static void get_hex(int e, int32_t *nd)
+int elem3d_kind(int e)
 {
-	for (int l = 0; l < 8; l++) nd[l] = Hex[(e * 8) + l];
+	if (e < NTet) return MESHELEM_TET;
+	if (e < (NTet + NHex)) return MESHELEM_HEX;
+
+	return MESHELEM_PRISM;
+}
+
+
+// 要素 e の節点。戻り値は節点数 (四面体 4 or 10、六面体 8、角柱 6)
+int elem3d_nodes(int e, int32_t nd[10])
+{
+	if (e < NTet) return tet_nodes(e, nd);
+	if (e < (NTet + NHex)) {
+		const int i = e - NTet;
+		for (int l = 0; l < 8; l++) nd[l] = Hex[(i * 8) + l];
+
+		return 8;
+	}
+	{
+		const int i = e - NTet - NHex;
+		for (int l = 0; l < 6; l++) nd[l] = Prism[(i * 6) + l];
+	}
+
+	return 6;
+}
+
+
+int elem3d_mat(int e)
+{
+	if (e < NTet) return ((TetMat != NULL) ? TetMat[e] : 0);
+	if (e < (NTet + NHex)) return ((HexMat != NULL) ? HexMat[e - NTet] : 0);
+
+	return ((PrismMat != NULL) ? PrismMat[e - NTet - NHex] : 0);
+}
+
+
+int elem3d_tag(int e)
+{
+	if (e < NTet) return TetTag[e];
+	if (e < (NTet + NHex)) return HexTag[e - NTet];
+
+	return PrismTag[e - NTet - NHex];
+}
+
+
+static int get_tet(int e, int32_t *nd)
+{
+	return tet_nodes(e, nd);
 }
 
 
@@ -1141,21 +1233,10 @@ void crs_alloc_tet(crs_t *A)
 }
 
 
-void crs_alloc_hex(crs_t *A)
+// 3 次元の非構造格子 (種別の混在を含む)
+void crs_alloc_elem3d(crs_t *A)
 {
-	crs_alloc_conn(A, NHex, 8, get_hex);
-}
-
-
-static void get_prism(int e, int32_t *nd)
-{
-	for (int l = 0; l < 6; l++) nd[l] = Prism[(e * 6) + l];
-}
-
-
-void crs_alloc_prism(crs_t *A)
-{
-	crs_alloc_conn(A, NPrism, 6, get_prism);
+	crs_alloc_conn(A, elem3d_count(), ((TetOrder >= 2) ? 10 : 8), elem3d_nodes);
 }
 
 
@@ -1758,6 +1839,113 @@ void assemble_prism(crs_t *A, int mode)
 }
 
 
+/*
+混在格子の自己検証 (線形場の恒等式)。
+
+φ = a・r は四面体・六面体・角柱のいずれでも厳密に補間できるので、種別が
+混ざっていても φᵀKφ = (aᵀCa) V が厳密に成り立つ。**種別をまたぐ面で節点が
+共有されていない (格子が割れている) と、この恒等式が破れる**ので、混在で
+一番危ない「面の不整合」がここで落ちる。
+*/
+static int nodal_test_mixed(FILE *fp_log)
+{
+	int ierr = 0;
+
+	fprintf(fp_log, "\n=== nodal element (mixed) self test ===\n");
+	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, hexahedra = %d, prisms = %d\n",
+		NNode, NTet, NHex, NPrism);
+
+	const double c[6] = {2.0, 3.0, 1.5, 0.4, 0.3, 0.2};
+	const double a[3] = {0.7, -1.3, 0.9};
+	double aca = 0;
+	{
+		const double cm[3][3] = {{c[0], c[3], c[5]}, {c[3], c[1], c[4]}, {c[5], c[4], c[2]}};
+		for (int i = 0; i < 3; i++) {
+			for (int j = 0; j < 3; j++) aca += a[i] * cm[i][j] * a[j];
+		}
+	}
+
+	crs_t A;
+	crs_alloc(&A);
+	crs_zero(&A);
+	double vol = 0;
+	const int ne = elem3d_count();
+	for (int e = 0; e < ne; e++) {
+		const int kind = elem3d_kind(e);
+		int32_t nd[10];
+		double ke[10][10], v = 0;
+		int nen = 0;
+		if (kind == MESHELEM_TET) {
+			double g[4][3];
+			const int32_t *t = &Tet[e * 4];
+			if (tet_grad_pub(t, g, &v)) continue;
+			nen = 4;
+			for (int l = 0; l < 4; l++) nd[l] = t[l];
+			const double cm[3][3] = {{c[0], c[3], c[5]}, {c[3], c[1], c[4]}, {c[5], c[4], c[2]}};
+			for (int l = 0; l < 4; l++) {
+				for (int m = 0; m < 4; m++) {
+					double x = 0;
+					for (int i = 0; i < 3; i++) {
+						for (int j = 0; j < 3; j++) x += g[l][i] * cm[i][j] * g[m][j];
+					}
+					ke[l][m] = x * v;
+				}
+			}
+		}
+		else if (kind == MESHELEM_HEX) {
+			double k8[8][8];
+			const int32_t *t = &Hex[(e - NTet) * 8];
+			if (hex_element(t, c, k8, &v)) continue;
+			nen = 8;
+			for (int l = 0; l < 8; l++) nd[l] = t[l];
+			for (int l = 0; l < 8; l++) {
+				for (int m = 0; m < 8; m++) ke[l][m] = k8[l][m];
+			}
+		}
+		else {
+			double k6[6][6];
+			const int32_t *t = &Prism[(e - NTet - NHex) * 6];
+			if (prism_element(t, c, k6, &v)) continue;
+			nen = 6;
+			for (int l = 0; l < 6; l++) nd[l] = t[l];
+			for (int l = 0; l < 6; l++) {
+				for (int m = 0; m < 6; m++) ke[l][m] = k6[l][m];
+			}
+		}
+		vol += v;
+		for (int l = 0; l < nen; l++) {
+			for (int m = 0; m < nen; m++) {
+				const int64_t p = crs_find(&A, nd[l], nd[m]);
+				if (p >= 0) A.val[p] += ke[l][m];
+			}
+		}
+	}
+
+	double *phi = (double *)malloc((size_t)NNode * sizeof(double));
+	for (int i = 0; i < NNode; i++) {
+		phi[i] = (a[0] * Xp[i]) + (a[1] * Yp[i]) + (a[2] * Zp[i]);
+	}
+	double quad = 0;
+	for (int i = 0; i < NNode; i++) {
+		quad += phi[i] * crs_row_dot(&A, i, phi);
+	}
+	const double want = aca * vol;
+	const double err = ((want != 0) ? (fabs(quad - want) / fabs(want)) : 0);
+	fprintf(fp_log, "  volume = %.10e\n", vol);
+	fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, "
+		"rel. error = %.2e\n", quad, want, err);
+	if (err > 1e-12) {
+		fprintf(fp_log, "*** the linear-field identity failed\n");
+		ierr = 1;
+	}
+
+	free(phi);
+	crs_free(&A);
+
+	return ierr;
+}
+
+
 // 角柱の自己検証 (線形場の恒等式。六面体と同じ考え方)
 static int nodal_test_prism(FILE *fp_log)
 {
@@ -1863,6 +2051,87 @@ static int nodal_test_prism(FILE *fp_log)
 	crs_free(&A);
 
 	return ierr;
+}
+
+
+/*
+3 次元の非構造格子の組み立て (種別の混在を含む)。
+
+**要素の走査順は elem3d_* の連番 (四面体 -> 六面体 -> 角柱)。** 純粋な
+四面体格子では従来の assemble_tet と同じ順・同じ演算になるので、
+浮動小数の丸めまで含めて答えが変わらない (既存の回帰で確認する)。
+*/
+void assemble_elem3d(crs_t *A, int mode)
+{
+	crs_zero(A);
+
+	const int ne = elem3d_count();
+	const int p2 = (TetOrder >= 2);
+
+	for (int e = 0; e < ne; e++) {
+		double c[6];
+		material_coef_pub(elem3d_mat(e), mode, c);
+		if ((c[0] <= 0) && (c[1] <= 0) && (c[2] <= 0)) continue;
+
+		const int kind = elem3d_kind(e);
+
+		if (kind == MESHELEM_TET) {
+			if (p2) {
+				int32_t nd[10];
+				double ke[10][10], vol;
+				tet_nodes(e, nd);
+				if (tet10_element(e, c, ke, &vol)) continue;
+				for (int l = 0; l < 10; l++) {
+					for (int m = 0; m < 10; m++) {
+						const int64_t p = crs_find(A, nd[l], nd[m]);
+						if (p >= 0) A->val[p] += ke[l][m];
+					}
+				}
+				continue;
+			}
+			const int32_t *nd = &Tet[e * 4];
+			double g[4][3], vol;
+			if (tet_grad_pub(nd, g, &vol)) continue;
+			for (int l = 0; l < 4; l++) {
+				for (int m = 0; m < 4; m++) {
+					const double v = (c[0] * g[l][0] * g[m][0])
+					               + (c[1] * g[l][1] * g[m][1])
+					               + (c[2] * g[l][2] * g[m][2])
+					               + (c[3] * ((g[l][0] * g[m][1]) + (g[l][1] * g[m][0])))
+					               + (c[4] * ((g[l][1] * g[m][2]) + (g[l][2] * g[m][1])))
+					               + (c[5] * ((g[l][2] * g[m][0]) + (g[l][0] * g[m][2])));
+					const int64_t p = crs_find(A, nd[l], nd[m]);
+					if (p >= 0) A->val[p] += v * vol;
+				}
+			}
+			continue;
+		}
+
+		if (kind == MESHELEM_HEX) {
+			const int32_t *nd = &Hex[(e - NTet) * 8];
+			double ke[8][8], vol;
+			if (hex_element(nd, c, ke, &vol)) continue;
+			for (int l = 0; l < 8; l++) {
+				for (int m = 0; m < 8; m++) {
+					const int64_t p = crs_find(A, nd[l], nd[m]);
+					if (p >= 0) A->val[p] += ke[l][m];
+				}
+			}
+			continue;
+		}
+
+		{
+			const int32_t *nd = &Prism[(e - NTet - NHex) * 6];
+			double ke[6][6], vol;
+			if (prism_element(nd, c, ke, &vol)) continue;
+			for (int l = 0; l < 6; l++) {
+				for (int m = 0; m < 6; m++) {
+					const int64_t p = crs_find(A, nd[l], nd[m]);
+					if (p >= 0) A->val[p] += ke[l][m];
+				}
+			}
+		}
+	}
 }
 
 
@@ -2101,6 +2370,7 @@ int solve_nodal_test(FILE *fp_log)
 
 	if (MeshElem == MESHELEM_HEX)   return nodal_test_hex(fp_log);
 	if (MeshElem == MESHELEM_PRISM) return nodal_test_prism(fp_log);
+	if (MeshElem == MESHELEM_MIXED) return nodal_test_mixed(fp_log);
 
 	fprintf(fp_log, "\n=== nodal element (P%d) self test ===\n", TetOrder);
 	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, nodes per element = %d\n",

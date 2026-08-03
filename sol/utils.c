@@ -47,7 +47,12 @@ void monitor2(FILE *fp, int nthread)
 	fprintf(fp, "%s", ctime(&now));
 	fprintf(fp, "Title = %s\n", Title);
 	fprintf(fp, "Threads = %d\n", nthread);
-	if (MeshMode && (MeshElem == MESHELEM_PRISM)) {
+	if (MeshMode && (MeshElem == MESHELEM_MIXED)) {
+		fprintf(fp, "Mesh = %s (unstructured, mixed element types)\n", MeshFile);
+		fprintf(fp, "Nodes = %lld, Tetrahedra = %d, Hexahedra = %d, Prisms = %d\n",
+			(long long)nnode, NTet, NHex, NPrism);
+	}
+	else if (MeshMode && (MeshElem == MESHELEM_PRISM)) {
 		fprintf(fp, "Mesh = %s (unstructured, 6-node prisms)\n", MeshFile);
 		fprintf(fp, "Nodes = %lld, Prisms = %d, Triangles = %d, Quadrilaterals = %d\n",
 			(long long)nnode, NPrism, NTri, NQuad);

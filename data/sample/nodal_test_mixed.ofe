@@ -1,0 +1,26 @@
+OpenFEM 1 0
+title = mixed element self test (linear field identity across element types)
+#
+# 混在格子 (角柱 + 四面体) の自己検証。
+#
+#   python3 mkmesh.py box_mixed box_mixed_warp.msh -warp 1
+#
+# phi = a.r はどちらの要素でも厳密に補間できるので、種別が混ざっていても
+# phi^T K phi = (a^T C a) * V が厳密に成り立つ。
+#
+# **種別をまたぐ面で節点が共有されていないと (格子が割れていると) この恒等式が
+# 破れる**ので、混在で一番危ない「面の不整合」がここで落ちる。
+#
+# 体積は要素の総和で、ゆがんだ格子では箱の体積とは一致しない。四角形面が
+# 平面でなくなると、角柱 (面が双 1 次) と四面体 (面が平面) で領域の切り方が
+# 変わるためで、誤りではない。恒等式は同じ総和を両辺で使うので影響しない。
+#
+mesh = box_mixed_warp.msh
+material = 4.0 0
+region = 1 2
+region = 2 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end

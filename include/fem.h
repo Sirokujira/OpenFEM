@@ -205,6 +205,7 @@ EXTERN int *TriTag;				// [NTri] 物理タグ
 #define MESHELEM_TET (0)
 #define MESHELEM_HEX (1)
 #define MESHELEM_PRISM (2)
+#define MESHELEM_MIXED (3)		// 複数の種別が同居する格子
 EXTERN int MeshElem;
 EXTERN int NHex;				// 六面体数
 EXTERN int32_t *Hex;			// [8*NHex] 節点番号
