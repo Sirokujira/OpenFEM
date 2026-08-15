@@ -1,0 +1,28 @@
+OpenFEM 1 0
+title = coax on a curved second-order hexahedral mesh
+#
+# **曲がった 2 次六面体** (hex27) の同軸線路。
+#
+#   python3 mkmesh.py coax_hex2 coax_hex2.msh
+#
+# 全節点 (中間節点を含む) を厳密に円筒面に載せるので、等パラメトリック写像が
+# 境界を円弧として表す (coax_p2 の六面体版)。粗い格子 (nr=4, nt=12) でも
+#
+#   C' = 2 pi eps0 * 2.1 / ln(3) = 1.063417e-10 [F/m]
+#
+# に 1e-5 の精度で一致する (実測 +0.0009%)。**同じ nr, nt の 1 次六面体**
+# (coax_h1c.msh) は +3.0% ずれるので、比が 30 を超えることを対にして見る
+# (2 次要素が黙って 1 次に退行すると許容を緩めても比の検査で落ちる)。
+#
+# 物理タグ : 1 = 体積、10 = 外側 r=b (基準電極)、11 = 内側 r=a (ポート 1)
+#
+mesh = coax_hex2.msh
+material = 2.1 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+tline = Z
+
+analysis = C L
+solver = 50000 2000 1e-13
+end

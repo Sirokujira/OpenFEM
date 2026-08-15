@@ -126,22 +126,50 @@ void field_cell_grad(const double *u, int kind, double *v)
 			const int kind = elem3d_kind(e);
 			double d[3] = {0, 0, 0};
 			if (kind == MESHELEM_HEX) {
-				double gn[8][3];
-				if (!hex_grad_center(e - NTet, gn)) {
-					const int32_t *nd = &Hex[(e - NTet) * 8];
-					for (int a = 0; a < 8; a++) {
-						const double ua = u[nd[a]];
-						for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+				if (HexNen > 8) {
+					double gn[27][3];
+					int nen = 0;
+					if (!hex2_grad_center(e - NTet, gn, &nen)) {
+						int32_t nd[27];
+						hex_nodes(e - NTet, nd);
+						for (int a = 0; a < nen; a++) {
+							const double ua = u[nd[a]];
+							for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+						}
+					}
+				}
+				else {
+					double gn[8][3];
+					if (!hex_grad_center(e - NTet, gn)) {
+						const int32_t *nd = &Hex[(e - NTet) * 8];
+						for (int a = 0; a < 8; a++) {
+							const double ua = u[nd[a]];
+							for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+						}
 					}
 				}
 			}
 			else if (kind == MESHELEM_PRISM) {
-				double gn[6][3];
-				if (!prism_grad_center(e - NTet - NHex, gn)) {
-					const int32_t *nd = &Prism[(e - NTet - NHex) * 6];
-					for (int a = 0; a < 6; a++) {
-						const double ua = u[nd[a]];
-						for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+				if (PrismNen > 6) {
+					double gn[18][3];
+					int nen = 0;
+					if (!prism2_grad_center(e - NTet - NHex, gn, &nen)) {
+						int32_t nd[18];
+						prism_nodes(e - NTet - NHex, nd);
+						for (int a = 0; a < nen; a++) {
+							const double ua = u[nd[a]];
+							for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+						}
+					}
+				}
+				else {
+					double gn[6][3];
+					if (!prism_grad_center(e - NTet - NHex, gn)) {
+						const int32_t *nd = &Prism[(e - NTet - NHex) * 6];
+						for (int a = 0; a < 6; a++) {
+							const double ua = u[nd[a]];
+							for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+						}
 					}
 				}
 			}
@@ -265,17 +293,33 @@ static void write_grid(FILE *fp)
 		for (int i = 0; i < NNode; i++) {
 			fprintf(fp, "%.9e %.9e %.9e\n", Xp[i], Yp[i], Zp[i]);
 		}
+		/*
+		2 次の六面体・角柱は**頂点だけの 1 次セル**として書く。VTK の
+		QUADRATIC_HEXAHEDRON (25) / TRIQUADRATIC_HEXAHEDRON (29) /
+		QUADRATIC_WEDGE (26) は中間節点の並びが Gmsh と違ううえ、手元の
+		ツールで検証できない並べ替え表を書いても「動くつもりのコード」に
+		しかならない。頂点セルなら並びは 1 次と同一で、CELL_DATA の対応
+		(要素あたり 1 セル) も変わらない。中間節点は POINT_DATA に含まれるが
+		セルから参照されないだけで、VTK として正しいファイルになる
+		*/
 		int64_t total = 0;
 		for (int e = 0; e < ne; e++) {
-			int32_t nd[10];
-			total += elem3d_nodes(e, nd) + 1;
+			int32_t nd[27];
+			int nen = elem3d_nodes(e, nd);
+			const int kind = elem3d_kind(e);
+			if ((kind == MESHELEM_HEX) && (nen > 8)) nen = 8;
+			if ((kind == MESHELEM_PRISM) && (nen > 6)) nen = 6;
+			total += nen + 1;
 		}
 		fprintf(fp, "\nCELLS %d %lld\n", ne, (long long)total);
 		for (int e = 0; e < ne; e++) {
-			int32_t nd[10];
-			const int nen = elem3d_nodes(e, nd);
+			int32_t nd[27];
+			int nen = elem3d_nodes(e, nd);
+			const int kind = elem3d_kind(e);
+			if ((kind == MESHELEM_HEX) && (nen > 8)) nen = 8;
+			if ((kind == MESHELEM_PRISM) && (nen > 6)) nen = 6;
 			fprintf(fp, "%d", nen);
-			if ((elem3d_kind(e) == MESHELEM_TET) && (nen == 10)) {
+			if ((kind == MESHELEM_TET) && (nen == 10)) {
 				// VTK_QUADRATIC_TETRA は中間節点の最後の 2 つが Gmsh と逆
 				for (int l = 0; l < 4; l++) fprintf(fp, " %d", nd[l]);
 				for (int l = 4; l < 10; l++) fprintf(fp, " %d", nd[4 + g2v[l - 4]]);

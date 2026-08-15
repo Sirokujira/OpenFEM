@@ -253,12 +253,19 @@ static int setup_unstruct(void)
 	// 同じ値を二度塗るだけになり無害
 	NodeConductor = (signed char *)malloc((size_t)NNode * sizeof(signed char));
 	memset(NodeConductor, -1, (size_t)NNode * sizeof(signed char));
-	// 六面体格子の境界面は四角形になる
+	// 六面体格子の境界面は四角形になる。2 次格子では中間節点 (辺 4 + 中心) も
+	// 固定する (Quad2 の -1 は「その位置に節点が無い」)
 	for (int t = 0; t < NQuad; t++) {
 		for (int q = 0; q < NElectrode; q++) {
 			if (QuadTag[t] != ElecTag[q]) continue;
 			for (int l = 0; l < 4; l++) {
 				NodeConductor[Quad[(t * 4) + l]] = (signed char)ElecCond[q];
+			}
+			if (Quad2 != NULL) {
+				for (int l = 0; l < 5; l++) {
+					const int32_t n = Quad2[(t * 5) + l];
+					if (n >= 0) NodeConductor[n] = (signed char)ElecCond[q];
+				}
 			}
 		}
 	}
@@ -512,8 +519,9 @@ void memfree(void)
 	free(Xp); free(Yp); free(Zp);
 	free(Tet); free(TetTag); free(TetMat); free(Tet2);
 	free(Tri); free(TriTag); free(Tri2); free(TriMat); free(TriCond); free(TriArea);
-	free(Hex); free(HexTag); free(HexMat); free(Quad); free(QuadTag);
-	free(Prism); free(PrismTag); free(PrismMat);
+	free(Hex); free(HexTag); free(HexMat); free(Hex2);
+	free(Quad); free(QuadTag); free(Quad2);
+	free(Prism); free(PrismTag); free(PrismMat); free(Prism2);
 	free(Pyr); free(PyrTag); free(PyrMat);
 	free(CellMaterial);
 	free(CellConductor);

@@ -904,6 +904,101 @@ if ! (cd "$WORK" && "$OFE" -n 2 badj.ofe 2>&1 | grep -q "covered by triangular")
 	status=1
 fi
 
+# 2 次の六面体・角柱 (Gmsh の型 12 = hex27 / 17 = hex20 / 13 = prism18 /
+# 18 = prism15)。局所節点の並びは gmsh 4.12.1 の出力を分類して実測した表を使う。
+#
+#   (a) 長方形格子 (gmsh 製) : 平行平板 C が閉形式と全桁一致 (4 つの型すべて)。
+#       電極の中間節点 (9/8 節点四角形・6 節点三角形) の固定もここで通る
+#   (b) 2 次場の恒等式 (analysis = P、長方形格子) : **2 次特有の基底 (辺・面・
+#       体心) と積分則を検査できるのはこれだけ**。線形場では grad phi が定数に
+#       なり、2 次の係数の誤りの多くが素通りする (tet10 と同じ構図)
+#   (c) ゆがんだ格子 : 線形場の恒等式 + 3/4 点則の体積一致 (機械精度)
+#   (d) 曲がった同軸 (全節点が円筒面上) : 閉形式と 0.1% + **同じ格子の 1 次より
+#       30 倍以上良いこと** (2 次が黙って 1 次に退行すると比の検査で落ちる)
+#   (e) 次数の混在・1 次の電極面・2 次どうしの種別混在は理由の文字列まで見て弾く
+echo "[order-2 hex/prism] 20/27-node hexahedra and 15/18-node prisms"
+run_case box_hex2
+compare "C (hex27 box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+run_case box_hex2s
+compare "C (hex20 box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+run_case box_prism2
+compare "C (prism18 box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+run_case box_prism2s
+compare "C (prism15 box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+# (b) 2 次場の恒等式 (4 つの型すべて。skipped になっていないことも見る)
+for m in box_hex2 box_hex2s box_prism2 box_prism2s; do
+	sed "s/^mesh = .*/mesh = $m.msh/" "$SRC/nodal_test_hex2r.ofe" > "$WORK/p2q.ofe"
+	(cd "$WORK" && "$OFE" -n 2 p2q.ofe > /dev/null)
+	res=$(awk '/quadratic field :/ {
+			if ($0 ~ /skipped/) { printf "NG (skipped)"; exit }
+			for (i = 1; i <= NF; i++) if ($i == "error") e = $(i+2) }
+		END { if (e == "") { printf "NG (no report)"; exit }
+		      printf "%s (%s)", ((e + 0) < 1e-10) ? "OK" : "NG", e }' "$WORK/ofe.log")
+	echo "  quadratic-field identity ($m) : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+# (c) ゆがんだ格子
+for f in nodal_test_hex2 nodal_test_prism2; do
+	cp "$SRC/$f.ofe" "$WORK/"
+	(cd "$WORK" && "$OFE" -n 2 "$f.ofe" > /dev/null)
+	res=$(awk '/linear field/ { for (i = 1; i <= NF; i++) if ($i == "error") e = $(i+2) }
+		/rel. diff/ { for (i = 1; i <= NF; i++) if ($i == "diff") v = $(i+2) }
+		END { if ((e == "") || (v == "")) { printf "NG (no report)"; exit }
+		      printf "%s (linear %s, volume %s)",
+		             (((e + 0) < 1e-12) && ((v + 0) < 1e-12)) ? "OK" : "NG", e, v }' \
+		"$WORK/ofe.log")
+	echo "  distorted mesh ($f) : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+# (d) 曲がった同軸と 1 次の対照 (同じ nr=4, nt=12)
+run_case coax_hex2
+compare "C' (hex27 coax) [F/m]" "$(value_of C)" 1.063417e-10 0.001
+compare "L' (hex27 coax) [H/m]" "$(value_of L)" 2.197225e-07 0.001
+c2=$(value_of C)
+run_case coax_h1c
+c1=$(value_of C)
+res=$(awk -v a="$c1" -v b="$c2" 'BEGIN {
+	e = 1.0634166122760362e-10
+	e1 = (a - e) / e; if (e1 < 0) e1 = -e1
+	e2 = (b - e) / e; if (e2 < 0) e2 = -e2
+	r = ((e2 > 0) ? (e1 / e2) : 1e9)
+	printf "%s (order 1 %+.2f%%, order 2 %+.4f%%, ratio %.0f)",
+	       ((r >= 30) ? "OK" : "NG"), e1 * 100, e2 * 100, r }')
+echo "  order 2 beats order 1 on the same coarse mesh : $res"
+case "$res" in NG*) status=1 ;; esac
+# (e) 弾かれるべき入力 (理由の文字列まで見る)
+# 次数の混在 : 1 次の六面体格子に 27 節点六面体を 1 個足す
+awk '/^\$Elements/ { print; getline; print $1 + 1
+                     print "9999 12 2 1 1 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27"
+                     next } { print }' \
+    "$SRC/box_hex.msh" > "$WORK/mixord.msh"
+sed 's/^mesh = .*/mesh = mixord.msh/' "$SRC/box_hex.ofe" > "$WORK/mixord.ofe"
+mesh_reject "an 8-node mesh with one 27-node hexahedron" mixord.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 mixord.ofe 2>&1 | grep -q "mixed hexahedron orders"); then
+	echo "  *** it was rejected for a different reason than the order mixing" >&2
+	status=1
+fi
+# 2 次の六面体格子に 1 次の四角形 (電極面) を足す -> 中間節点が固定されない
+awk '/^\$Elements/ { print; getline; print $1 + 1
+                     print "9998 3 2 10 10 1 2 3 4"; next } { print }' \
+    "$SRC/box_hex2.msh" > "$WORK/q1.msh"
+sed 's/^mesh = .*/mesh = q1.msh/' "$SRC/box_hex2.ofe" > "$WORK/q1.ofe"
+mesh_reject "an order-2 hex mesh with an order-1 quadrilateral" q1.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 q1.ofe 2>&1 | grep -q "regenerate the mesh with -order 2"); then
+	echo "  *** it was rejected for a different reason than the face order" >&2
+	status=1
+fi
+# 2 次の六面体と他種別の混在 (混在は 1 次に限る)
+awk '/^\$Elements/ { print; getline; print $1 + 1
+                     print "9997 6 2 1 1 1 2 3 4 5 6"; next } { print }' \
+    "$SRC/box_hex2.msh" > "$WORK/mix2.msh"
+sed 's/^mesh = .*/mesh = mix2.msh/' "$SRC/box_hex2.ofe" > "$WORK/mix2.ofe"
+mesh_reject "an order-2 hex mesh mixed with a prism" mix2.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 mix2.ofe 2>&1 | grep -q "must be first order"); then
+	echo "  *** it was rejected for a different reason than the mixed-order rule" >&2
+	status=1
+fi
+
 # Gmsh **バイナリ**形式の読み込み。
 #
 # 検証用のファイルは**本物の gmsh に作らせてある** (4.12.1):
@@ -963,6 +1058,10 @@ bin_same "order-2 tetrahedra, binary 4.1" box_p2.ofe box_p2_bin.msh box_p2_bin_4
 # ずれる。ファイルは本物の gmsh (4.12.1) に box_hexpyrtet.msh を変換させたもの
 bin_same "hex-pyramid-tet mix, binary 2.2" box_hexpyrtet.ofe box_hexpyrtet_bin.msh box_hexpyrtet_bin_22.msh
 bin_same "hex-pyramid-tet mix, binary 4.1" box_hexpyrtet.ofe box_hexpyrtet_bin.msh box_hexpyrtet_bin_41.msh
+# 2 次の六面体 (型 12 と 9 節点四角形 = 型 10)。バイナリでは節点数が型の表から
+# 決まるので、27 / 9 の表の誤りはここでずれる。ファイルは本物の gmsh 製
+bin_same "order-2 hexahedra, binary 2.2" box_hex2.ofe box_hex2_bin.msh box_hex2_bin_22.msh
+bin_same "order-2 hexahedra, binary 4.1" box_hex2.ofe box_hex2_bin.msh box_hex2_bin_41.msh
 # ASCII 4.1 のピラミッド (read_elements_v41 の節点数表と $Entities 経由の
 # 物理タグ)。比較の基準は**同じ gmsh 変換で出した 2.2 ASCII** (gmsh は変換の
 # たびに節点を振り直すので、元の box_hexpyrtet.msh と直接比べると丸めの順序が
@@ -978,6 +1077,19 @@ if cmp -s "$WORK/pm_a.csv" "$WORK/pm_b.csv"; then
 else
 	echo "  hex-pyramid-tet mix, ASCII 4.1 : differ -> NG" >&2
 	diff "$WORK/pm_a.csv" "$WORK/pm_b.csv" | head -4 >&2
+	status=1
+fi
+# 2 次の六面体の ASCII 4.1 (read_elements_v41 の節点数表)
+sed 's/^mesh = .*/mesh = box_hex2_bin.msh/' "$SRC/box_hex2.ofe" > "$WORK/h2_a.ofe"
+sed 's/^mesh = .*/mesh = box_hex2_41.msh/' "$SRC/box_hex2.ofe" > "$WORK/h2_b.ofe"
+(cd "$WORK" && "$OFE" -n 2 h2_a.ofe > /dev/null && "$OFE_POST" > /dev/null)
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/h2_a.csv"
+(cd "$WORK" && "$OFE" -n 2 h2_b.ofe > /dev/null && "$OFE_POST" > /dev/null)
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/h2_b.csv"
+if cmp -s "$WORK/h2_a.csv" "$WORK/h2_b.csv"; then
+	echo "  order-2 hexahedra, ASCII 4.1 : identical -> OK"
+else
+	echo "  order-2 hexahedra, ASCII 4.1 : differ -> NG" >&2
 	status=1
 fi
 

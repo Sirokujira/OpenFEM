@@ -254,7 +254,7 @@ static int write_mesh(void)
 		}
 		else {
 			for (int64_t e = 0; e < nc; e++) {
-				int32_t nd[10];
+				int32_t nd[27];
 				const int k = elem3d_nodes((int)e, nd);
 				if (e == 0) nen = k;
 				else if (k != nen) { uniform = 0; break; }
@@ -263,7 +263,7 @@ static int write_mesh(void)
 		if (uniform) {
 			int32_t *cl = (int32_t *)malloc((size_t)nc * nen * sizeof(int32_t));
 			for (int64_t e = 0; e < nc; e++) {
-				int32_t nd[10];
+				int32_t nd[27];
 				if (MeshDim == 2) tri_nodes((int)e, nd);
 				else              elem3d_nodes((int)e, nd);
 				for (int l = 0; l < nen; l++) cl[(e * nen) + l] = nd[l];
@@ -277,14 +277,14 @@ static int write_mesh(void)
 		else {
 			int64_t tot = 0;
 			for (int64_t e = 0; e < nc; e++) {
-				int32_t nd[10];
+				int32_t nd[27];
 				tot += elem3d_nodes((int)e, nd);
 			}
 			int32_t *cl = (int32_t *)malloc((size_t)tot * sizeof(int32_t));
 			int32_t *off = (int32_t *)malloc(((size_t)nc + 1) * sizeof(int32_t));
 			int64_t p = 0;
 			for (int64_t e = 0; e < nc; e++) {
-				int32_t nd[10];
+				int32_t nd[27];
 				const int k = elem3d_nodes((int)e, nd);
 				off[e] = (int32_t)p;
 				for (int l = 0; l < k; l++) cl[p++] = nd[l];

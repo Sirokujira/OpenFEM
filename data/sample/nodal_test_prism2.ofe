@@ -1,0 +1,21 @@
+OpenFEM 1 0
+title = order-2 prism self test (distorted straight-sided mesh)
+#
+# 2 次角柱 (prism18) の自己検証 (ゆがんだ格子)。
+#
+#   python3 mkmesh.py box_prism2_warp box_prism2_warp.msh
+#
+# 角だけを乱数で動かし、中間節点は三重線形の位置 (対応する角の平均) に置く。
+# 要素は「まっすぐだがまっすぐな鉛直角柱でない」ので、線形場の恒等式が有理式の
+# 積分近似ごしに検査され、体積は 3 点則と 4 点則が機械精度で一致する
+# (中間節点が 1 次の写像の位置にあるため det J が 1 次と同じ多項式のまま)。
+# 2 次場の恒等式は鉛直な直角柱でないので飛ぶ (box_prism2.ofe の側で見る)。
+#
+mesh = box_prism2_warp.msh
+material = 4.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end

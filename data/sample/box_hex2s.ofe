@@ -1,0 +1,26 @@
+OpenFEM 1 0
+title = parallel plate capacitor on a 20-node serendipity hexahedral mesh
+#
+# **2 次の六面体** (Gmsh の型 17、20 節点の serendipity) の検証。
+# box_hex2s.msh は本物の gmsh (4.12.1) が box_hex.geo から作ったもの:
+#
+#   gmsh -3 box_hex.geo -order 2 -o box_hex2s.msh -format msh22
+#
+# 電極面は 8 節点四角形 (型 16) で、中間節点まで Dirichlet に固定される
+# (固定しないと電極が「穴だらけ」になり、収束はするが Q が合わない)。
+#
+# 電界は 1 次元なので 2 次要素で厳密に表現でき、閉形式と全桁一致する:
+#
+#   C = eps0 * 4.0 * (1e-3 * 1e-3) / 0.2e-3 = 1.77083756e-13 [F]
+#
+# 物理タグ : 1 = 体積、10 = z 下面 (基準電極)、11 = z 上面 (ポート 1)
+#
+mesh = box_hex2s.msh
+material = 4.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = C
+solver = 50000 2000 1e-13
+end
