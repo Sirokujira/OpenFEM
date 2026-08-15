@@ -34,6 +34,13 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
          物理タグ 1 = 六面体、2 = ピラミッド、3 = 四面体、
          10 = z 下面 (電極 0、四角形)、11 = z 上面 (電極 1、三角形)
 
+  coax_hex2 : 同軸を曲がった 2 次六面体 (hex27) で切る。全節点が円筒面上。
+         物理タグ 1 = 体積、10 = 外側 r=b (電極 0)、11 = 内側 r=a (電極 1)
+
+  box_hex2_warp / box_prism2_warp : ゆがんだ 2 次六面体 (hex27) / 2 次角柱
+         (prism18)。角だけを乱数で動かし、中間節点は 1 次の写像の位置に置く。
+         物理タグ 1 = 体積、10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
+
 使い方:
   python3 mkmesh.py box  box_tet.msh
   python3 mkmesh.py coax coax_tet.msh
@@ -50,8 +57,9 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
   同じ形状を 2.2 と 4.1 で書いて結果が完全に一致することを rlc_check.sh で見る。
 
 バイナリ形式の検証用ファイル (box_bin*.msh / plate2d_bin*.msh / box_p2_bin*.msh /
-box_hexpyrtet_bin*.msh / box_hexpyrtet_41.msh) だけは、**このスクリプトでは
-書きません**。自作の書き手と読み手が同じ誤解を
+box_hexpyrtet_bin*.msh / box_hexpyrtet_41.msh / box_hex2_bin*.msh /
+box_hex2_41.msh) と 2 次の六面体・角柱の格子 (box_hex2*.msh / box_prism2*.msh、
+_warp を除く) は、**このスクリプトでは書きません**。自作の書き手と読み手が同じ誤解を
 共有しているとテストが素通りするので、本物の gmsh (4.12.1) に変換させています:
 
   python3 mkmesh.py box     small.msh  -nx 3 -ny 3 -nz 2

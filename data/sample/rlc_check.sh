@@ -988,6 +988,17 @@ if ! (cd "$WORK" && "$OFE" -n 2 q1.ofe 2>&1 | grep -q "regenerate the mesh with 
 	echo "  *** it was rejected for a different reason than the face order" >&2
 	status=1
 fi
+# 27 節点の六面体に 8 節点四角形の電極面を混ぜる。辺の中間節点は埋まるので
+# 「先頭だけ見る」検査は素通りし、面心 32 個が未固定のまま C が -41% になる
+# (レビューの実測)。面心の有無まで見る検査だけがこれを弾く
+awk '{ if (($2 == 10) && (NF == 14)) { $2 = 16; NF = 13 } print }' \
+    "$SRC/box_hex2.msh" > "$WORK/q8.msh"
+sed 's/^mesh = .*/mesh = q8.msh/' "$SRC/box_hex2.ofe" > "$WORK/q8.ofe"
+mesh_reject "a 27-node hex mesh with 8-node quadrilaterals" q8.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 q8.ofe 2>&1 | grep -q "no centre node"); then
+	echo "  *** it was rejected for a different reason than the missing centre node" >&2
+	status=1
+fi
 # 2 次の六面体と他種別の混在 (混在は 1 次に限る)
 awk '/^\$Elements/ { print; getline; print $1 + 1
                      print "9997 6 2 1 1 1 2 3 4 5 6"; next } { print }' \

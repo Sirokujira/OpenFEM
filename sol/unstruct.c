@@ -496,6 +496,13 @@ static int elem_finish(void)
 						"quadrilateral is order 1 (regenerate the mesh with -order 2)");
 					return 1;
 				}
+				// 18 節点の角柱の側面は面心つきの 9 節点四角形 (六面体と同じ穴)
+				if ((PrismNen == 18) && (Quad2[(t * 5) + 4] < 0)) {
+					printf("%s\n", "*** mesh : the prisms are 18-node but a "
+						"quadrilateral has no centre node (9-node quadrilaterals "
+						"are required; do not mix Mesh.SecondOrderIncomplete)");
+					return 1;
+				}
 			}
 		}
 
@@ -511,12 +518,20 @@ static int elem_finish(void)
 				"boundary faces for the electrodes");
 			return 1;
 		}
-		// 2 次の六面体に 1 次の四角形が混ざると電極の中間節点が固定されない
+		// 2 次の六面体に 1 次の四角形が混ざると電極の中間節点が固定されない。
+		// **27 節点の六面体は面心節点まで要る** (8 節点四角形では辺の中間節点が
+		// 埋まるので、先頭だけ見る検査を素通りして C が -41% になる。実測)
 		if (TetOrder >= 2) {
 			for (int t = 0; t < NQuad; t++) {
 				if (Quad2[(t * 5)] < 0) {
 					printf("%s\n", "*** mesh : the hexahedra are order 2 but a "
 						"quadrilateral is order 1 (regenerate the mesh with -order 2)");
+					return 1;
+				}
+				if ((HexNen == 27) && (Quad2[(t * 5) + 4] < 0)) {
+					printf("%s\n", "*** mesh : the hexahedra are 27-node but a "
+						"quadrilateral has no centre node (9-node quadrilaterals "
+						"are required; do not mix Mesh.SecondOrderIncomplete)");
 					return 1;
 				}
 			}
