@@ -1038,8 +1038,15 @@ sed 's|^material = .*|material = 1.0 1e6\nanisomur = 2 4.0 3.0 2.0 0.5 0.7 1.1|'
     "$SRC/edge_test_prism.ofe" > "$WORK/epan.ofe"
 edge_pass "prisms (anisotropic nu)" epan.ofe
 # A 解析 (bar_eddy と同じ 1 次元厳密解。許容も同じ物理根拠 : 要素寸法/表皮深さ)
+# **六面体と角柱は R/L の印字全桁が一致する** (1 次元解が両空間で同じに
+# 離散化される) ので、格子が入れ替わっても値の比較では検出できない。
+# ofe.log の要素種別の行まで grep して「本当にその種別で解いたこと」を見る
 for m in bar_hex bar_prism; do
 	cp "$SRC/$m.ofe" "$WORK/"
+	case "$m" in
+		bar_hex)   kind="trilinear hexahedra" ;;
+		bar_prism) kind="6-node prisms" ;;
+	esac
 	for pair in "1e2 1.37931436e-04 8.37757344e-10 0.005" \
 	            "1e4 1.41899129e-04 8.30877185e-10 0.005" \
 	            "1e5 3.24859232e-04 5.34552067e-10 0.02"; do
@@ -1050,6 +1057,10 @@ for m in bar_hex bar_prism; do
 		compare "L($m, f=$1) [H]" "$(value_of Lf)" "$3" "$4"
 		if grep -q "NOT converged" "$WORK/ofe.log"; then
 			echo "  *** A-phi solver did not converge ($m, $1 Hz)" >&2
+			status=1
+		fi
+		if ! grep -q "$kind" "$WORK/ofe.log"; then
+			echo "  *** $m did not actually solve on $kind (mesh mixed up?)" >&2
 			status=1
 		fi
 	done
