@@ -1,0 +1,24 @@
+OpenFEM 1 0
+title = Nedelec edge element self test on a prism mesh
+#
+# 角柱の辺要素 (最低次 Nedelec、9 辺 = 水平 6 + 鉛直 3) の自己検証。検査項目は四面体の
+# edge_test.ofe と同じ (勾配の零空間 / 一様場 / 回転場 / 対称性 / 木 / 前処理)。
+#
+# 参照要素の辺基底を共変 Piola 変換 (W = J^-T W^, ∇×W = J c^ / det J) で
+# 物理空間に写し、三角形 3 点 x ζ 2 点 Gauss で積分する。水平辺は 2 次元 Whitney x 線形、鉛直辺は λ_i/2 の基底。
+#
+# **恒等式 (b)(c)(c2) はアフィンな要素 (上面が下面の平行移動の角柱) を前提とする** —
+# {a + b×r} の Nedelec 補間はアフィンでない要素では厳密でないため、
+# ソルバー側が平行移動であることを検査し、外れていればエラーにする。
+# box_prism_rot.msh (剛体回転) もアフィンなので同じ恒等式が機械精度で成り立ち、
+# 回転すると J の非対角成分が効くため Piola 変換の取り違えはそこでだけ落ちる。
+#
+mesh = box_prism.msh
+material = 1.0 1e6
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = E
+solver = 50000 2000 1e-13
+end

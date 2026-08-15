@@ -759,15 +759,6 @@ if ! (cd "$WORK" && "$OFE" -n 2 an.ofe 2>&1 | grep -q "separated by spaces"); th
 	echo "  *** it was rejected for a different reason than the analysis spelling" >&2
 	status=1
 fi
-# 辺要素 (E / A) は四面体の形状関数に基づくので六面体格子を弾くこと
-sed -e 's/^analysis = .*/analysis = A/' \
-    -e 's/^material = .*/material = 1.0 5.8e7/' \
-    -e 's/^solver = .*/frequency = 1e4\nvoltage = 1.0/' "$SRC/box_hex.ofe" > "$WORK/hexedge.ofe"
-mesh_reject "analysis A on a hexahedral mesh" hexedge.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 hexedge.ofe 2>&1 | grep -q "need a tetrahedral mesh"); then
-	echo "  *** it was rejected for a different reason than the element type" >&2
-	status=1
-fi
 
 # 角柱 (6 節点、三角形を押し出した等パラメトリック要素)。
 # 検査の分け方は六面体と同じで、**ゆがんだ格子でだけ落ちる誤り**があるのが要点
@@ -1007,6 +998,108 @@ sed 's/^mesh = .*/mesh = mix2.msh/' "$SRC/box_hex2.ofe" > "$WORK/mix2.ofe"
 mesh_reject "an order-2 hex mesh mixed with a prism" mix2.ofe
 if ! (cd "$WORK" && "$OFE" -n 2 mix2.ofe 2>&1 | grep -q "must be first order"); then
 	echo "  *** it was rejected for a different reason than the mixed-order rule" >&2
+	status=1
+fi
+
+# 六面体・角柱の辺要素 (最低次 Nedelec)。参照要素の辺基底を共変 Piola 変換
+# (W = J^-T W^, ∇×W = J c^ / det J) で物理空間に写して数値積分する。
+#
+#   (a)-(f) 自己検証 (analysis = E) : 四面体と同じ恒等式。**アフィンな要素
+#       (平行六面体 / 平行移動の角柱) が前提**で、剛体回転した格子も回す
+#       (回転で J の非対角成分が効くため、Piola の取り違えはそこでだけ落ちる)
+#   異方性 ν でも回す (等方性だけだとテンソルの非対角項が死んだコードになる)
+#   A 解析 : bar_eddy と同じ導体棒・同じ 1 次元厳密解を六面体・角柱で
+#       (awall の四角形面 -> 4 辺の固定もここで通る)
+#   gauge = 1 が Z を変えないこと (六面体でも tree-cotree が成立すること)
+#   混在格子・ピラミッド格子・2 次格子は理由の文字列まで見て弾く
+echo "[edge hex/prism] Nedelec edge elements on hexahedra and prisms"
+edge_pass() {	# edge_pass <ラベル> <ofe ファイル>
+	(cd "$WORK" && "$OFE" -n 2 "$2" > /dev/null 2>&1)
+	res=$(awk '/rotational field/ { for (i = 1; i <= NF; i++) if ($i == "err") e = $(i+2) }
+		/rotational mass/ { for (i = 1; i <= NF; i++) if ($i == "err") e2 = $(i+2) }
+		/self test passed/ { ok = 1 }
+		END { if (!ok) { printf "NG (failed)"; exit }
+		      printf "OK (curl %s, mass %s)", e, e2 }' "$WORK/ofe.log")
+	echo "  $1 : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+cp "$SRC/edge_test_hex.ofe" "$SRC/edge_test_prism.ofe" "$WORK/"
+edge_pass "hexahedra (box)" edge_test_hex.ofe
+sed 's/^mesh = .*/mesh = box_hex_rot.msh/' "$SRC/edge_test_hex.ofe" > "$WORK/ehrot.ofe"
+edge_pass "hexahedra (rigidly rotated)" ehrot.ofe
+edge_pass "prisms (box)" edge_test_prism.ofe
+sed 's/^mesh = .*/mesh = box_prism_rot.msh/' "$SRC/edge_test_prism.ofe" > "$WORK/eprot.ofe"
+edge_pass "prisms (rigidly rotated)" eprot.ofe
+# 異方性 ν (edge_test_aniso と同じテンソル)。等方性では非対角項が実行されない
+sed 's|^material = .*|material = 1.0 1e6\nanisomur = 2 4.0 3.0 2.0 0.5 0.7 1.1|' \
+    "$SRC/edge_test_hex.ofe" > "$WORK/ehan.ofe"
+edge_pass "hexahedra (anisotropic nu)" ehan.ofe
+sed 's|^material = .*|material = 1.0 1e6\nanisomur = 2 4.0 3.0 2.0 0.5 0.7 1.1|' \
+    "$SRC/edge_test_prism.ofe" > "$WORK/epan.ofe"
+edge_pass "prisms (anisotropic nu)" epan.ofe
+# A 解析 (bar_eddy と同じ 1 次元厳密解。許容も同じ物理根拠 : 要素寸法/表皮深さ)
+# **六面体と角柱は R/L の印字全桁が一致する** (1 次元解が両空間で同じに
+# 離散化される) ので、格子が入れ替わっても値の比較では検出できない。
+# ofe.log の要素種別の行まで grep して「本当にその種別で解いたこと」を見る
+for m in bar_hex bar_prism; do
+	cp "$SRC/$m.ofe" "$WORK/"
+	case "$m" in
+		bar_hex)   kind="trilinear hexahedra" ;;
+		bar_prism) kind="6-node prisms" ;;
+	esac
+	for pair in "1e2 1.37931436e-04 8.37757344e-10 0.005" \
+	            "1e4 1.41899129e-04 8.30877185e-10 0.005" \
+	            "1e5 3.24859232e-04 5.34552067e-10 0.02"; do
+		set -- $pair
+		sed "s/^frequency = .*/frequency = $1/" "$SRC/$m.ofe" > "$WORK/bar_kind.ofe"
+		(cd "$WORK" && "$OFE" -n 2 bar_kind.ofe > /dev/null && "$OFE_POST" > /dev/null)
+		compare "R($m, f=$1) [ohm]" "$(value_of Rf)" "$2" "$4"
+		compare "L($m, f=$1) [H]" "$(value_of Lf)" "$3" "$4"
+		if grep -q "NOT converged" "$WORK/ofe.log"; then
+			echo "  *** A-phi solver did not converge ($m, $1 Hz)" >&2
+			status=1
+		fi
+		if ! grep -q "$kind" "$WORK/ofe.log"; then
+			echo "  *** $m did not actually solve on $kind (mesh mixed up?)" >&2
+			status=1
+		fi
+	done
+done
+# gauge = 1 は Z を変えてはいけない (awall の四角形の辺を優先して木に入れる
+# 処理が壊れると端子電圧がずれる)
+sed -e "s/^frequency = .*/frequency = 1e4/" "$SRC/bar_hex.ofe" > "$WORK/bh0.ofe"
+sed -e "s/^frequency = .*/frequency = 1e4/" -e "s/^awall = 20/awall = 20\ngauge = 1/" \
+    "$SRC/bar_hex.ofe" > "$WORK/bh1.ofe"
+(cd "$WORK" && "$OFE" -n 2 bh0.ofe > /dev/null && "$OFE_POST" > /dev/null)
+r0=$(value_of Rf); l0=$(value_of Lf)
+(cd "$WORK" && "$OFE" -n 2 bh1.ofe > /dev/null && "$OFE_POST" > /dev/null)
+r1=$(value_of Rf); l1=$(value_of Lf)
+res=$(awk -v a="$r0" -v b="$r1" -v c="$l0" -v d="$l1" 'BEGIN {
+	er = (a - b) / a; if (er < 0) er = -er
+	el = (c - d) / c; if (el < 0) el = -el
+	printf "%s (dR %.1e, dL %.1e)", ((er < 1e-6) && (el < 1e-6)) ? "OK" : "NG", er, el }')
+echo "  gauge = 1 leaves Z unchanged (hex) : $res"
+case "$res" in NG*) status=1 ;; esac
+# 弾かれるべき入力
+sed -e 's/^analysis = .*/analysis = A/' -e 's/^material = .*/material = 1.0 5.8e7/' \
+    -e 's/^solver = .*/frequency = 1e4\nvoltage = 1.0/' "$SRC/box_pyr.ofe" > "$WORK/pyredge.ofe"
+mesh_reject "analysis A on a pyramid mesh" pyredge.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 pyredge.ofe 2>&1 | grep -q "pyramids are not supported"); then
+	echo "  *** it was rejected for a different reason than the element kind" >&2
+	status=1
+fi
+sed -e 's/^analysis = .*/analysis = A/' -e 's/^material = 4.0 0$/material = 1.0 5.8e7/' \
+    -e 's/^solver = .*/frequency = 1e4\nvoltage = 1.0/' "$SRC/box_mixed.ofe" > "$WORK/mixedge.ofe"
+mesh_reject "analysis A on a mixed mesh" mixedge.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 mixedge.ofe 2>&1 | grep -q "mixed element kinds"); then
+	echo "  *** it was rejected for a different reason than the element kind" >&2
+	status=1
+fi
+sed -e 's/^analysis = .*/analysis = E/' -e 's/^material = .*/material = 1.0 1e6/' \
+    "$SRC/box_hex2.ofe" > "$WORK/h2edge.ofe"
+mesh_reject "analysis E on an order-2 hex mesh" h2edge.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 h2edge.ofe 2>&1 | grep -q "first-order mesh"); then
+	echo "  *** it was rejected for a different reason than the order" >&2
 	status=1
 fi
 

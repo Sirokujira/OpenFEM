@@ -1,0 +1,26 @@
+OpenFEM 1 0
+title = 3D eddy current (A-phi) on a prism mesh
+#
+# bar_eddy と同じ導体棒 (2mm x 0.25mm x 1mm、24x2x24) を**角柱**で切る (セルを対角線で 2 つに割って z に押し出す)。
+#
+#   python3 mkmesh.py bar_hex bar_prism.msh -prism 1
+#
+# 幾何・物理タグ・1 次元厳密解 Z = γL/(2σW tanh(γt/2)) は四面体版と同じ。
+# **六面体版と R/L の印字全桁が一致する** (1 次元解が両空間で同じに離散化
+# される) ので、値の比較では格子の取り違えを検出できない。rlc_check.sh は
+# ofe.log の要素種別の行まで grep して「本当に角柱で解いたこと」を確かめる。
+# 角柱の辺要素 (9 辺) が同じ閉形式に一致することを見る。
+# awall (タグ 20) は z 面が三角形、x 面が四角形 (両方の経路が固定に効く)。
+#
+mesh = bar_prism.msh
+material = 1.0 5.8e7
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+awall = 20
+frequency = 1e5
+voltage = 1.0
+
+analysis = A
+solver = 50000 2000 1e-9
+end
