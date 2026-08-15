@@ -958,6 +958,28 @@ bin_same "2-D triangles, binary 2.2" plate2d_dc.ofe plate2d_bin.msh plate2d_bin_
 bin_same "2-D triangles, binary 4.1" plate2d_dc.ofe plate2d_bin.msh plate2d_bin_41.msh
 bin_same "order-2 tetrahedra, binary 2.2" box_p2.ofe box_p2_bin.msh box_p2_bin_22.msh
 bin_same "order-2 tetrahedra, binary 4.1" box_p2.ofe box_p2_bin.msh box_p2_bin_41.msh
+# ピラミッドを含む混在格子 (型 2/3/4/5/7 が 1 つのファイルに同居する)。
+# バイナリでは節点数が型の表から決まるので、型 7 = 5 節点の表の誤りはここで
+# ずれる。ファイルは本物の gmsh (4.12.1) に box_hexpyrtet.msh を変換させたもの
+bin_same "hex-pyramid-tet mix, binary 2.2" box_hexpyrtet.ofe box_hexpyrtet_bin.msh box_hexpyrtet_bin_22.msh
+bin_same "hex-pyramid-tet mix, binary 4.1" box_hexpyrtet.ofe box_hexpyrtet_bin.msh box_hexpyrtet_bin_41.msh
+# ASCII 4.1 のピラミッド (read_elements_v41 の節点数表と $Entities 経由の
+# 物理タグ)。比較の基準は**同じ gmsh 変換で出した 2.2 ASCII** (gmsh は変換の
+# たびに節点を振り直すので、元の box_hexpyrtet.msh と直接比べると丸めの順序が
+# 変わって一致しない)
+sed 's/^mesh = .*/mesh = box_hexpyrtet_bin.msh/' "$SRC/box_hexpyrtet.ofe" > "$WORK/pm_a.ofe"
+sed 's/^mesh = .*/mesh = box_hexpyrtet_41.msh/' "$SRC/box_hexpyrtet.ofe" > "$WORK/pm_b.ofe"
+(cd "$WORK" && "$OFE" -n 2 pm_a.ofe > /dev/null && "$OFE_POST" > /dev/null)
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/pm_a.csv"
+(cd "$WORK" && "$OFE" -n 2 pm_b.ofe > /dev/null && "$OFE_POST" > /dev/null)
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/pm_b.csv"
+if cmp -s "$WORK/pm_a.csv" "$WORK/pm_b.csv"; then
+	echo "  hex-pyramid-tet mix, ASCII 4.1 : identical -> OK"
+else
+	echo "  hex-pyramid-tet mix, ASCII 4.1 : differ -> NG" >&2
+	diff "$WORK/pm_a.csv" "$WORK/pm_b.csv" | head -4 >&2
+	status=1
+fi
 
 # 逆エンディアンのファイルは**読み違えずに落ちること**。バイト入れ替えは
 # 手元で検証できないので実装せず、はっきり断る方を選んでいる

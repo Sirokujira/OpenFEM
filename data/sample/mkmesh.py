@@ -49,8 +49,9 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
   -v41 1 を付けると Gmsh ASCII **4.1** 形式で書く (読み込みの検証用)。
   同じ形状を 2.2 と 4.1 で書いて結果が完全に一致することを rlc_check.sh で見る。
 
-バイナリ形式の検証用ファイル (box_bin*.msh / plate2d_bin*.msh / box_p2_bin*.msh)
-だけは、**このスクリプトでは書きません**。自作の書き手と読み手が同じ誤解を
+バイナリ形式の検証用ファイル (box_bin*.msh / plate2d_bin*.msh / box_p2_bin*.msh /
+box_hexpyrtet_bin*.msh / box_hexpyrtet_41.msh) だけは、**このスクリプトでは
+書きません**。自作の書き手と読み手が同じ誤解を
 共有しているとテストが素通りするので、本物の gmsh (4.12.1) に変換させています:
 
   python3 mkmesh.py box     small.msh  -nx 3 -ny 3 -nz 2
@@ -175,7 +176,8 @@ def write_msh_hex(path, nodes, hexes, quads):
 def write_msh_cells(path, nodes, cells):
     """任意の要素型を Gmsh ASCII 2.2 で書く。cells = [(物理タグ, Gmsh 型, 節点)]
 
-    型は 2 = 三角形、3 = 四角形、5 = 六面体、6 = 角柱。局所節点の並びは
+    型は 2 = 三角形、3 = 四角形、5 = 六面体、6 = 角柱、7 = ピラミッド。
+    局所節点の並びは
     Gmsh の規約に合わせること (VTK も同じ並びなので書き出しでの入れ替えは不要)。
     """
     with open(path, "w") as f:
