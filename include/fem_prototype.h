@@ -63,6 +63,14 @@ int tri_grad_center(int, double [6][2], int *);
 
 // edge.c
 void edge_build(void);
+int edge_elem_count(void);
+int edge_elem_nedge(void);
+int edge_elem_nen(void);
+const int32_t *edge_elem_nodes(int);
+const int (*edge_elem_table(void))[2];
+int edge_elem_mat(int);
+void edge_elem_matrices(int, const double [6], double, double [12][12], double [12][12]);
+void edge_elem_center(int, double [12][3], double [12][3]);
 int64_t edge_id(int32_t, int32_t);
 void edge_free(void);
 void crs_alloc_edge(crs_t *);

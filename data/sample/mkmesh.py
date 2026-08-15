@@ -1001,6 +1001,71 @@ def make_bar(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, grade=1.0):
     return nodes, tets, tris
 
 
+def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0):
+    """導体棒の**六面体** (prism=1 なら**角柱**) 版 (3 次元渦電流 A-φ の検証)
+
+    make_bar と同じ形状・同じ物理タグ。1 次元厳密解も同じなので、
+    六面体・角柱の辺要素 (Nedelec) が四面体版と同じ閉形式に一致することを見る。
+    角柱は各セルを対角線で 2 つに割って z に押し出す
+    (三角形は (x,y) 面内、押し出しは z — A_t = 0 の面と平行な向き)。
+
+    物理タグ : 1 = 体積、10 = x=0 面 (電極 0)、11 = x=lx 面 (電極 1)、
+               20 = A_t = 0 の面 (z=0, z=lz, x=0, x=lx)
+    """
+    nodes = []
+    idx = {}
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            for k in range(nz + 1):
+                idx[(i, j, k)] = len(nodes)
+                nodes.append((lx * i / nx, ly * j / ny, lz * k / nz))
+
+    cells = []
+    tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                if prism:
+                    # (x,y) の四角形を対角線で割り、z に押し出す
+                    for tri in tris:
+                        b = [idx[(i + a, j + c, k)] for a, c in tri]
+                        t = [idx[(i + a, j + c, k + 1)] for a, c in tri]
+                        cells.append((1, 6, b + t))
+                else:
+                    b = [idx[(i, j, k)], idx[(i + 1, j, k)],
+                         idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)]]
+                    t = [idx[(i, j, k + 1)], idx[(i + 1, j, k + 1)],
+                         idx[(i + 1, j + 1, k + 1)], idx[(i, j + 1, k + 1)]]
+                    cells.append((1, 5, b + t))
+
+    def bquad(a, b, c, d, tag):
+        if prism:
+            # 角柱の z 面は三角形 2 枚 (対角線は体積側と同じ向き)、側面は四角形
+            cells.append((tag, 2, [a, b, c]))
+            cells.append((tag, 2, [a, c, d]))
+        else:
+            cells.append((tag, 3, [a, b, c, d]))
+
+    # z = 0 と z = lz : A_t = 0 (角柱ではこの面が三角形になる)
+    for i in range(nx):
+        for j in range(ny):
+            for k in (0, nz):
+                bquad(idx[(i, j, k)], idx[(i + 1, j, k)],
+                      idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)], 20)
+    # x = 0 (電極 0) と x = lx (電極 1) : 電極かつ A_t = 0 (常に四角形)
+    for j in range(ny):
+        for k in range(nz):
+            for i, tag in ((0, 10), (nx, 11)):
+                a = idx[(i, j, k)]
+                b = idx[(i, j + 1, k)]
+                c = idx[(i, j + 1, k + 1)]
+                d = idx[(i, j, k + 1)]
+                cells.append((tag, 3, [a, b, c, d]))
+                cells.append((20, 3, [a, b, c, d]))
+
+    return nodes, cells
+
+
 def make_bar_air(nx=24, ny=2, nz=24, nza=4,
                  lx=2e-3, ly=0.25e-3, lz=1e-3, gz=0.5e-3):
     """導体棒 + 非導電層 (3 次元渦電流 A-φ で空気を含む系の検証)
@@ -1103,6 +1168,11 @@ def main():
                         else make_box_hexpyrtet(**opt))
         write_msh_cells(path, nodes, cells)
         print("%s : pyramids, %d nodes, %d cells" % (path, len(nodes), len(cells)))
+        return 0
+    elif kind == "bar_hex":
+        nodes, cells = make_bar_hex(**opt)
+        write_msh_cells(path, nodes, cells)
+        print("%s : bar, %d nodes, %d cells" % (path, len(nodes), len(cells)))
         return 0
     elif kind in ("coax_hex2", "box_hex2_warp", "box_prism2_warp"):
         nodes, cells = (make_coax_hex2(**opt) if kind == "coax_hex2"

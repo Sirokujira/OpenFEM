@@ -193,14 +193,18 @@ static int setup_unstruct(void)
 	// 黙って誤答を出すより弾く
 	// 辺要素 (Whitney) も節点要素の自己検証も四面体の形状関数に基づく。
 	// 六面体格子を渡されたら黙って誤答を出さずに弾く
-	if ((MeshElem != MESHELEM_TET) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
-		printf("%s\n", "*** analysis E / A (edge elements) need a tetrahedral mesh "
-			"(this mesh has hexahedra, prisms or pyramids)");
+	// 辺要素は種別が 1 つの 1 次格子 (四面体 / 六面体 / 角柱) でだけ使える。
+	// 混在は種別をまたぐ面の接線連続性 (Nedelec の適合性) の検査が別に要り、
+	// ピラミッドには多項式の Nedelec 基底が無いので、どちらも弾く
+	if (((MeshElem == MESHELEM_MIXED) || (MeshElem == MESHELEM_PYR))
+	 && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
+		printf("%s\n", "*** analysis E / A (edge elements) need a single-kind "
+			"tetrahedral, hexahedral or prism mesh (mixed element kinds and "
+			"pyramids are not supported)");
 		return 1;
 	}
 	if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
-		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh "
-			"(this mesh has 10-node tetrahedra)");
+		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh");
 		return 1;
 	}
 
