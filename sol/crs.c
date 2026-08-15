@@ -44,7 +44,7 @@ void crs_alloc(crs_t *A)
 			crs_alloc_tri(A);
 			return;
 		}
-		crs_alloc_elem3d(A);		// 四面体・六面体・角柱 (混在可)
+		crs_alloc_elem3d(A);		// 四面体・六面体・角柱・ピラミッド (混在可)
 		return;
 	}
 

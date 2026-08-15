@@ -1,0 +1,31 @@
+OpenFEM 1 0
+title = parallel plate capacitor on a pyramid mesh
+#
+# 非構造格子 (**ピラミッド**) の検証。
+#
+#   python3 mkmesh.py box_pyr box_pyr.msh
+#
+# 各六面体セルを中心点で 6 つのピラミッドに割った純ピラミッド格子
+# (1mm x 1mm x 0.2mm、3x3x3)。底面 (セルの面) は隣のセルのピラミッドと
+# 四角形面どうし、側面 (三角形) は同じセルの隣のピラミッドと接する。
+#
+# **この格子では底面がすべて長方形 (平行四辺形)** なので、どのピラミッドも
+# 基準ピラミッドのアフィン像になり、剛性は 2x2x2 Gauss で厳密。電位は z の
+# 1 次関数で形状関数空間に厳密に入るため、C は閉形式と全桁一致する:
+#
+#   C = eps0 * 4.0 * (1e-3 * 1e-3) / 0.2e-3 = 1.77083756e-13 [F]
+#
+# 底面が平行四辺形でない (ゆがんだ) ピラミッドの検証は nodal_test_pyr.ofe
+# (analysis = P) が受け持つ。
+#
+# 物理タグ : 1 = 体積、10 = z 下面 (基準電極)、11 = z 上面 (ポート 1)
+#
+mesh = box_pyr.msh
+material = 4.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = C
+solver = 50000 2000 1e-13
+end

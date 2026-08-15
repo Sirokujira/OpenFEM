@@ -27,7 +27,7 @@ int64_t num_cell(void)
 	if (MeshMode) {
 		if (MeshDim == 2) return (int64_t)NTri;
 
-		return (int64_t)elem3d_count();		// 四面体 -> 六面体 -> 角柱 の連番
+		return (int64_t)elem3d_count();		// 四面体 -> 六面体 -> 角柱 -> ピラミッド の連番
 	}
 
 	return ((int64_t)Nx * Ny * Nz);
@@ -145,6 +145,16 @@ void field_cell_grad(const double *u, int kind, double *v)
 					}
 				}
 			}
+			else if (kind == MESHELEM_PYR) {
+				double gn[5][3];
+				if (!pyr_grad_center(e - NTet - NHex - NPrism, gn)) {
+					const int32_t *nd = &Pyr[(e - NTet - NHex - NPrism) * 5];
+					for (int a = 0; a < 5; a++) {
+						const double ua = u[nd[a]];
+						for (int c = 0; c < 3; c++) d[c] += ua * gn[a][c];
+					}
+				}
+			}
 			else {
 				double gn[10][3];
 				int nen = 0;
@@ -240,11 +250,12 @@ static void write_grid(FILE *fp)
 	}
 	else if (MeshMode) {
 		/*
-		3 次元の非構造格子 (四面体・六面体・角柱、混在可)。
+		3 次元の非構造格子 (四面体・六面体・角柱・ピラミッド、混在可)。
 		VTK の CELLS は要素ごとに節点数を書けるので、種別が混ざっていても
 		そのまま並べられる。**節点の並びは Gmsh と VTK で同じ**なので
 		入れ替えは要らない (2 次四面体だけは中間節点の並びが違う)。
 		  VTK_TETRA 10 / VTK_QUADRATIC_TETRA 24 / VTK_HEXAHEDRON 12 / VTK_WEDGE 13
+		  / VTK_PYRAMID 14
 		*/
 		static const int g2v[6] = {0, 1, 2, 3, 5, 4};
 		const int p2 = (TetOrder >= 2);
@@ -278,7 +289,7 @@ static void write_grid(FILE *fp)
 		for (int e = 0; e < ne; e++) {
 			const int kind = elem3d_kind(e);
 			const int ty = ((kind == MESHELEM_HEX) ? 12 : (kind == MESHELEM_PRISM) ? 13
-			              : (p2 ? 24 : 10));
+			              : (kind == MESHELEM_PYR) ? 14 : (p2 ? 24 : 10));
 			fprintf(fp, "%d\n", ty);
 		}
 	}

@@ -25,6 +25,15 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
          閉形式が残るので、空気を含む系の検証に使える。
          物理タグ 1 = 導体、2 = 空気、10/11 = 導体断面の電極、20 = A_t = 0
 
+  box_pyr : 純ピラミッド格子 (各六面体セルを中心点で 6 分割)。-warp 1 で
+         内部節点を乱数で動かす (底面が平行四辺形でないピラミッドを作る)。
+         物理タグ 1 = 体積、10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
+
+  box_hexpyrtet : 六面体 -> ピラミッド -> 四面体の遷移格子 (下 nzh 層が六面体、
+         その上の遷移層が底面ピラミッド + 四面体 10 個、残りが四面体)。
+         物理タグ 1 = 六面体、2 = ピラミッド、3 = 四面体、
+         10 = z 下面 (電極 0、四角形)、11 = z 上面 (電極 1、三角形)
+
 使い方:
   python3 mkmesh.py box  box_tet.msh
   python3 mkmesh.py coax coax_tet.msh
@@ -275,6 +284,167 @@ def make_box_prism_warp(nx=3, ny=3, nz=3, lx=1e-3, ly=1e-3, lz=0.2e-3, seed=2026
             for k, tag in ((0, 10), (nz, 11)):
                 for tri in tris:
                     cells.append((tag, 2, [idx[(i + a, j + c, k)] for a, c in tri]))
+
+    return nodes, cells
+
+
+def make_box_pyr(nx=3, ny=3, nz=3, lx=1e-3, ly=1e-3, lz=0.2e-3, warp=0, seed=20260803):
+    """純**ピラミッド**格子: 各六面体セルを中心点で 6 つのピラミッドに割る
+
+    どのピラミッドも底面 (セルの面) は隣のセルのピラミッドと四角形面どうしで、
+    側面 (三角形) は同じセルの隣のピラミッドと接するので**適合する**。
+
+    warp = 1 で内部の格子節点とセル中心を乱数で動かす (等パラメトリック写像の
+    検証用)。底面が平行四辺形のピラミッドでは剛性が厳密になるので、
+    ゆがみが無いと有理式の積分近似が一度も実行されない。
+
+    物理タグ : 1 = 体積、10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
+    """
+    rnd = random.Random(seed)
+    nodes = []
+    idx = {}
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            for k in range(nz + 1):
+                x, y, z = lx * i / nx, ly * j / ny, lz * k / nz
+                if warp:
+                    if 0 < i < nx: x += 0.30 * (rnd.random() - 0.5) * lx / nx
+                    if 0 < j < ny: y += 0.30 * (rnd.random() - 0.5) * ly / ny
+                    if 0 < k < nz: z += 0.30 * (rnd.random() - 0.5) * lz / nz
+                idx[(i, j, k)] = len(nodes)
+                nodes.append((x, y, z))
+
+    cells = []
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                # 頂点 (セル中心)。ゆがんだセルでも内部に入るよう角の平均にとり、
+                # warp 時はさらに乱数で動かす
+                cs = [nodes[idx[(i + a, j + b, k + c)]]
+                      for a in (0, 1) for b in (0, 1) for c in (0, 1)]
+                cx = [sum(p[d] for p in cs) / 8 for d in range(3)]
+                if warp:
+                    cx[0] += 0.15 * (rnd.random() - 0.5) * lx / nx
+                    cx[1] += 0.15 * (rnd.random() - 0.5) * ly / ny
+                    cx[2] += 0.15 * (rnd.random() - 0.5) * lz / nz
+                c0 = len(nodes)
+                nodes.append(tuple(cx))
+
+                def v(a, b, c):
+                    return idx[(i + a, j + b, k + c)]
+                # 6 つの面 (巡回順) を底面に、中心を頂点にする
+                faces = ((v(0, 0, 0), v(1, 0, 0), v(1, 1, 0), v(0, 1, 0)),   # z-
+                         (v(0, 0, 1), v(1, 0, 1), v(1, 1, 1), v(0, 1, 1)),   # z+
+                         (v(0, 0, 0), v(0, 1, 0), v(0, 1, 1), v(0, 0, 1)),   # x-
+                         (v(1, 0, 0), v(1, 1, 0), v(1, 1, 1), v(1, 0, 1)),   # x+
+                         (v(0, 0, 0), v(1, 0, 0), v(1, 0, 1), v(0, 0, 1)),   # y-
+                         (v(0, 1, 0), v(1, 1, 0), v(1, 1, 1), v(0, 1, 1)))   # y+
+                for f in faces:
+                    cells.append((1, 7, list(f) + [c0]))
+    for i in range(nx):
+        for j in range(ny):
+            for k, tag in ((0, 10), (nz, 11)):
+                cells.append((tag, 3, [idx[(i, j, k)], idx[(i + 1, j, k)],
+                                       idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)]]))
+
+    return nodes, cells
+
+
+def make_box_hexpyrtet(nx=3, ny=3, nz=4, nzh=2, lx=1e-3, ly=1e-3, lz=0.2e-3,
+                       warp=0, seed=20260803):
+    """**六面体 -> ピラミッド -> 四面体**の遷移格子 (hex-to-tet transition)
+
+    下 nzh 層は六面体。その上の 1 層が遷移層で、各セルを
+      「底面のピラミッド (頂点 = セル中心) 1 個 + 側面・上面の三角形と
+       セル中心を結ぶ四面体 10 個」
+    に割る。六面体とは底面の四角形面どうしで、上の四面体層とは上面の
+    三角形どうしで接するので**適合する**。残りの層は角柱分割由来の四面体。
+
+    セル間で共有される面の対角線は格子座標の規則で固定する (両側のセルが
+    同じ割り方をしないと適合しない)。
+
+    **物理タグを種別ごとに分ける** (1 = 六面体、2 = ピラミッド、3 = 四面体)。
+    要素番号 -> 材料の対応が種別の境目でずれると必ず落ちる (box_mixed と同じ)。
+    ピラミッドと四面体は同じ高さ範囲に混ざるので、.ofe 側でタグ 2 と 3 に
+    同じ材料を割り当てること (場を 1 次元に保つため)。
+
+    物理タグ : 10 = z 下面 (電極 0、四角形)、11 = z 上面 (電極 1、三角形)
+    """
+    rnd = random.Random(seed)
+    nodes = []
+    idx = {}
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            for k in range(nz + 1):
+                x, y, z = lx * i / nx, ly * j / ny, lz * k / nz
+                if warp:
+                    if 0 < i < nx: x += 0.30 * (rnd.random() - 0.5) * lx / nx
+                    if 0 < j < ny: y += 0.30 * (rnd.random() - 0.5) * ly / ny
+                    if 0 < k < nz: z += 0.30 * (rnd.random() - 0.5) * lz / nz
+                idx[(i, j, k)] = len(nodes)
+                nodes.append((x, y, z))
+
+    cells = []
+    # 六面体の層 (k = 0 .. nzh-1)
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nzh):
+                b = [idx[(i, j, k)], idx[(i + 1, j, k)],
+                     idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)]]
+                t = [idx[(i, j, k + 1)], idx[(i + 1, j, k + 1)],
+                     idx[(i + 1, j + 1, k + 1)], idx[(i, j + 1, k + 1)]]
+                cells.append((1, 5, b + t))
+
+    # 遷移層 (k = nzh)。対角線の規則 : 面の格子座標 (s, t) で
+    # (s,t)-(s+1,t+1) を結ぶ (隣のセルから見ても同じ線になる)
+    tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
+    kt = nzh
+    for i in range(nx):
+        for j in range(ny):
+            cs = [nodes[idx[(i + a, j + b, kt + c)]]
+                  for a in (0, 1) for b in (0, 1) for c in (0, 1)]
+            cx = [sum(p[d] for p in cs) / 8 for d in range(3)]
+            if warp:
+                cx[0] += 0.15 * (rnd.random() - 0.5) * lx / nx
+                cx[1] += 0.15 * (rnd.random() - 0.5) * ly / ny
+                cx[2] += 0.15 * (rnd.random() - 0.5) * lz / nz
+            c0 = len(nodes)
+            nodes.append(tuple(cx))
+
+            # 底面のピラミッド (六面体の上面と四角形面どうしで接する)
+            cells.append((2, 7, [idx[(i, j, kt)], idx[(i + 1, j, kt)],
+                                 idx[(i + 1, j + 1, kt)], idx[(i, j + 1, kt)], c0]))
+            # 側面 4 枚 (各 2 三角形) と上面 (2 三角形) + セル中心 = 四面体 10 個
+            side = []
+            for ii in (i, i + 1):			# x 一定の面 : (s, t) = (j, k)
+                q = [(ii, j, kt), (ii, j + 1, kt), (ii, j + 1, kt + 1), (ii, j, kt + 1)]
+                side += [(q[0], q[1], q[2]), (q[0], q[2], q[3])]
+            for jj in (j, j + 1):			# y 一定の面 : (s, t) = (i, k)
+                q = [(i, jj, kt), (i + 1, jj, kt), (i + 1, jj, kt + 1), (i, jj, kt + 1)]
+                side += [(q[0], q[1], q[2]), (q[0], q[2], q[3])]
+            for tri in tris:				# 上面 (上の四面体層と接する)
+                side.append(tuple((i + a, j + b, kt + 1) for a, b in tri))
+            for tri in side:
+                cells.append((3, 4, [idx[t] for t in tri] + [c0]))
+
+    # 四面体の層 (k = nzh+1 .. nz-1、角柱を 3 四面体に割る)
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nzh + 1, nz):
+                for tri in tris:
+                    b = [idx[(i + a, j + c, k)] for a, c in tri]
+                    t = [idx[(i + a, j + c, k + 1)] for a, c in tri]
+                    p = b + t
+                    for q in ((0, 1, 2, 5), (0, 1, 5, 4), (0, 4, 5, 3)):
+                        cells.append((3, 4, [p[q[0]], p[q[1]], p[q[2]], p[q[3]]]))
+
+    # 電極 : 下面は四角形、上面は三角形 (対角線は四面体側の分割と同じ)
+    for i in range(nx):
+        for j in range(ny):
+            cells.append((10, 3, [idx[(i, j, 0)], idx[(i + 1, j, 0)],
+                                  idx[(i + 1, j + 1, 0)], idx[(i, j + 1, 0)]]))
+            for tri in tris:
+                cells.append((11, 2, [idx[(i + a, j + b, nz)] for a, b in tri]))
 
     return nodes, cells
 
@@ -735,6 +905,12 @@ def main():
                         else make_box_mixed(**opt))
         write_msh_cells(path, nodes, cells)
         print("%s : prisms, %d nodes, %d cells" % (path, len(nodes), len(cells)))
+        return 0
+    elif kind in ("box_pyr", "box_hexpyrtet"):
+        nodes, cells = (make_box_pyr(**opt) if kind == "box_pyr"
+                        else make_box_hexpyrtet(**opt))
+        write_msh_cells(path, nodes, cells)
+        print("%s : pyramids, %d nodes, %d cells" % (path, len(nodes), len(cells)))
         return 0
     elif kind in ("coax_hex", "box_hex_warp"):
         nodes, hexes, quads = (make_coax_hex(**opt) if kind == "coax_hex"

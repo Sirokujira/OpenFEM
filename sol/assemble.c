@@ -640,7 +640,7 @@ static void assemble_core(crs_t *A, int mode, const double *coefcell)
 void assemble(crs_t *A, int mode)
 {
 	if (MeshMode) {
-		assemble_elem3d(A, mode);		// 四面体・六面体・角柱 (混在可)
+		assemble_elem3d(A, mode);		// 四面体・六面体・角柱・ピラミッド (混在可)
 		return;
 	}
 	assemble_core(A, mode, NULL);

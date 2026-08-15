@@ -1,0 +1,30 @@
+OpenFEM 1 0
+title = hex-pyramid-tet transition self test (linear field identity)
+#
+# 六面体 + ピラミッド + 四面体の混在格子の自己検証。
+#
+#   python3 mkmesh.py box_hexpyrtet box_hexpyrtet_warp.msh -warp 1
+#
+# phi = a.r はどの要素でも厳密に補間できるので、種別が混ざっていても
+# phi^T K phi = (a^T C a) * V が厳密に成り立つ。**種別をまたぐ面で節点が
+# 共有されていないと (格子が割れていると) この恒等式が破れる**ので、
+# 遷移格子で一番危ない「面の不整合」がここで落ちる。
+#
+# ただし**四角形面を三角形 2 枚で覆った非適合な接続は、節点がすべて共有
+# されるためこの恒等式では検出できない** (1 次の場はどちら側でも厳密に
+# 表せる)。それは位相の検査 (elem_face_check) が読み込み時に弾く。
+#
+# 体積は要素の総和で、ゆがんだ格子では箱の体積とは一致しない (四角形面が
+# 平面でなくなると双 1 次の面と平面の面で領域の切り方が変わるため)。
+# 恒等式は同じ総和を両辺で使うので影響しない。
+#
+mesh = box_hexpyrtet_warp.msh
+material = 4.0 0
+region = 1 2
+region = 2 2
+region = 3 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end
