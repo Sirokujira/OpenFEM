@@ -34,6 +34,13 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
          物理タグ 1 = 六面体、2 = ピラミッド、3 = 四面体、
          10 = z 下面 (電極 0、四角形)、11 = z 上面 (電極 1、三角形)
 
+  coax_hex2 : 同軸を曲がった 2 次六面体 (hex27) で切る。全節点が円筒面上。
+         物理タグ 1 = 体積、10 = 外側 r=b (電極 0)、11 = 内側 r=a (電極 1)
+
+  box_hex2_warp / box_prism2_warp : ゆがんだ 2 次六面体 (hex27) / 2 次角柱
+         (prism18)。角だけを乱数で動かし、中間節点は 1 次の写像の位置に置く。
+         物理タグ 1 = 体積、10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
+
 使い方:
   python3 mkmesh.py box  box_tet.msh
   python3 mkmesh.py coax coax_tet.msh
@@ -50,8 +57,9 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
   同じ形状を 2.2 と 4.1 で書いて結果が完全に一致することを rlc_check.sh で見る。
 
 バイナリ形式の検証用ファイル (box_bin*.msh / plate2d_bin*.msh / box_p2_bin*.msh /
-box_hexpyrtet_bin*.msh / box_hexpyrtet_41.msh) だけは、**このスクリプトでは
-書きません**。自作の書き手と読み手が同じ誤解を
+box_hexpyrtet_bin*.msh / box_hexpyrtet_41.msh / box_hex2_bin*.msh /
+box_hex2_41.msh) と 2 次の六面体・角柱の格子 (box_hex2*.msh / box_prism2*.msh、
+_warp を除く) は、**このスクリプトでは書きません**。自作の書き手と読み手が同じ誤解を
 共有しているとテストが素通りするので、本物の gmsh (4.12.1) に変換させています:
 
   python3 mkmesh.py box     small.msh  -nx 3 -ny 3 -nz 2
@@ -447,6 +455,188 @@ def make_box_hexpyrtet(nx=3, ny=3, nz=4, nzh=2, lx=1e-3, ly=1e-3, lz=0.2e-3,
                                   idx[(i + 1, j + 1, 0)], idx[(i, j + 1, 0)]]))
             for tri in tris:
                 cells.append((11, 2, [idx[(i + a, j + b, nz)] for a, b in tri]))
+
+    return nodes, cells
+
+
+# Gmsh hex27 の局所節点 -> (ξ, η, ζ) ∈ {-1,0,1} (gmsh 4.12.1 の出力を分類して
+# 実測した並び。C 側の HEX2_XI と同じ表)
+HEX27_XI = ((-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+            (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1),
+            (0, -1, -1), (-1, 0, -1), (-1, -1, 0), (1, 0, -1), (1, -1, 0),
+            (0, 1, -1), (1, 1, 0), (-1, 1, 0), (0, -1, 1), (-1, 0, 1),
+            (1, 0, 1), (0, 1, 1),
+            (0, 0, -1), (0, -1, 0), (-1, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1),
+            (0, 0, 0))
+
+# Gmsh prism18 の局所節点 -> (2 倍した三角形格子座標のオフセット, ζ レベル 0/1/2)。
+# 三角形の頂点を A, B, C とすると (実測: 辺 (0,1)(0,2)(0,3)(1,2)(1,4)(2,5)
+# (3,4)(3,5)(4,5)、四角形面 (0,1,4,3)(0,2,5,3)(1,2,5,4))
+PRISM18_TZ = (("A", 0), ("B", 0), ("C", 0), ("A", 2), ("B", 2), ("C", 2),
+              ("AB", 0), ("CA", 0), ("A", 1), ("BC", 0), ("B", 1), ("C", 1),
+              ("AB", 2), ("CA", 2), ("BC", 2),
+              ("AB", 1), ("CA", 1), ("BC", 1))
+
+
+def make_coax_hex2(nr=4, nt=12, ra=0.5e-3, rb=1.5e-3, lz=0.1e-3):
+    """同軸線路を**曲がった 2 次六面体** (hex27) で切る : C' = 2 pi eps / ln(b/a)
+
+    (r, theta) を半分の刻みまで含めて全節点を**厳密に円筒面に載せる**ので、
+    等パラメトリック写像が境界を円弧として表す (coax_p2 の六面体版)。
+    半径方向は対数等分。同じ nr, nt の 1 次六面体 (coax_hex 相当) より
+    誤差が大きく減ることを rlc_check.sh で対にして見る。
+
+    物理タグ : 1 = 体積、10 = 外側 r=b (電極 0)、11 = 内側 r=a (電極 1)
+    """
+    nodes = []
+    idx = {}
+
+    def node(i, j, k):
+        # i : 半径 (0..2nr)、j : 周方向 (mod 2nt)、k : z (0..2)
+        j = j % (2 * nt)
+        if (i, j, k) not in idx:
+            r = ra * ((rb / ra) ** (i / (2.0 * nr)))
+            th = math.pi * j / nt
+            idx[(i, j, k)] = len(nodes)
+            nodes.append((r * math.cos(th), r * math.sin(th), lz * k / 2))
+        return idx[(i, j, k)]
+
+    cells = []
+    for i in range(nr):
+        for j in range(nt):
+            nd = [node((2 * i) + 1 + sx, (2 * j) + 1 + sy, 1 + sz)
+                  for sx, sy, sz in HEX27_XI]
+            cells.append((1, 12, nd))
+    # 電極面 (内外の円筒面、9 節点四角形)。並びは角 4 + 辺 4 + 中心
+    for j in range(nt):
+        for i2, tag in ((0, 11), (2 * nr, 10)):
+            q = [(2 * j, 0), ((2 * j) + 2, 0), ((2 * j) + 2, 2), (2 * j, 2),
+                 ((2 * j) + 1, 0), ((2 * j) + 2, 1), ((2 * j) + 1, 2), (2 * j, 1),
+                 ((2 * j) + 1, 1)]
+            cells.append((tag, 10, [node(i2, a, k) for a, k in q]))
+
+    return nodes, cells
+
+
+def make_box_hex2_warp(nx=3, ny=3, nz=3, lx=1e-3, ly=1e-3, lz=0.2e-3, seed=20260803):
+    """**ゆがんだ** 2 次六面体格子 (hex27、analysis = P の自己検証用)
+
+    角の格子節点だけを乱数で動かし、中間節点 (辺・面・体心) は**ゆがんだ角の
+    三重線形の位置** (対応する角の平均) に置く。要素は「まっすぐだが平行六面体
+    でない」形になり、線形場の恒等式が有理式の積分近似ごしに検査される。
+    中間節点が 1 次の写像の位置にあるので det J は 1 次と同じ多項式のままで、
+    3 点則と 4 点則の体積は機械精度で一致しなければならない。
+
+    物理タグ : 1 = 体積、10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
+    """
+    rnd = random.Random(seed)
+    corner = {}
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            for k in range(nz + 1):
+                x, y, z = lx * i / nx, ly * j / ny, lz * k / nz
+                if 0 < i < nx: x += 0.30 * (rnd.random() - 0.5) * lx / nx
+                if 0 < j < ny: y += 0.30 * (rnd.random() - 0.5) * ly / ny
+                if 0 < k < nz: z += 0.30 * (rnd.random() - 0.5) * lz / nz
+                corner[(2 * i, 2 * j, 2 * k)] = (x, y, z)
+
+    nodes = []
+    idx = {}
+
+    def node(gi, gj, gk):
+        # 偶数座標は角。奇数を含む座標は「関係する角の平均」(三重線形の位置)
+        if (gi, gj, gk) not in idx:
+            ii = ((gi - 1, gi + 1) if gi % 2 else (gi,))
+            jj = ((gj - 1, gj + 1) if gj % 2 else (gj,))
+            kk = ((gk - 1, gk + 1) if gk % 2 else (gk,))
+            cs = [corner[(a, b, c)] for a in ii for b in jj for c in kk]
+            idx[(gi, gj, gk)] = len(nodes)
+            nodes.append(tuple(sum(p[d] for p in cs) / len(cs) for d in range(3)))
+        return idx[(gi, gj, gk)]
+
+    cells = []
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                nd = [node((2 * i) + 1 + sx, (2 * j) + 1 + sy, (2 * k) + 1 + sz)
+                      for sx, sy, sz in HEX27_XI]
+                cells.append((1, 12, nd))
+    for i in range(nx):
+        for j in range(ny):
+            for gk, tag in ((0, 10), (2 * nz, 11)):
+                gi, gj = 2 * i, 2 * j
+                q = [(gi, gj), (gi + 2, gj), (gi + 2, gj + 2), (gi, gj + 2),
+                     (gi + 1, gj), (gi + 2, gj + 1), (gi + 1, gj + 2), (gi, gj + 1),
+                     (gi + 1, gj + 1)]
+                cells.append((tag, 10, [node(a, b, gk) for a, b in q]))
+
+    return nodes, cells
+
+
+def make_box_prism2_warp(nx=3, ny=3, nz=3, lx=1e-3, ly=1e-3, lz=0.2e-3, seed=20260803):
+    """**ゆがんだ** 2 次角柱格子 (prism18、analysis = P の自己検証用)
+
+    四角形を対角線で 2 つの三角形に割って z に押し出す。角だけを乱数で動かし、
+    中間節点は対応する角の平均 (1 次の写像の位置) に置く。
+
+    物理タグ : 1 = 体積、10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
+    """
+    rnd = random.Random(seed)
+    corner = {}
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            for k in range(nz + 1):
+                x, y, z = lx * i / nx, ly * j / ny, lz * k / nz
+                if 0 < i < nx: x += 0.30 * (rnd.random() - 0.5) * lx / nx
+                if 0 < j < ny: y += 0.30 * (rnd.random() - 0.5) * ly / ny
+                if 0 < k < nz: z += 0.30 * (rnd.random() - 0.5) * lz / nz
+                corner[(2 * i, 2 * j, 2 * k)] = (x, y, z)
+
+    nodes = []
+    idx = {}
+
+    def node(gi, gj, gk):
+        if (gi, gj, gk) not in idx:
+            # 奇数座標は関係する角の平均。面内は三角形の辺の中点 (角 2 個) か
+            # 対角線の中点 (これも角 2 個)、z 方向は上下の平均
+            pts = [(gi, gj)]
+            if (gi % 2) and (gj % 2):
+                # 対角線 (2i,2j)-(2i+2,2j+2) の中点
+                pts = [(gi - 1, gj - 1), (gi + 1, gj + 1)]
+            elif gi % 2:
+                pts = [(gi - 1, gj), (gi + 1, gj)]
+            elif gj % 2:
+                pts = [(gi, gj - 1), (gi, gj + 1)]
+            kk = ((gk - 1, gk + 1) if gk % 2 else (gk,))
+            cs = [corner[(a, b, c)] for a, b in pts for c in kk]
+            idx[(gi, gj, gk)] = len(nodes)
+            nodes.append(tuple(sum(p[d] for p in cs) / len(cs) for d in range(3)))
+        return idx[(gi, gj, gk)]
+
+    tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
+    cells = []
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                for tri in tris:
+                    tp = {"A": (2 * (i + tri[0][0]), 2 * (j + tri[0][1])),
+                          "B": (2 * (i + tri[1][0]), 2 * (j + tri[1][1])),
+                          "C": (2 * (i + tri[2][0]), 2 * (j + tri[2][1]))}
+                    for e in (("AB", "A", "B"), ("BC", "B", "C"), ("CA", "C", "A")):
+                        tp[e[0]] = ((tp[e[1]][0] + tp[e[2]][0]) // 2,
+                                    (tp[e[1]][1] + tp[e[2]][1]) // 2)
+                    nd = [node(tp[t][0], tp[t][1], (2 * k) + z)
+                          for t, z in PRISM18_TZ]
+                    cells.append((1, 13, nd))
+    for i in range(nx):
+        for j in range(ny):
+            for gk, tag in ((0, 10), (2 * nz, 11)):
+                for tri in tris:
+                    v = [(2 * (i + a), 2 * (j + b)) for a, b in tri]
+                    m = [((v[0][0] + v[1][0]) // 2, (v[0][1] + v[1][1]) // 2),
+                         ((v[1][0] + v[2][0]) // 2, (v[1][1] + v[2][1]) // 2),
+                         ((v[2][0] + v[0][0]) // 2, (v[2][1] + v[0][1]) // 2)]
+                    cells.append((tag, 9, [node(a, b, gk) for a, b in v + m]))
 
     return nodes, cells
 
@@ -913,6 +1103,13 @@ def main():
                         else make_box_hexpyrtet(**opt))
         write_msh_cells(path, nodes, cells)
         print("%s : pyramids, %d nodes, %d cells" % (path, len(nodes), len(cells)))
+        return 0
+    elif kind in ("coax_hex2", "box_hex2_warp", "box_prism2_warp"):
+        nodes, cells = (make_coax_hex2(**opt) if kind == "coax_hex2"
+                        else make_box_hex2_warp(**opt) if kind == "box_hex2_warp"
+                        else make_box_prism2_warp(**opt))
+        write_msh_cells(path, nodes, cells)
+        print("%s : order 2, %d nodes, %d cells" % (path, len(nodes), len(cells)))
         return 0
     elif kind in ("coax_hex", "box_hex_warp"):
         nodes, hexes, quads = (make_coax_hex(**opt) if kind == "coax_hex"

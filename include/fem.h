@@ -180,8 +180,10 @@ EXTERN int NTet;				// 四面体数
 EXTERN int32_t *Tet;			// [4*NTet] 頂点の節点番号
 EXTERN int *TetTag;				// [NTet] 物理タグ
 EXTERN unsigned char *TetMat;	// [NTet] 材料番号
-// 要素次数 (1 : 4 節点四面体 / 2 : 10 節点四面体)。2 次のとき Tet2 / Tri2 に
-// 辺上の中間節点が入る。局所の辺の並びは Gmsh の tet10 / tri6 と同じ
+// 格子の要素次数 (1 / 2)。名前は四面体由来だが**格子全体の次数**として使う
+// (2 次の六面体・角柱でも 2 になる。次数の混在は弾くので格子で 1 つ)。
+// 四面体が 2 次のとき Tet2 / Tri2 に辺上の中間節点が入る。局所の辺の並びは
+// Gmsh の tet10 / tri6 と同じ
 //   Tet2 : (0,1) (1,2) (2,0) (3,0) (3,2) (3,1)
 //   Tri2 : (0,1) (1,2) (2,0)
 EXTERN int TetOrder;
@@ -211,20 +213,39 @@ EXTERN int *TriTag;				// [NTri] 物理タグ
 #define MESHELEM_PYR (4)
 EXTERN int MeshElem;
 EXTERN int NHex;				// 六面体数
-EXTERN int32_t *Hex;			// [8*NHex] 節点番号
+EXTERN int32_t *Hex;			// [8*NHex] 頂点の節点番号
 EXTERN int *HexTag;				// [NHex] 物理タグ
 EXTERN unsigned char *HexMat;	// [NHex] 材料番号
+// 2 次の六面体 (Gmsh の型 17 = 20 節点 serendipity / 12 = 27 節点完全 2 次)。
+// 頂点 8 個は Hex に、残り (辺 12 + 面 6 + 体心 1) は Hex2 に入る。
+// 局所の並びは Gmsh の実測 (classify):
+//   辺 : (0,1)(0,3)(0,4)(1,2)(1,5)(2,3)(2,6)(3,7)(4,5)(4,7)(5,6)(6,7)
+//   面 : z- (0,1,2,3), y- (0,1,5,4), x- (0,3,7,4), x+ (1,2,6,5),
+//        y+ (2,3,7,6), z+ (4,5,6,7)、最後に体心
+// 次数の混在は弾くので HexNen は格子全体で 1 つ (8 / 20 / 27)
+EXTERN int HexNen;				// 六面体 1 個の節点数
+EXTERN int32_t *Hex2;			// [19*NHex] 2 次のときのみ (1 次では NULL)
 EXTERN int NQuad;				// 四角形数 (電極面の指定に使う)
-EXTERN int32_t *Quad;			// [4*NQuad]
+EXTERN int32_t *Quad;			// [4*NQuad] 頂点
 EXTERN int *QuadTag;			// [NQuad] 物理タグ
+// 2 次の四角形 (型 16 = 8 節点 / 10 = 9 節点)。辺 (0,1)(1,2)(2,3)(3,0) の
+// 中間節点 4 個 + 中心 (8 節点では -1)。電極の中間節点の固定にだけ使う
+EXTERN int32_t *Quad2;			// [5*NQuad] 2 次のときのみ (1 次では NULL)
 
 // 角柱 (6 節点、三角形を押し出した形)。局所の並びは Gmsh / VTK と同じ
 // 「下面の三角形 (0,1,2)、その真上に上面 (3,4,5)」。境界面は三角形と四角形の
 // 両方になる (上下面が三角形、側面が四角形)
 EXTERN int NPrism;				// 角柱数
-EXTERN int32_t *Prism;			// [6*NPrism] 節点番号
+EXTERN int32_t *Prism;			// [6*NPrism] 頂点の節点番号
 EXTERN int *PrismTag;			// [NPrism] 物理タグ
 EXTERN unsigned char *PrismMat;	// [NPrism] 材料番号
+// 2 次の角柱 (Gmsh の型 18 = 15 節点 serendipity / 13 = 18 節点完全 2 次)。
+// 頂点 6 個は Prism に、残り (辺 9 + 四角形面 3) は Prism2 に入る。
+// 局所の並びは Gmsh の実測 (classify):
+//   辺 : (0,1)(0,2)(0,3)(1,2)(1,4)(2,5)(3,4)(3,5)(4,5)
+//   四角形面 : (0,1,4,3) (0,2,5,3) (1,2,5,4)
+EXTERN int PrismNen;			// 角柱 1 個の節点数 (6 / 15 / 18)
+EXTERN int32_t *Prism2;			// [12*NPrism] 2 次のときのみ (1 次では NULL)
 
 // ピラミッド (5 節点、四角形の底面 + 頂点)。局所の並びは Gmsh / VTK と同じ
 // 「底面を反時計回り (0..3)、最後に頂点 (4)」。四角形面 1 枚と三角形面 4 枚を

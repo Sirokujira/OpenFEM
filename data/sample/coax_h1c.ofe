@@ -1,0 +1,27 @@
+OpenFEM 1 0
+title = the same coarse coax with first-order hexahedra (control)
+#
+# coax_hex2 と**同じ分割 (nr=4, nt=12) の 1 次六面体**による対照ケース。
+#
+#   python3 mkmesh.py coax_hex coax_h1c.msh -nr 4 -nt 12
+#
+# 2 次要素の検査は「同じ格子で次数だけ落とした対照より誤差比が 30 以上
+# 良いこと」を見る (rlc_check.sh)。閉形式との比較だけでは、2 次要素が
+# 黙って 1 次に退行しても許容を緩めれば両方通ってしまうため。
+# **誤差比の検査は 2 つの格子が同じ nr, nt であることに全面的に依存する**
+# ので、再生成するときは必ず上のコマンドの分割数を使うこと。
+#
+# 実測 : この 1 次格子は +3.0%、同じ分割の coax_hex2 (2 次) は +0.0009%。
+#
+# 物理タグ : 1 = 体積、10 = 外側 r=b (基準電極)、11 = 内側 r=a (ポート 1)
+#
+mesh = coax_h1c.msh
+material = 2.1 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+tline = Z
+
+analysis = C L
+solver = 50000 2000 1e-13
+end

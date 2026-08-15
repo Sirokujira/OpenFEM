@@ -58,12 +58,14 @@ void monitor2(FILE *fp, int nthread)
 			(long long)nnode, NPyr, NTri, NQuad);
 	}
 	else if (MeshMode && (MeshElem == MESHELEM_PRISM)) {
-		fprintf(fp, "Mesh = %s (unstructured, 6-node prisms)\n", MeshFile);
+		fprintf(fp, "Mesh = %s (unstructured, %d-node prisms)\n", MeshFile, PrismNen);
 		fprintf(fp, "Nodes = %lld, Prisms = %d, Triangles = %d, Quadrilaterals = %d\n",
 			(long long)nnode, NPrism, NTri, NQuad);
 	}
 	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
-		fprintf(fp, "Mesh = %s (unstructured, 8-node trilinear hexahedra)\n", MeshFile);
+		fprintf(fp, "Mesh = %s (unstructured, %d-node %s hexahedra)\n", MeshFile,
+			HexNen, ((HexNen == 8) ? "trilinear" : (HexNen == 20) ? "serendipity"
+			       : "triquadratic"));
 		fprintf(fp, "Nodes = %lld, Hexahedra = %d, Quadrilaterals = %d\n",
 			(long long)nnode, NHex, NQuad);
 	}
