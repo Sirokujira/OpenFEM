@@ -819,6 +819,91 @@ res=$(awk '/linear field/ { for (i = 1; i <= NF; i++) if ($i == "error") e = $(i
 echo "  the linear-field identity holds across the interface : $res"
 case "$res" in NG*) status=1 ;; esac
 
+# ピラミッド (5 節点、四角形の底面 + 頂点)。六面体と四面体をつなぐ遷移要素で、
+# 四角形面のトレースが双 1 次 (六面体と適合)、三角形面が 1 次 (四面体と適合)。
+#
+#   (a) 純ピラミッド格子 : 底面がすべて長方形 (平行四辺形) なので剛性が厳密。
+#       閉形式と全桁一致
+#   (b) 六面体 -> ピラミッド -> 四面体の遷移格子 : 直列容量の閉形式と全桁一致。
+#       種別ごとに物理タグを分けてあるので、要素番号 -> 材料の対応が
+#       種別の境目でずれると必ず落ちる
+#   (c) ゆがんだ純ピラミッド格子 : analysis = P の線形場の恒等式 (機械精度) と
+#       8 点 / 27 点則の体積一致。底面が平行四辺形でなくなると剛性は
+#       有理式の積分近似になる (warp > 0 でないと検査にならない)
+#   (d) ゆがんだ遷移格子 : 混在の恒等式 (種別をまたぐ面の節点共有)
+#   (e) 非適合な接続 : ピラミッドがあっても、四角形面を三角形 2 枚で覆った
+#       面が残っていれば弾く。**節点は全部共有されるので線形場の恒等式では
+#       検出できず**、読み込み時の位相の検査だけが防波堤になる
+echo "[pyramids] 5-node pyramid (hex-to-tet transition) meshes"
+run_case box_pyr
+compare "C (pyramid box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+run_case box_hexpyrtet
+compare "C (hex er=4 + pyr/tet er=2) [F]" "$(value_of C)" 1.180558376e-13 1e-8
+cp "$SRC/nodal_test_pyr.ofe" "$WORK/"
+(cd "$WORK" && "$OFE" -n 2 nodal_test_pyr.ofe > /dev/null)
+res=$(awk '/linear field/ { for (i = 1; i <= NF; i++) if ($i == "error") e = $(i+2) }
+	/rel. diff/ { for (i = 1; i <= NF; i++) if ($i == "diff") v = $(i+2) }
+	/^  warp/ { w = $3 }
+	END { if ((e == "") || (v == "")) { printf "NG (no report)"; exit }
+	      printf "%s (linear %s, volume %s, warp %s)",
+	             (((e + 0) < 1e-12) && ((v + 0) < 1e-12) && ((w + 0) > 1e-3)) ? "OK" : "NG",
+	             e, v, w }' "$WORK/ofe.log")
+echo "  distorted mesh : the linear-field identity holds : $res"
+case "$res" in NG*) status=1 ;; esac
+cp "$SRC/nodal_test_hexpyrtet.ofe" "$WORK/"
+(cd "$WORK" && "$OFE" -n 2 nodal_test_hexpyrtet.ofe > /dev/null)
+res=$(awk '/linear field/ { for (i = 1; i <= NF; i++) if ($i == "error") e = $(i+2) }
+	/^  nodes =/ { for (i = 1; i <= NF; i++) {
+	                 if ($i == "tetrahedra") nt = $(i+2)+0
+	                 if ($i == "hexahedra") nh = $(i+2)+0
+	                 if ($i == "pyramids") np = $(i+2)+0 } }
+	END { if (e == "") { printf "NG (no report)"; exit }
+	      printf "%s (%s, %d tets + %d hexes + %d pyramids)",
+	             (((e + 0) < 1e-12) && (nt > 0) && (nh > 0) && (np > 0)) ? "OK" : "NG",
+	             e, nt, nh, np }' "$WORK/ofe.log")
+echo "  the identity holds across the hex-pyramid-tet interfaces : $res"
+case "$res" in NG*) status=1 ;; esac
+# (e) 四角形面を三角形 2 枚で覆った非適合の接続。六面体の上面 (節点 5 6 7 8) を
+# 四面体 2 個の三角形が対角線で割って覆う。ピラミッドが 1 個あるので
+# 「hex + tet はピラミッド無しでは混ぜられない」の検査は通過し、
+# 位相の検査 (elem_face_check) だけがこれを捕まえる
+cat > "$WORK/badjunction.msh" <<'EOF'
+$MeshFormat
+2.2 0 8
+$EndMeshFormat
+$Nodes
+14
+1 0 0 0
+2 1 0 0
+3 1 1 0
+4 0 1 0
+5 0 0 1
+6 1 0 1
+7 1 1 1
+8 0 1 1
+9 0.5 0.5 2
+10 3 0 0
+11 4 0 0
+12 4 1 0
+13 3 1 0
+14 3.5 0.5 1
+$EndNodes
+$Elements
+5
+1 3 2 10 10 1 2 3 4
+2 5 2 1 1 1 2 3 4 5 6 7 8
+3 4 2 3 3 5 6 7 9
+4 4 2 3 3 5 7 8 9
+5 7 2 2 2 10 11 12 13 14
+$EndElements
+EOF
+sed 's/^mesh = .*/mesh = badjunction.msh/' "$SRC/box_pyr.ofe" > "$WORK/badj.ofe"
+mesh_reject "a quad face covered by two triangles (pyramids present)" badj.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 badj.ofe 2>&1 | grep -q "covered by triangular"); then
+	echo "  *** it was rejected for a different reason than the face conformity" >&2
+	status=1
+fi
+
 # Gmsh **バイナリ**形式の読み込み。
 #
 # 検証用のファイルは**本物の gmsh に作らせてある** (4.12.1):
@@ -873,6 +958,28 @@ bin_same "2-D triangles, binary 2.2" plate2d_dc.ofe plate2d_bin.msh plate2d_bin_
 bin_same "2-D triangles, binary 4.1" plate2d_dc.ofe plate2d_bin.msh plate2d_bin_41.msh
 bin_same "order-2 tetrahedra, binary 2.2" box_p2.ofe box_p2_bin.msh box_p2_bin_22.msh
 bin_same "order-2 tetrahedra, binary 4.1" box_p2.ofe box_p2_bin.msh box_p2_bin_41.msh
+# ピラミッドを含む混在格子 (型 2/3/4/5/7 が 1 つのファイルに同居する)。
+# バイナリでは節点数が型の表から決まるので、型 7 = 5 節点の表の誤りはここで
+# ずれる。ファイルは本物の gmsh (4.12.1) に box_hexpyrtet.msh を変換させたもの
+bin_same "hex-pyramid-tet mix, binary 2.2" box_hexpyrtet.ofe box_hexpyrtet_bin.msh box_hexpyrtet_bin_22.msh
+bin_same "hex-pyramid-tet mix, binary 4.1" box_hexpyrtet.ofe box_hexpyrtet_bin.msh box_hexpyrtet_bin_41.msh
+# ASCII 4.1 のピラミッド (read_elements_v41 の節点数表と $Entities 経由の
+# 物理タグ)。比較の基準は**同じ gmsh 変換で出した 2.2 ASCII** (gmsh は変換の
+# たびに節点を振り直すので、元の box_hexpyrtet.msh と直接比べると丸めの順序が
+# 変わって一致しない)
+sed 's/^mesh = .*/mesh = box_hexpyrtet_bin.msh/' "$SRC/box_hexpyrtet.ofe" > "$WORK/pm_a.ofe"
+sed 's/^mesh = .*/mesh = box_hexpyrtet_41.msh/' "$SRC/box_hexpyrtet.ofe" > "$WORK/pm_b.ofe"
+(cd "$WORK" && "$OFE" -n 2 pm_a.ofe > /dev/null && "$OFE_POST" > /dev/null)
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/pm_a.csv"
+(cd "$WORK" && "$OFE" -n 2 pm_b.ofe > /dev/null && "$OFE_POST" > /dev/null)
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/pm_b.csv"
+if cmp -s "$WORK/pm_a.csv" "$WORK/pm_b.csv"; then
+	echo "  hex-pyramid-tet mix, ASCII 4.1 : identical -> OK"
+else
+	echo "  hex-pyramid-tet mix, ASCII 4.1 : differ -> NG" >&2
+	diff "$WORK/pm_a.csv" "$WORK/pm_b.csv" | head -4 >&2
+	status=1
+fi
 
 # 逆エンディアンのファイルは**読み違えずに落ちること**。バイト入れ替えは
 # 手元で検証できないので実装せず、はっきり断る方を選んでいる

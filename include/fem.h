@@ -199,13 +199,16 @@ EXTERN int NTri;				// 三角形数 (電極面の指定に使う)
 EXTERN int32_t *Tri;			// [3*NTri]
 EXTERN int *TriTag;				// [NTri] 物理タグ
 
-// 非構造格子の要素種別 (0 : 四面体, 1 : 六面体)。**混在は弾く**。
+// 非構造格子の要素種別。混在 (MESHELEM_MIXED) を許すが、**六面体と四面体は
+// 面を共有できない** (四角形面のトレースは双 1 次、三角形面は 1 次)。
+// 間に角柱かピラミッドを挟むこと。
 // 六面体は 8 節点 (三重線形、等パラメトリック) で、局所の並びは
 // Gmsh / VTK と同じ「下面を反時計回り、その上に上面」。境界面は四角形。
 #define MESHELEM_TET (0)
 #define MESHELEM_HEX (1)
 #define MESHELEM_PRISM (2)
 #define MESHELEM_MIXED (3)		// 複数の種別が同居する格子
+#define MESHELEM_PYR (4)
 EXTERN int MeshElem;
 EXTERN int NHex;				// 六面体数
 EXTERN int32_t *Hex;			// [8*NHex] 節点番号
@@ -222,6 +225,15 @@ EXTERN int NPrism;				// 角柱数
 EXTERN int32_t *Prism;			// [6*NPrism] 節点番号
 EXTERN int *PrismTag;			// [NPrism] 物理タグ
 EXTERN unsigned char *PrismMat;	// [NPrism] 材料番号
+
+// ピラミッド (5 節点、四角形の底面 + 頂点)。局所の並びは Gmsh / VTK と同じ
+// 「底面を反時計回り (0..3)、最後に頂点 (4)」。四角形面 1 枚と三角形面 4 枚を
+// 持つ**遷移要素**で、これを挟むと六面体と四面体が適合してつながる
+// (四角形面のトレースは双 1 次、三角形面のトレースは 1 次)
+EXTERN int NPyr;				// ピラミッド数
+EXTERN int32_t *Pyr;			// [5*NPyr] 節点番号
+EXTERN int *PyrTag;				// [NPyr] 物理タグ
+EXTERN unsigned char *PyrMat;	// [NPyr] 材料番号
 
 // 格子の次元 (3 : 四面体、2 : 断面 2 次元の三角形)。2 のときは三角形が
 // 体積要素になり、M / F (断面 2 次元の定式化) を非構造格子で解ける。

@@ -42,6 +42,7 @@ int hex_grad_center(int, double [8][3]);
 void crs_alloc_prism(crs_t *);
 void assemble_prism(crs_t *, int);
 int prism_grad_center(int, double [6][3]);
+int pyr_grad_center(int, double [5][3]);
 void assemble_tet(crs_t *, int);
 int tet10_element(int, const double [6], double [10][10], double *);
 int tet_grad_center(int, double [10][3], int *);

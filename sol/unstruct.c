@@ -93,12 +93,15 @@ static void elem_reset(void)
 	NPrism = 0;
 	Prism = NULL;
 	PrismTag = NULL;
+	NPyr = 0;
+	Pyr = NULL;
+	PyrTag = NULL;
 	MeshElem = MESHELEM_TET;
 }
 
 
 // 要素 1 個を格納する。type は Gmsh の要素型
-// (4/11 = 四面体、2/9 = 三角形、5 = 六面体、3 = 四角形)
+// (4/11 = 四面体、2/9 = 三角形、5 = 六面体、6 = 角柱、7 = ピラミッド、3 = 四角形)
 static int elem_store(int type, int tag, const int32_t *nd)
 {
 	const int order = ((type == 11) || (type == 9)) ? 2 : 1;
@@ -124,6 +127,18 @@ static int elem_store(int type, int tag, const int32_t *nd)
 		for (int l = 0; l < 6; l++) Prism[(NPrism * 6) + l] = nd[l];
 		PrismTag[NPrism] = tag;
 		NPrism++;
+
+		return 0;
+	}
+	if (type == 7) {
+		// ピラミッド (5 節点)。局所の並びは Gmsh のまま使う
+		if (NPyr % ARRAY_INC == 0) {
+			Pyr = (int32_t *)realloc(Pyr, (size_t)(NPyr + ARRAY_INC) * 5 * sizeof(int32_t));
+			PyrTag = (int *)realloc(PyrTag, (size_t)(NPyr + ARRAY_INC) * sizeof(int));
+		}
+		for (int l = 0; l < 5; l++) Pyr[(NPyr * 5) + l] = nd[l];
+		PyrTag[NPyr] = tag;
+		NPyr++;
 
 		return 0;
 	}
@@ -182,44 +197,213 @@ static int elem_store(int type, int tag, const int32_t *nd)
 }
 
 
+static int cmp_face3(const void *a, const void *b)
+{
+	const int32_t *x = (const int32_t *)a;
+	const int32_t *y = (const int32_t *)b;
+
+	for (int i = 0; i < 3; i++) {
+		if (x[i] != y[i]) return ((x[i] < y[i]) ? -1 : 1);
+	}
+
+	return 0;
+}
+
+
+static int cmp_face4(const void *a, const void *b)
+{
+	const int32_t *x = (const int32_t *)a;
+	const int32_t *y = (const int32_t *)b;
+
+	for (int i = 0; i < 4; i++) {
+		if (x[i] != y[i]) return ((x[i] < y[i]) ? -1 : 1);
+	}
+
+	return 0;
+}
+
+
+// 面の節点を昇順に並べる (表裏・巡回によらず同じ面を同じ鍵にする)
+static void face_sort(int32_t *v, int n)
+{
+	for (int i = 1; i < n; i++) {
+		const int32_t t = v[i];
+		int j = i;
+		for (; (j > 0) && (v[j - 1] > t); j--) v[j] = v[j - 1];
+		v[j] = t;
+	}
+}
+
+
+/*
+「見かけだけ接している」四角形面 - 三角形面の接続の検出。
+
+六面体・角柱・ピラミッドの四角形面を四面体 (やピラミッド) の三角形 2 枚で
+覆うと、**節点はすべて共有されるのに面上の解が食い違う** (四角形面の
+トレースは双 1 次で交差項を持ち、三角形 2 枚の 1 次のトレースでは表せない)。
+節点の共有しか見ない検査 (線形場の恒等式) はこれを検出できない — 1 次の場は
+どちらの側でも厳密に表せるため。そこで位相で捕まえる:
+
+  適合した内部の四角形面は表裏 2 回現れる。**1 回しか現れない四角形面**の
+  4 節点のうち 3 節点が、**1 回しか現れない三角形面**と一致していれば、
+  その四角形は対角線で 2 枚の三角形に割られている = 非適合として弾く。
+
+三角形側も 1 回しか現れないものに限るのは、内部の三角形面 (2 回現れる =
+適合) との偶然の一致を除くため。境界の折り目が四角形面と 3 節点を共有する
+形は偽陽性になり得るが、それは面どうしが幾何的に交差する病的な格子に限る。
+正しいケースで 1 件も出ないことは rlc_check.sh の全ケースが兼ねる。
+*/
+static int elem_face_check(void)
+{
+	const int64_t nq = ((int64_t)6 * NHex) + ((int64_t)3 * NPrism) + NPyr;
+	const int64_t nt = ((int64_t)4 * NTet) + ((int64_t)2 * NPrism) + ((int64_t)4 * NPyr);
+
+	if ((nq < 1) || (nt < 1)) return 0;
+
+	// 局所節点 -> 面 (並びは Gmsh の hex8 / prism6 / pyramid5)
+	static const int hexf[6][4] = {{0, 1, 2, 3}, {4, 5, 6, 7}, {0, 1, 5, 4},
+	                               {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+	static const int prif[3][4] = {{0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}};
+	static const int tetf[4][3] = {{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
+	static const int pyrf[4][3] = {{0, 1, 4}, {1, 2, 4}, {2, 3, 4}, {3, 0, 4}};
+
+	int32_t *fq = (int32_t *)malloc((size_t)nq * 4 * sizeof(int32_t));
+	int64_t k = 0;
+	for (int e = 0; e < NHex; e++) {
+		for (int f = 0; f < 6; f++) {
+			for (int i = 0; i < 4; i++) fq[(k * 4) + i] = Hex[(e * 8) + hexf[f][i]];
+			face_sort(&fq[k * 4], 4);
+			k++;
+		}
+	}
+	for (int e = 0; e < NPrism; e++) {
+		for (int f = 0; f < 3; f++) {
+			for (int i = 0; i < 4; i++) fq[(k * 4) + i] = Prism[(e * 6) + prif[f][i]];
+			face_sort(&fq[k * 4], 4);
+			k++;
+		}
+	}
+	for (int e = 0; e < NPyr; e++) {
+		for (int i = 0; i < 4; i++) fq[(k * 4) + i] = Pyr[(e * 5) + i];
+		face_sort(&fq[k * 4], 4);
+		k++;
+	}
+	qsort(fq, (size_t)nq, 4 * sizeof(int32_t), cmp_face4);
+
+	int32_t *ft = (int32_t *)malloc((size_t)nt * 3 * sizeof(int32_t));
+	k = 0;
+	for (int e = 0; e < NTet; e++) {
+		for (int f = 0; f < 4; f++) {
+			for (int i = 0; i < 3; i++) ft[(k * 3) + i] = Tet[(e * 4) + tetf[f][i]];
+			face_sort(&ft[k * 3], 3);
+			k++;
+		}
+	}
+	for (int e = 0; e < NPrism; e++) {
+		for (int f = 0; f < 2; f++) {
+			for (int i = 0; i < 3; i++) ft[(k * 3) + i] = Prism[(e * 6) + (f * 3) + i];
+			face_sort(&ft[k * 3], 3);
+			k++;
+		}
+	}
+	for (int e = 0; e < NPyr; e++) {
+		for (int f = 0; f < 4; f++) {
+			for (int i = 0; i < 3; i++) ft[(k * 3) + i] = Pyr[(e * 5) + pyrf[f][i]];
+			face_sort(&ft[k * 3], 3);
+			k++;
+		}
+	}
+	qsort(ft, (size_t)nt, 3 * sizeof(int32_t), cmp_face3);
+
+	// 1 回しか現れない三角形面だけ残す (詰め直し)
+	int64_t nt1 = 0;
+	for (int64_t p = 0; p < nt; ) {
+		int64_t q = p + 1;
+		while ((q < nt) && (cmp_face3(&ft[p * 3], &ft[q * 3]) == 0)) q++;
+		if ((q - p) == 1) {
+			for (int i = 0; i < 3; i++) ft[(nt1 * 3) + i] = ft[(p * 3) + i];
+			nt1++;
+		}
+		p = q;
+	}
+
+	// 1 回しか現れない四角形面の 3 節点部分集合を照合する
+	int bad = 0;
+	for (int64_t p = 0; (p < nq) && !bad; ) {
+		int64_t q = p + 1;
+		while ((q < nq) && (cmp_face4(&fq[p * 4], &fq[q * 4]) == 0)) q++;
+		if ((q - p) == 1) {
+			for (int drop = 0; (drop < 4) && !bad; drop++) {
+				int32_t key[3];
+				int m = 0;
+				for (int i = 0; i < 4; i++) {
+					if (i != drop) key[m++] = fq[(p * 4) + i];
+				}
+				if ((nt1 > 0) && (bsearch(key, ft, (size_t)nt1,
+						3 * sizeof(int32_t), cmp_face3) != NULL)) {
+					bad = 1;
+				}
+			}
+		}
+		p = q;
+	}
+
+	free(fq);
+	free(ft);
+
+	if (bad) {
+		printf("%s\n", "*** mesh : a quadrilateral face is covered by triangular "
+			"faces, so the mesh is not conforming (the bilinear trace on the "
+			"quadrilateral cannot match the linear traces on the triangles); "
+			"put pyramids on such faces to make the transition");
+		return 1;
+	}
+
+	return 0;
+}
+
+
 // 全要素を読んだあとの整合性検査 (格子の次元と次数)
 static int elem_finish(void)
 {
-	// **四面体と六面体の混在は弾く。** 要素行列も CRS も要素種別で分岐して
-	// おり、混在させると「どちらの経路を通ったか」で答えが変わる
 	/*
-	3 次元の要素種別を決める。**混在 (四面体 + 六面体 + 角柱) を許す。**
+	3 次元の要素種別を決める。**混在 (四面体 + 六面体 + 角柱 + ピラミッド) を
+	許す。**
 
-	要素は「四面体 -> 六面体 -> 角柱」の連番で扱う (`elem3d_*`)。純粋な
-	四面体格子ではこの順序が従来と完全に一致するので、既存の答えはビット単位で
-	変わらない。2 次要素は四面体にしかないので、混ざるときは 1 次に限る。
+	要素は「四面体 -> 六面体 -> 角柱 -> ピラミッド」の連番で扱う (`elem3d_*`)。
+	純粋な四面体格子ではこの順序が従来と完全に一致するので、既存の答えは
+	ビット単位で変わらない。2 次要素は四面体にしかないので、混ざるときは
+	1 次に限る。
 	*/
 	{
-		const int nk = ((NTet > 0) ? 1 : 0) + ((NHex > 0) ? 1 : 0) + ((NPrism > 0) ? 1 : 0);
+		const int nk = ((NTet > 0) ? 1 : 0) + ((NHex > 0) ? 1 : 0)
+		             + ((NPrism > 0) ? 1 : 0) + ((NPyr > 0) ? 1 : 0);
 		if (nk > 1) {
 			/*
 			**六面体と四面体は直接隣り合わせにできない。**
 			六面体の面は四角形で、その上の解は双 1 次 (xy の項を持つ)。
 			四面体の面は三角形で解は 1 次なので、六面体の四角形面を三角形 2 枚で
 			覆っても**面上の解が一致しない** (節点は合っていても要素間で場が
-			食い違う)。これを埋めるための要素がピラミッドで、それが無い以上は
-			黙って通さずに弾く。
+			食い違う)。これを埋めるのがピラミッド (四角形面 1 + 三角形面 4 の
+			遷移要素) で、格子にピラミッドが 1 つも無ければその意図も無いと
+			みなして弾く。ピラミッドがあっても四角形面を三角形で覆った
+			非適合の面が残っていないかは elem_face_check() が別に見る。
 
 			角柱を挟むのは問題ない:
 			  四面体 - 角柱 : 三角形の面どうし (どちらも 1 次) -> 適合
 			  六面体 - 角柱 : 四角形の面どうし (どちらも双 1 次) -> 適合
 			境界層を角柱で切って内部を四面体にする、という一番よくある形は通る。
 			*/
-			if ((NTet > 0) && (NHex > 0)) {
+			if ((NTet > 0) && (NHex > 0) && (NPyr < 1)) {
 				printf("%s\n", "*** mesh : hexahedra and tetrahedra cannot share a "
 					"face conformingly (the quadrilateral face carries a bilinear "
-					"trace, the triangular face a linear one); put prisms between "
-					"them, or use one element type");
+					"trace, the triangular face a linear one); put prisms or "
+					"pyramids between them, or use one element type");
 				return 1;
 			}
 			if (TetOrder >= 2) {
 				printf("%s\n", "*** mesh : 10-node tetrahedra cannot be mixed with "
-					"hexahedra or prisms (the other types are first order)");
+					"hexahedra, prisms or pyramids (the other types are first order)");
 				return 1;
 			}
 			MeshElem = MESHELEM_MIXED;
@@ -231,8 +415,22 @@ static int elem_finish(void)
 				return 1;
 			}
 
-			return 0;
+			return elem_face_check();
 		}
+	}
+	if (NPyr > 0) {
+		// 純ピラミッド格子 (六面体を中心点で 6 分割した形など)。
+		// 電極面は底面の四角形でも側面の三角形でもよい
+		MeshElem = MESHELEM_PYR;
+		MeshDim = 3;
+		TetOrder = 1;
+		if ((NTri < 1) && (NQuad < 1)) {
+			printf("%s\n", "*** mesh : a pyramid mesh needs triangular or "
+				"quadrilateral boundary faces for the electrodes");
+			return 1;
+		}
+
+		return elem_face_check();
 	}
 	if (NPrism > 0) {
 		// 角柱格子。電極面は上下の三角形でも側面の四角形でもよい
@@ -245,7 +443,7 @@ static int elem_finish(void)
 			return 1;
 		}
 
-		return 0;
+		return elem_face_check();
 	}
 	if (NHex > 0) {
 		// 六面体格子。2 次の六面体 (Gmsh の型 17 / 12) は未対応で、
@@ -329,7 +527,8 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		// 節点数 : 四面体 (型 4 / 11) と三角形 (型 2 / 9)
 		const int nn = ((type == 4) ? 4 : (type == 11) ? 10
 		              : (type == 2) ? 3 : (type == 9) ? 6
-		              : (type == 5) ? 8 : (type == 3) ? 4 : (type == 6) ? 6 : 0);
+		              : (type == 5) ? 8 : (type == 3) ? 4 : (type == 6) ? 6
+		              : (type == 7) ? 5 : 0);
 		if (nn == 0) continue;			// 点・線分など、使わない要素型
 		if (nv < off + nn) continue;
 
@@ -497,7 +696,8 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 
 		const int nn = ((type == 4) ? 4 : (type == 11) ? 10
 		              : (type == 2) ? 3 : (type == 9) ? 6
-		              : (type == 5) ? 8 : (type == 3) ? 4 : (type == 6) ? 6 : 0);
+		              : (type == 5) ? 8 : (type == 3) ? 4 : (type == 6) ? 6
+		              : (type == 7) ? 5 : 0);
 		// 物理タグはエンティティ側にある (2.2 と違い要素の行には無い)
 		const int phys = ent_phys((int)dim, tag);
 
@@ -525,8 +725,9 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		}
 	}
 
-	if ((NTet < 1) && (NTri < 1) && (NHex < 1) && (NPrism < 1)) {
-		printf("%s\n", "*** mesh : no tetrahedron, hexahedron, prism or triangle found");
+	if ((NTet < 1) && (NTri < 1) && (NHex < 1) && (NPrism < 1) && (NPyr < 1)) {
+		printf("%s\n", "*** mesh : no tetrahedron, hexahedron, prism, pyramid "
+			"or triangle found");
 		return 1;
 	}
 
@@ -666,7 +867,7 @@ static int read_elements_bin22(FILE *fp, const int32_t *idmap, int32_t maxid)
 			return 1;
 		}
 		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9)
-		              || (type == 5) || (type == 3) || (type == 6));
+		              || (type == 5) || (type == 3) || (type == 6) || (type == 7));
 
 		for (long e = 0; e < cnt; e++) {
 			int32_t etag = 0;
@@ -830,7 +1031,7 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		// 物理タグはエンティティ側にある (2.2 と違い要素には無い)
 		const int phys = ent_phys((int)dim, tag);
 		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9)
-		              || (type == 5) || (type == 3) || (type == 6));
+		              || (type == 5) || (type == 3) || (type == 6) || (type == 7));
 
 		for (int64_t e = 0; e < cnt; e++) {
 			int64_t etag = 0;
@@ -851,8 +1052,9 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		}
 	}
 
-	if ((NTet < 1) && (NTri < 1) && (NHex < 1) && (NPrism < 1)) {
-		printf("%s\n", "*** mesh : no tetrahedron, hexahedron, prism or triangle found");
+	if ((NTet < 1) && (NTri < 1) && (NHex < 1) && (NPrism < 1) && (NPyr < 1)) {
+		printf("%s\n", "*** mesh : no tetrahedron, hexahedron, prism, pyramid "
+			"or triangle found");
 		return 1;
 	}
 
@@ -1165,13 +1367,13 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nenmax, int (*get)(int, int3
 /*
 3 次元要素の統一した見方 (種別の混在を許すため)。
 
-番号は **「四面体 -> 六面体 -> 角柱」の連番**。この順序は変えないこと:
-材料・場の出力・HDF5 がこの順に並ぶ。純粋な四面体格子ではこの並びが
-従来と完全に一致するので、既存の答えがビット単位で変わらない。
+番号は **「四面体 -> 六面体 -> 角柱 -> ピラミッド」の連番**。この順序は
+変えないこと: 材料・場の出力・HDF5 がこの順に並ぶ。純粋な四面体格子では
+この並びが従来と完全に一致するので、既存の答えがビット単位で変わらない。
 */
 int elem3d_count(void)
 {
-	return (NTet + NHex + NPrism);
+	return (NTet + NHex + NPrism + NPyr);
 }
 
 
@@ -1179,12 +1381,13 @@ int elem3d_kind(int e)
 {
 	if (e < NTet) return MESHELEM_TET;
 	if (e < (NTet + NHex)) return MESHELEM_HEX;
+	if (e < (NTet + NHex + NPrism)) return MESHELEM_PRISM;
 
-	return MESHELEM_PRISM;
+	return MESHELEM_PYR;
 }
 
 
-// 要素 e の節点。戻り値は節点数 (四面体 4 or 10、六面体 8、角柱 6)
+// 要素 e の節点。戻り値は節点数 (四面体 4 or 10、六面体 8、角柱 6、ピラミッド 5)
 int elem3d_nodes(int e, int32_t nd[10])
 {
 	if (e < NTet) return tet_nodes(e, nd);
@@ -1194,12 +1397,18 @@ int elem3d_nodes(int e, int32_t nd[10])
 
 		return 8;
 	}
-	{
+	if (e < (NTet + NHex + NPrism)) {
 		const int i = e - NTet - NHex;
 		for (int l = 0; l < 6; l++) nd[l] = Prism[(i * 6) + l];
+
+		return 6;
+	}
+	{
+		const int i = e - NTet - NHex - NPrism;
+		for (int l = 0; l < 5; l++) nd[l] = Pyr[(i * 5) + l];
 	}
 
-	return 6;
+	return 5;
 }
 
 
@@ -1207,8 +1416,11 @@ int elem3d_mat(int e)
 {
 	if (e < NTet) return ((TetMat != NULL) ? TetMat[e] : 0);
 	if (e < (NTet + NHex)) return ((HexMat != NULL) ? HexMat[e - NTet] : 0);
+	if (e < (NTet + NHex + NPrism)) {
+		return ((PrismMat != NULL) ? PrismMat[e - NTet - NHex] : 0);
+	}
 
-	return ((PrismMat != NULL) ? PrismMat[e - NTet - NHex] : 0);
+	return ((PyrMat != NULL) ? PyrMat[e - NTet - NHex - NPrism] : 0);
 }
 
 
@@ -1216,8 +1428,9 @@ int elem3d_tag(int e)
 {
 	if (e < NTet) return TetTag[e];
 	if (e < (NTet + NHex)) return HexTag[e - NTet];
+	if (e < (NTet + NHex + NPrism)) return PrismTag[e - NTet - NHex];
 
-	return PrismTag[e - NTet - NHex];
+	return PyrTag[e - NTet - NHex - NPrism];
 }
 
 
@@ -1840,6 +2053,173 @@ void assemble_prism(crs_t *A, int mode)
 
 
 /*
+ピラミッド (5 節点、四角形の底面 + 頂点)。
+
+局所節点の並びは **Gmsh / VTK と同じ**「底面を反時計回り (0..3)、最後に
+頂点 (4)」。形状関数は底面座標を (1-ζ) で縮めた**立方体座標** (u, v, ζ) で書く:
+
+    ξ = u (1-ζ),  η = v (1-ζ)      (u, v ∈ [-1,1], ζ ∈ [0,1])
+    N_a = (1 + u_a u)(1 + v_a v)(1-ζ)/4  (底面 a = 0..3),   N_4 = ζ
+
+これはよく知られた有理形状関数 [(1-ζ) + u_a ξ + v_a η + u_a v_a ξη/(1-ζ)]/4
+と同じものだが、立方体座標では**多項式**になる。頂点 (ζ = 1) の特異性は
+積分点がそこを踏まないので現れない。トレースは底面の四角形で双 1 次
+(六面体と適合)、4 枚の三角形面で 1 次 (四面体と適合) — 例えば u = +1 の面では
+β = (1-ζ)(1-v)/2, γ = (1-ζ)(1+v)/2 とおくと N_1 = β, N_2 = γ, N_4 = ζ で
+β + γ + ζ = 1、つまり N がその三角形の**面積座標に厳密に退化**する。
+これが「六面体 - ピラミッド - 四面体」の遷移が適合する理由の全て。
+
+積分は**立方体座標のまま** 2x2x2 Gauss (ζ は [0,1] の 2 点)。ピラミッド座標に
+戻さないのが要点で、dV = |det(∂x/∂(u,v,ζ))| du dv dζ の中に錐の縮み (1-ζ)² が
+自動的に入るため、特異な重み関数も専用の積分則も要らない。det J は
+どの 5 節点ピラミッドでも各方向 2 次までの多項式なので**体積は常に厳密**。
+剛性は「基準ピラミッド (底面 [-1,1]²、頂点が底面中心の真上) のアフィン像」で
+厳密 (六面体の「直方体で厳密」と同格の主張)。底面が平行四辺形でない・頂点が
+ずれた一般の形では有理式になるので厳密ではない (六面体と同じ)。
+
+六面体・角柱と同じく、ヤコビアンは**積分点毎に** 5 節点すべてから作る。
+ピラミッドでは (1-ζ)² の因子のため J が要素内で一定になることは**決してない**
+ので、「中心で 1 回だけ評価する」手抜きはどんな形でも答えを壊す
+(六面体と違い、この誤りを隠す特別な形が存在しない)。
+*/
+static const signed char PYR_SGN[4][2] = {
+	{-1, -1}, {+1, -1}, {+1, +1}, {-1, +1}
+};
+
+
+// 立方体座標 (u, v, ζ) での物理勾配 g[a][i] = ∂N_a/∂x_i と det J
+static int pyr_shape_at(const int32_t *nd, double u, double v, double ze,
+	double g[5][3], double *det)
+{
+	// 立方体座標での微分
+	double dn[5][3];
+	for (int a = 0; a < 4; a++) {
+		const double su = PYR_SGN[a][0], sv = PYR_SGN[a][1];
+		dn[a][0] = su * (1 + (sv * v)) * (1 - ze) / 4;
+		dn[a][1] = sv * (1 + (su * u)) * (1 - ze) / 4;
+		dn[a][2] = -(1 + (su * u)) * (1 + (sv * v)) / 4;
+	}
+	dn[4][0] = 0;
+	dn[4][1] = 0;
+	dn[4][2] = 1;
+
+	double jm[3][3];
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) jm[i][j] = 0;
+	}
+	for (int a = 0; a < 5; a++) {
+		const int32_t w = nd[a];
+		const double p[3] = {Xp[w], Yp[w], Zp[w]};
+		for (int i = 0; i < 3; i++) {
+			for (int j = 0; j < 3; j++) jm[i][j] += p[i] * dn[a][j];
+		}
+	}
+	const double d = (jm[0][0] * ((jm[1][1] * jm[2][2]) - (jm[1][2] * jm[2][1])))
+	               - (jm[0][1] * ((jm[1][0] * jm[2][2]) - (jm[1][2] * jm[2][0])))
+	               + (jm[0][2] * ((jm[1][0] * jm[2][1]) - (jm[1][1] * jm[2][0])));
+	if (d == 0) return 1;
+
+	double ji[3][3];
+	ji[0][0] = ((jm[1][1] * jm[2][2]) - (jm[1][2] * jm[2][1])) / d;
+	ji[0][1] = ((jm[0][2] * jm[2][1]) - (jm[0][1] * jm[2][2])) / d;
+	ji[0][2] = ((jm[0][1] * jm[1][2]) - (jm[0][2] * jm[1][1])) / d;
+	ji[1][0] = ((jm[1][2] * jm[2][0]) - (jm[1][0] * jm[2][2])) / d;
+	ji[1][1] = ((jm[0][0] * jm[2][2]) - (jm[0][2] * jm[2][0])) / d;
+	ji[1][2] = ((jm[0][2] * jm[1][0]) - (jm[0][0] * jm[1][2])) / d;
+	ji[2][0] = ((jm[1][0] * jm[2][1]) - (jm[1][1] * jm[2][0])) / d;
+	ji[2][1] = ((jm[0][1] * jm[2][0]) - (jm[0][0] * jm[2][1])) / d;
+	ji[2][2] = ((jm[0][0] * jm[1][1]) - (jm[0][1] * jm[1][0])) / d;
+
+	for (int a = 0; a < 5; a++) {
+		for (int i = 0; i < 3; i++) {
+			g[a][i] = (dn[a][0] * ji[0][i]) + (dn[a][1] * ji[1][i]) + (dn[a][2] * ji[2][i]);
+		}
+	}
+	*det = d;
+
+	return 0;
+}
+
+
+// 積分点 q (0..7) での評価。q < 0 なら要素中心 (u = v = 0, ζ = 1/4 = 重心の高さ)
+static int pyr_shape(const int32_t *nd, int q, double g[5][3], double *det)
+{
+	const double gp = 1.0 / sqrt(3.0);
+
+	if (q < 0) return pyr_shape_at(nd, 0, 0, 0.25, g, det);
+
+	return pyr_shape_at(nd, gp * PYR_SGN[q % 4][0], gp * PYR_SGN[q % 4][1],
+		((q < 4) ? (0.5 - (0.5 * gp)) : (0.5 + (0.5 * gp))), g, det);
+}
+
+
+// 3x3x3 Gauss で積分した体積 (2x2x2 則の検算に使う独立な計算)
+static double pyr_volume_hi(const int32_t *nd)
+{
+	static const double gx[3] = {-0.7745966692414834, 0.0, 0.7745966692414834};
+	static const double gw[3] = {5.0 / 9, 8.0 / 9, 5.0 / 9};
+	double v = 0;
+
+	for (int i = 0; i < 3; i++) {
+	for (int j = 0; j < 3; j++) {
+	for (int k = 0; k < 3; k++) {
+		double g[5][3], det;
+		if (pyr_shape_at(nd, gx[i], gx[j], (1 + gx[k]) / 2, g, &det)) continue;
+		// ζ を [0,1] に縮めるので ζ 方向の重みは gw/2
+		v += gw[i] * gw[j] * (gw[k] / 2) * ((det > 0) ? det : -det);
+	}
+	}
+	}
+
+	return v;
+}
+
+
+// ピラミッドの要素行列。vol には体積 Σ w |det J| を返す
+static int pyr_element(const int32_t *nd, const double c[6], double ke[5][5], double *vol)
+{
+	double v = 0;
+	int sgn = 0;
+
+	for (int l = 0; l < 5; l++) {
+		for (int m = 0; m < 5; m++) ke[l][m] = 0;
+	}
+
+	for (int q = 0; q < 8; q++) {
+		double g[5][3], det;
+		if (pyr_shape(nd, q, g, &det)) return 1;
+		const int sq = ((det > 0) ? 1 : -1);
+		if (q == 0) sgn = sq;
+		else if (sq != sgn) return 1;			// 要素内で符号が変わる = 裏返り
+		// 重み : (u, v) 方向 1 x 1、ζ 方向 1/2 ([0,1] の 2 点 Gauss)
+		const double w = 0.5 * ((det > 0) ? det : -det);
+		v += w;
+		for (int l = 0; l < 5; l++) {
+			for (int m = 0; m < 5; m++) {
+				ke[l][m] += w * ((c[0] * g[l][0] * g[m][0])
+				               + (c[1] * g[l][1] * g[m][1])
+				               + (c[2] * g[l][2] * g[m][2])
+				               + (c[3] * ((g[l][0] * g[m][1]) + (g[l][1] * g[m][0])))
+				               + (c[4] * ((g[l][1] * g[m][2]) + (g[l][2] * g[m][1])))
+				               + (c[5] * ((g[l][2] * g[m][0]) + (g[l][0] * g[m][2]))));
+			}
+		}
+	}
+	*vol = v;
+
+	return 0;
+}
+
+
+int pyr_grad_center(int e, double g[5][3])
+{
+	double det;
+
+	return pyr_shape(&Pyr[e * 5], -1, g, &det);
+}
+
+
+/*
 混在格子の自己検証 (線形場の恒等式)。
 
 φ = a・r は四面体・六面体・角柱のいずれでも厳密に補間できるので、種別が
@@ -1852,8 +2232,8 @@ static int nodal_test_mixed(FILE *fp_log)
 	int ierr = 0;
 
 	fprintf(fp_log, "\n=== nodal element (mixed) self test ===\n");
-	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, hexahedra = %d, prisms = %d\n",
-		NNode, NTet, NHex, NPrism);
+	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, hexahedra = %d, prisms = %d, "
+		"pyramids = %d\n", NNode, NTet, NHex, NPrism, NPyr);
 
 	const double c[6] = {2.0, 3.0, 1.5, 0.4, 0.3, 0.2};
 	const double a[3] = {0.7, -1.3, 0.9};
@@ -1902,7 +2282,7 @@ static int nodal_test_mixed(FILE *fp_log)
 				for (int m = 0; m < 8; m++) ke[l][m] = k8[l][m];
 			}
 		}
-		else {
+		else if (kind == MESHELEM_PRISM) {
 			double k6[6][6];
 			const int32_t *t = &Prism[(e - NTet - NHex) * 6];
 			if (prism_element(t, c, k6, &v)) continue;
@@ -1910,6 +2290,16 @@ static int nodal_test_mixed(FILE *fp_log)
 			for (int l = 0; l < 6; l++) nd[l] = t[l];
 			for (int l = 0; l < 6; l++) {
 				for (int m = 0; m < 6; m++) ke[l][m] = k6[l][m];
+			}
+		}
+		else {
+			double k5[5][5];
+			const int32_t *t = &Pyr[(e - NTet - NHex - NPrism) * 5];
+			if (pyr_element(t, c, k5, &v)) continue;
+			nen = 5;
+			for (int l = 0; l < 5; l++) nd[l] = t[l];
+			for (int l = 0; l < 5; l++) {
+				for (int m = 0; m < 5; m++) ke[l][m] = k5[l][m];
 			}
 		}
 		vol += v;
@@ -2054,6 +2444,115 @@ static int nodal_test_prism(FILE *fp_log)
 }
 
 
+// ピラミッドの自己検証 (線形場の恒等式。六面体・角柱と同じ考え方)
+static int nodal_test_pyr(FILE *fp_log)
+{
+	int ierr = 0;
+
+	fprintf(fp_log, "\n=== nodal element (pyramid) self test ===\n");
+	fprintf(fp_log, "  nodes = %d, pyramids = %d, nodes per element = 5\n", NNode, NPyr);
+
+	const double c[6] = {2.0, 3.0, 1.5, 0.4, 0.3, 0.2};
+	const double a[3] = {0.7, -1.3, 0.9};
+	double aca = 0;
+	{
+		const double cm[3][3] = {{c[0], c[3], c[5]}, {c[3], c[1], c[4]}, {c[5], c[4], c[2]}};
+		for (int i = 0; i < 3; i++) {
+			for (int j = 0; j < 3; j++) aca += a[i] * cm[i][j] * a[j];
+		}
+	}
+
+	// ゆがみ : 底面が平行四辺形から外れている度合い (符号つき頂点和)。
+	// **剛性が厳密なのは底面が平行四辺形のとき** (基準ピラミッドのアフィン像。
+	// 頂点の位置は任意でよい) なので、そこから外れた形が無いと有理式の
+	// 積分近似が一度も実行されない。ヤコビアン自体はどんな形でも要素内で
+	// 変化する ((1-ζ)² の因子) ため、六面体と違い「J を 1 回だけ評価する」
+	// 誤りはゆがみが無くても落ちる
+	double warp = 0;
+	for (int e = 0; e < NPyr; e++) {
+		const int32_t *nd = &Pyr[e * 5];
+		double h = 0;
+		for (int l = 0; l < 5; l++) {
+			for (int m = l + 1; m < 5; m++) {
+				const double dx = Xp[nd[m]] - Xp[nd[l]];
+				const double dy = Yp[nd[m]] - Yp[nd[l]];
+				const double dz = Zp[nd[m]] - Zp[nd[l]];
+				const double d = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+				if (d > h) h = d;
+			}
+		}
+		if (h <= 0) continue;
+		for (int cd = 0; cd < 3; cd++) {
+			const double *p = ((cd == 0) ? Xp : (cd == 1) ? Yp : Zp);
+			const double d = fabs(p[nd[0]] - p[nd[1]] + p[nd[2]] - p[nd[3]]) / h;
+			if (d > warp) warp = d;
+		}
+	}
+	fprintf(fp_log, "  warp = %.3e (0 = every base is a parallelogram, where the "
+		"stiffness is exact)\n", warp);
+	if (warp < 1e-9) {
+		fprintf(fp_log, "*** warning : every base is a parallelogram, so the "
+			"rational (non-exact) regime of the quadrature is not exercised\n");
+	}
+
+	// 体積 : det J は各方向 2 次までなので、8 点則はどんな 5 節点ピラミッド
+	// でも厳密。27 点則との差は積分点・重みの誤りだけを検出する
+	double v8 = 0, vhi = 0;
+	for (int e = 0; e < NPyr; e++) {
+		const int32_t *nd = &Pyr[e * 5];
+		for (int q = 0; q < 8; q++) {
+			double g[5][3], det;
+			if (pyr_shape(nd, q, g, &det)) continue;
+			v8 += 0.5 * ((det > 0) ? det : -det);
+		}
+		vhi += pyr_volume_hi(nd);
+	}
+	const double vdif = ((v8 > 0) ? (fabs(vhi - v8) / v8) : 0);
+	fprintf(fp_log, "  volume = %.10e (8-point rule), %.10e (27-point rule), "
+		"rel. diff = %.2e\n", v8, vhi, vdif);
+	if (vdif > 1e-12) {
+		fprintf(fp_log, "*** the two quadrature rules disagree on the volume\n");
+		ierr = 1;
+	}
+
+	crs_t A;
+	crs_alloc(&A);
+	crs_zero(&A);
+	for (int e = 0; e < NPyr; e++) {
+		const int32_t *nd = &Pyr[e * 5];
+		double ke[5][5], vol;
+		if (pyr_element(nd, c, ke, &vol)) continue;
+		for (int l = 0; l < 5; l++) {
+			for (int m = 0; m < 5; m++) {
+				const int64_t p = crs_find(&A, nd[l], nd[m]);
+				if (p >= 0) A.val[p] += ke[l][m];
+			}
+		}
+	}
+	double *phi = (double *)malloc((size_t)NNode * sizeof(double));
+	for (int i = 0; i < NNode; i++) {
+		phi[i] = (a[0] * Xp[i]) + (a[1] * Yp[i]) + (a[2] * Zp[i]);
+	}
+	double quad = 0;
+	for (int i = 0; i < NNode; i++) {
+		quad += phi[i] * crs_row_dot(&A, i, phi);
+	}
+	const double want = aca * v8;
+	const double err = ((want != 0) ? (fabs(quad - want) / fabs(want)) : 0);
+	fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, "
+		"rel. error = %.2e\n", quad, want, err);
+	if (err > 1e-12) {
+		fprintf(fp_log, "*** the linear-field identity failed\n");
+		ierr = 1;
+	}
+
+	free(phi);
+	crs_free(&A);
+
+	return ierr;
+}
+
+
 /*
 3 次元の非構造格子の組み立て (種別の混在を含む)。
 
@@ -2120,12 +2619,25 @@ void assemble_elem3d(crs_t *A, int mode)
 			continue;
 		}
 
-		{
+		if (kind == MESHELEM_PRISM) {
 			const int32_t *nd = &Prism[(e - NTet - NHex) * 6];
 			double ke[6][6], vol;
 			if (prism_element(nd, c, ke, &vol)) continue;
 			for (int l = 0; l < 6; l++) {
 				for (int m = 0; m < 6; m++) {
+					const int64_t p = crs_find(A, nd[l], nd[m]);
+					if (p >= 0) A->val[p] += ke[l][m];
+				}
+			}
+			continue;
+		}
+
+		{
+			const int32_t *nd = &Pyr[(e - NTet - NHex - NPrism) * 5];
+			double ke[5][5], vol;
+			if (pyr_element(nd, c, ke, &vol)) continue;
+			for (int l = 0; l < 5; l++) {
+				for (int m = 0; m < 5; m++) {
 					const int64_t p = crs_find(A, nd[l], nd[m]);
 					if (p >= 0) A->val[p] += ke[l][m];
 				}
@@ -2370,6 +2882,7 @@ int solve_nodal_test(FILE *fp_log)
 
 	if (MeshElem == MESHELEM_HEX)   return nodal_test_hex(fp_log);
 	if (MeshElem == MESHELEM_PRISM) return nodal_test_prism(fp_log);
+	if (MeshElem == MESHELEM_PYR)   return nodal_test_pyr(fp_log);
 	if (MeshElem == MESHELEM_MIXED) return nodal_test_mixed(fp_log);
 
 	fprintf(fp_log, "\n=== nodal element (P%d) self test ===\n", TetOrder);

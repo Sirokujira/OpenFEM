@@ -1,0 +1,29 @@
+OpenFEM 1 0
+title = pyramid element self test (linear field identity on a distorted mesh)
+#
+# ピラミッド (5 節点、等パラメトリック) の自己検証。
+#
+#   python3 mkmesh.py box_pyr box_pyr_warp.msh -warp 1
+#
+# 線形場 phi = a.r はピラミッドの形状関数 (立方体座標で多項式になる有理基底)
+# で厳密に補間できるので、phi^T K phi = (a^T C a) * V が厳密に成り立つ。
+# C は異方性、a は軸に平行でない向きにとる。
+#
+# **底面が平行四辺形だと剛性が厳密になる** (基準ピラミッドのアフィン像。
+# 頂点の位置は任意でよい) ので、ゆがんだ格子でないと有理式の積分近似が
+# 一度も実行されない。一方でヤコビアン自体は (1-zeta)^2 の因子のため
+# **どんな形でも要素内で変化する** — 六面体と違い「J を中心で 1 回だけ
+# 評価する」誤りを隠す特別な形が存在しない。
+#
+# 体積は 8 点則 (2x2x2) と 27 点則 (3x3x3) の両方で積分して一致を見る。
+# det J は各方向 2 次までの多項式なので、体積はどちらでも厳密になる
+# (差が出たら積分点か重みの誤り)。
+#
+mesh = box_pyr_warp.msh
+material = 4.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end

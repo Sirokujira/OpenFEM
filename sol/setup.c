@@ -195,7 +195,7 @@ static int setup_unstruct(void)
 	// 六面体格子を渡されたら黙って誤答を出さずに弾く
 	if ((MeshElem != MESHELEM_TET) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
 		printf("%s\n", "*** analysis E / A (edge elements) need a tetrahedral mesh "
-			"(this mesh has hexahedra or prisms)");
+			"(this mesh has hexahedra, prisms or pyramids)");
 		return 1;
 	}
 	if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
@@ -225,6 +225,16 @@ static int setup_unstruct(void)
 				if (PrismTag[e] == RegionTag[q]) m = RegionMat[q];
 			}
 			PrismMat[e] = (unsigned char)m;
+		}
+	}
+	if (NPyr > 0) {
+		PyrMat = (unsigned char *)malloc((size_t)NPyr * sizeof(unsigned char));
+		for (int e = 0; e < NPyr; e++) {
+			int m = 0;
+			for (int q = 0; q < NRegion; q++) {
+				if (PyrTag[e] == RegionTag[q]) m = RegionMat[q];
+			}
+			PyrMat[e] = (unsigned char)m;
 		}
 	}
 	if (NTet > 0) {
@@ -502,6 +512,9 @@ void memfree(void)
 	free(Xp); free(Yp); free(Zp);
 	free(Tet); free(TetTag); free(TetMat); free(Tet2);
 	free(Tri); free(TriTag); free(Tri2); free(TriMat); free(TriCond); free(TriArea);
+	free(Hex); free(HexTag); free(HexMat); free(Quad); free(QuadTag);
+	free(Prism); free(PrismTag); free(PrismMat);
+	free(Pyr); free(PyrTag); free(PyrMat);
 	free(CellMaterial);
 	free(CellConductor);
 	free(NodeConductor);
