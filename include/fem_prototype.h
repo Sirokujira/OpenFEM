@@ -154,6 +154,7 @@ int mpi_rank(void);
 int mpi_size(void);
 void mpi_finalize(void);
 void mpi_send_dbl(const double *, int, int, int);
+void mpi_wait_sends(void);
 void mpi_recv_dbl(double *, int, int, int);
 
 // solver_cocg.c

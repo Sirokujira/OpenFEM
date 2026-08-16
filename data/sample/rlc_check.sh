@@ -1149,7 +1149,7 @@ else
 		(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 parallel_plate.ofe > /dev/null 2>&1) \
 			&& { echo "  no-sweep input under mpirun : accepted -> NG" >&2; status=1; } \
 			|| echo "  no-sweep input under mpirun : rejected -> OK"
-		if ! grep -q "no frequencysweep" "$WORK/ofe.log"; then
+		if ! grep -q "fewer than two" "$WORK/ofe.log"; then
 			echo "  *** it was rejected for a different reason than the missing sweep" >&2
 			status=1
 		fi
@@ -1160,6 +1160,40 @@ else
 		if ! grep -q "cannot be combined with MPI" "$WORK/ofe.log"; then
 			echo "  *** it was rejected for a different reason than fieldout" >&2
 			status=1
+		fi
+		# F の掃引 (Rf / Lf と Have* の別の組み合わせが pack の復元を通る。
+		# sweep_plate は C だけなので、これが無いと Rfmat / Lfmat の復元が
+		# 死んだコードになる)
+		sed 's/^frequency = .*/frequencysweep = 1e3 1e5 1e7/' \
+		    "$SRC/plate_line_ac.ofe" > "$WORK/mfsw.ofe"
+		(cd "$WORK" && "$OFE" -n 2 mfsw.ofe > /dev/null 2>&1)
+		cp "$WORK/ofe_sweep.csv" "$WORK/mpi_reff.csv"
+		rm -f "$WORK/ofe_sweep.csv"
+		(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 mfsw.ofe > /dev/null 2>&1)
+		if cmp -s "$WORK/mpi_reff.csv" "$WORK/ofe_sweep.csv"; then
+			echo "  np = 2 gives a byte-identical eddy-current (F) sweep : OK"
+		else
+			echo "  np = 2 differs from the serial F sweep -> NG" >&2
+			status=1
+		fi
+		# HDF5 も有効なビルドなら、系列 (ofe_series.h5) の内容一致も見る。
+		# ファイルの cmp はオブジェクトヘッダのタイムスタンプで揺れるので
+		# h5dump の内容で比べる
+		sed 's/^analysis = /hdf5 = 1\nanalysis = /' "$SRC/sweep_plate.ofe" > "$WORK/mh5.ofe"
+		h5m=$( (cd "$WORK" && "$OFE" -n 2 mh5.ofe 2>&1) || true)
+		if command -v h5dump > /dev/null 2>&1 && [ "${h5m#*needs a build with HDF5}" = "$h5m" ]; then
+			(cd "$WORK" && h5dump ofe_series.h5 > mpi_ref.h5dump 2> /dev/null)
+			rm -f "$WORK/ofe_series.h5"
+			(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 mh5.ofe > /dev/null 2>&1 \
+				&& h5dump ofe_series.h5 > mpi_np2.h5dump 2> /dev/null)
+			if cmp -s "$WORK/mpi_ref.h5dump" "$WORK/mpi_np2.h5dump"; then
+				echo "  np = 2 gives an identical HDF5 series (h5dump) : OK"
+			else
+				echo "  np = 2 HDF5 series differs from the serial run -> NG" >&2
+				status=1
+			fi
+		else
+			echo "  HDF5 series comparison : skipped (no HDF5 build or no h5dump)"
 		fi
 		;;
 	esac

@@ -57,9 +57,17 @@ int main(int argc, char *argv[])
 	fclose(fp_in);
 	error_check(ierr, prompt);
 
-	// ログ。rank 0 以外は tmpfile に書く (全 rank が同じ ofe.log に
-	// 書くと壊し合う。遠隔の点の失敗は solve() が rank 0 のログに集める)
-	fp_log = ((mrank == 0) ? fopen(FN_log, "w") : tmpfile());
+	// ログ。rank 0 以外は ofe_rank<N>.log に書く (全 rank が同じ ofe.log に
+	// 書くと壊し合う)。**tmpfile に捨ててはいけない** — 遠隔の点で出た
+	// 非収束・表皮深さ・no awall の警告が消える (レビューの実測)。
+	// rank 0 の要約は「どの点がどの rank か」を出すので、詳細はそのログを見る
+	if (mrank == 0) {
+		fp_log = fopen(FN_log, "w");
+	}
+	else {
+		sprintf(str, "ofe_rank%d.log", mrank);
+		fp_log = fopen(str, "w");
+	}
 	if (fp_log == NULL) {
 		printf(errfmt, FN_log);
 		error_check(1, prompt);

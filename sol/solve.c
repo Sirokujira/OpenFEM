@@ -1082,8 +1082,8 @@ int solve(FILE *fp_log)
 	if (msize > 1) {
 		if (NFreqSweep < 2) {
 			fprintf(fp_log, "*** MPI parallelism distributes the frequency-sweep "
-				"points, but this input has no frequencysweep; run without "
-				"mpirun, or add a sweep\n");
+				"points, but this input has fewer than two; run without mpirun, "
+				"or add sweep points\n");
 			return 1;
 		}
 		if (FieldOut) {
@@ -1180,17 +1180,33 @@ int solve(FILE *fp_log)
 		if (mrank == 0) {
 			sweepcol_t kcol = {0, 0, 0};
 			int nhead = 0;
+			int nfail = 0;
 			for (int q = 0; q < NFreqSweep; q++) {
 				double *pk = &packs[(size_t)q * npk];
 				const int owner = q % msize;
 				if (owner != 0) mpi_recv_dbl(pk, npk, owner, q);
-				if (ierr) continue;			// 受信は最後まで続ける (上の注意)
+				// **失敗した点の報告は ierr の判定より前に置く。** rank 0 自身の
+				// 点が先に失敗して ierr が立っていると、どの点・どの周波数で
+				// 落ちたのかが一度も出ない (レビューの実測)
 				if (pk[0] != 0) {
-					fprintf(fp_log, "*** solve failed at sweep point %d "
-						"(%.6e Hz, rank %d)\n", q + 1, pk[7], owner);
+					if (!nfail) {
+						// rank 0 は ofe.log に直接書いているので、別ファイルを
+						// 案内するのは owner != 0 のときだけ
+						if (owner != 0) {
+							fprintf(fp_log, "*** solve failed at sweep point %d "
+								"(%.6e Hz, rank %d); see ofe_rank%d.log for the "
+								"details\n", q + 1, pk[7], owner, owner);
+						} else {
+							fprintf(fp_log, "*** solve failed at sweep point %d "
+								"(%.6e Hz, rank 0); see the messages above\n",
+								q + 1, pk[7]);
+						}
+					}
+					nfail++;
 					ierr = 1;
 					continue;
 				}
+				if (ierr) continue;			// 受信は最後まで続ける (上の注意)
 				Freq = pk[7];
 				HaveC = (pk[1] != 0);
 				HaveL = (pk[2] != 0);
@@ -1221,6 +1237,7 @@ int solve(FILE *fp_log)
 				ierr |= h5_add_field(Freq);
 			}
 		}
+		mpi_wait_sends();		// Isend の完了前に packs を解放しないこと
 		free(packs);
 		if (fp != NULL) fclose(fp);
 

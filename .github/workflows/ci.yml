@@ -82,8 +82,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install OpenMPI
-        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
+      - name: Install OpenMPI and HDF5
+        # HDF5 も入れて WITH_MPI + WITH_HDF5 の組み合わせを一度は回す
+        # (rank ガード付きの h5 書き込みがどこでも実行されない、を避ける)
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin libhdf5-dev hdf5-tools
 
       - name: Configure and build WITHOUT MPI (the guard must reject mpirun)
         run: |
@@ -98,8 +100,8 @@ jobs:
           test $rc -ne 0
           grep -q "built without MPI" out.txt
 
-      - name: Configure (WITH_MPI=ON)
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DWITH_MPI=ON
+      - name: Configure (WITH_MPI=ON + WITH_HDF5=ON)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DWITH_MPI=ON -DWITH_HDF5=ON
 
       - name: Build ofe / ofe_post
         run: |
@@ -117,6 +119,8 @@ jobs:
         run: |
           grep -q "np = 2 gives byte-identical" /tmp/mpi.log
           grep -q "np = 3 gives byte-identical" /tmp/mpi.log
+          grep -q "byte-identical eddy-current" /tmp/mpi.log
+          grep -q "identical HDF5 series" /tmp/mpi.log
 
       - name: Upload logs on failure
         if: failure()
