@@ -2,7 +2,8 @@
 
 準静的 FEM による回路パラメータ (R/L/C) 抽出ソルバー (C)。
 OpenFDTD (FDTD 電磁界ソルバー) と同じ構成・入力書式を踏襲した別リポジトリ。
-実装は CPU (OpenMP) のみ。
+実装は CPU (OpenMP)。MPI は任意依存 (`WITH_MPI=ON`) で周波数掃引の点を
+プロセスに分散する (CUDA は未対応 — GPU の無い環境では検証できないため)。
 
 ## ビルド / テスト
 
@@ -185,6 +186,14 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
   落ちる。Gmsh バイナリは gmsh 自身に変換させたものを置いてある。
   なお gmsh は変換のたびに節点を振り直すので、比較する ASCII 側も**同じ変換で
   出したもの**でないと丸めの順序が変わって一致しない。
+- **MPI の並列化の粒度は「周波数掃引の点」だけ。** 各点の演算は直列と完全に
+  同一なので、`mpirun -np N` の出力は直列と**バイト単位で一致**しなければ
+  ならない (それが `rlc_check.sh` の [mpi] 節の恒等式。閉形式も許容誤差も
+  要らない)。rank 0 だけがファイルを書き、他 rank のログは tmpfile に捨てる。
+  **解けなかった点も pack (ierr つき) を必ず送ること** — ある rank だけが
+  途中で止まると送受信の回数が食い違ってデッドロックする。掃引なし /
+  `fieldout = 1` / 無効ビルドの mpirun 起動は黙って直列に落ちず入力エラー。
+  mpi.h は `sol/mpiwrap.c` の外に出さない (MSVC ビルドを変えないため)。
 - **外部ライブラリを使う機能は任意依存 (既定 OFF) にする。** 「素の CMake で
   3 OS ビルドできる」性質を既定のまま保つこと。無効ビルドではスタブに落とし、
   **その機能を要求されたら黙って無視せず入力エラーにする** (書いたつもりで
@@ -201,6 +210,6 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
 ## CI
 
 `.github/workflows/ci.yml`: Linux / macOS (libomp) / Windows (MSVC + Ninja)。
-既定のビルドに外部ライブラリ依存は無い (HDF5 だけ任意依存で、`WITH_HDF5=ON` の
-Linux ジョブが 1 つ別にある)。Windows の検証ステップは Git for Windows の bash で
+既定のビルドに外部ライブラリ依存は無い (HDF5 と MPI だけ任意依存で、
+`WITH_HDF5=ON` / `WITH_MPI=ON` の Linux ジョブが 1 つずつ別にある)。Windows の検証ステップは Git for Windows の bash で
 `rlc_check.sh` を実行する。タグ `v*` push で Release にバイナリを添付。

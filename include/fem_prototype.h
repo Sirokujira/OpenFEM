@@ -148,6 +148,14 @@ int solver_direct_c(const crs_t *, const crs_t *, double,
 // solve.c
 int solve(FILE *);
 
+// mpiwrap.c (WITH_MPI=OFF ではスタブ。mpi.h はこのモジュールの外に出さない)
+int mpi_init(int *, char ***);
+int mpi_rank(void);
+int mpi_size(void);
+void mpi_finalize(void);
+void mpi_send_dbl(const double *, int, int, int);
+void mpi_recv_dbl(double *, int, int, int);
+
 // solver_cocg.c
 int solver_cocg(const crs_t *, const crs_t *, double,
 	const double *, const double *, double *, double *, const unsigned char *,

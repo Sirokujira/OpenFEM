@@ -1103,6 +1103,68 @@ if ! (cd "$WORK" && "$OFE" -n 2 h2edge.ofe 2>&1 | grep -q "first-order mesh"); t
 	status=1
 fi
 
+# MPI (任意依存、WITH_MPI=ON のビルドだけ)。並列化の粒度は**周波数掃引の点の
+# 分散**で、各点の演算は直列と完全に同一。したがって検証は閉形式ではなく
+# **「mpirun -np N の出力が直列と バイト単位で一致すること」**が恒等式になる
+# (同じ物理を別の書き方で 2 通り与えて一致を見る、の並列版)。
+#
+#   mpirun が無い環境 (Windows / macOS の CI) では節ごと skip する。
+#   無効ビルド (WITH_MPI=OFF) では「mpirun 配下に置かれたら弾かれること」だけ
+#   見て skip する (黙って N 個の直列プロセスが走ると出力を壊し合う)。
+echo "[mpi] frequency-sweep points distributed over processes"
+if ! command -v mpirun > /dev/null 2>&1; then
+	echo "  mpirun not found : skipped"
+else
+	# root で走る CI コンテナと少コア環境のための OpenMPI の環境変数
+	# (他の MPI 実装は無視するだけなので無害)
+	export OMPI_ALLOW_RUN_AS_ROOT=1 OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+	export OMPI_MCA_rmaps_base_oversubscribe=1
+	cp "$SRC/sweep_plate.ofe" "$WORK/"
+	mpimsg=$( (cd "$WORK" && mpirun -np 2 "$OFE" -n 2 sweep_plate.ofe 2>&1) || true)
+	case "$mpimsg" in
+	*"built without MPI"*)
+		echo "  built without MPI : running under mpirun is rejected -> OK (the rest is skipped)"
+		;;
+	*)
+		# 直列の基準 (同じバイナリを mpirun なしで)
+		(cd "$WORK" && "$OFE" -n 2 sweep_plate.ofe > /dev/null && "$OFE_POST" > /dev/null)
+		cp "$WORK/ofe_sweep.csv" "$WORK/mpi_ref_sweep.csv"
+		cp "$WORK/rlc.csv" "$WORK/mpi_ref_rlc.csv"
+		cp "$WORK/ofe.out" "$WORK/mpi_ref.out"
+		for np in 2 3; do
+			rm -f "$WORK/ofe_sweep.csv" "$WORK/rlc.csv" "$WORK/ofe.out"
+			(cd "$WORK" && mpirun -np $np "$OFE" -n 2 sweep_plate.ofe > /dev/null 2>&1 \
+				&& "$OFE_POST" > /dev/null)
+			if cmp -s "$WORK/mpi_ref_sweep.csv" "$WORK/ofe_sweep.csv" \
+			&& cmp -s "$WORK/mpi_ref_rlc.csv" "$WORK/rlc.csv" \
+			&& cmp -s "$WORK/mpi_ref.out" "$WORK/ofe.out"; then
+				echo "  np = $np gives byte-identical ofe_sweep.csv / rlc.csv / ofe.out : OK"
+			else
+				echo "  np = $np differs from the serial run -> NG" >&2
+				status=1
+			fi
+		done
+		# 掃引の無い入力と fieldout = 1 は黙って直列で走らず弾くこと
+		cp "$SRC/parallel_plate.ofe" "$WORK/"
+		(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 parallel_plate.ofe > /dev/null 2>&1) \
+			&& { echo "  no-sweep input under mpirun : accepted -> NG" >&2; status=1; } \
+			|| echo "  no-sweep input under mpirun : rejected -> OK"
+		if ! grep -q "no frequencysweep" "$WORK/ofe.log"; then
+			echo "  *** it was rejected for a different reason than the missing sweep" >&2
+			status=1
+		fi
+		sed 's/^analysis = /fieldout = 1\nanalysis = /' "$SRC/sweep_plate.ofe" > "$WORK/mfs.ofe"
+		(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 mfs.ofe > /dev/null 2>&1) \
+			&& { echo "  fieldout = 1 under mpirun : accepted -> NG" >&2; status=1; } \
+			|| echo "  fieldout = 1 under mpirun : rejected -> OK"
+		if ! grep -q "cannot be combined with MPI" "$WORK/ofe.log"; then
+			echo "  *** it was rejected for a different reason than fieldout" >&2
+			status=1
+		fi
+		;;
+	esac
+fi
+
 # Gmsh **バイナリ**形式の読み込み。
 #
 # 検証用のファイルは**本物の gmsh に作らせてある** (4.12.1):

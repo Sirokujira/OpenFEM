@@ -1067,10 +1067,37 @@ static void sweep_row(FILE *fp, sweepcol_t k, FILE *fp_log)
 int solve(FILE *fp_log)
 {
 	int ierr = 0;
+	const int msize = mpi_size();
+	const int mrank = mpi_rank();
+
+	/*
+	MPI (msize > 1) が並列化するのは**周波数掃引の点の分散だけ**。
+	各点の演算は直列と完全に同一なので、mpirun -np N の出力
+	(ofe_sweep.csv / rlc.csv / ofe.out / ofe_series.h5) は直列と
+	バイト単位で一致する — これが rlc_check.sh の検証の恒等式になる。
+
+	掃引の無い入力と fieldout = 1 は分散する仕事が無い / 場が解いた rank に
+	しか無いので、黙って直列で走らず入力エラーにする。
+	*/
+	if (msize > 1) {
+		if (NFreqSweep < 2) {
+			fprintf(fp_log, "*** MPI parallelism distributes the frequency-sweep "
+				"points, but this input has no frequencysweep; run without "
+				"mpirun, or add a sweep\n");
+			return 1;
+		}
+		if (FieldOut) {
+			fprintf(fp_log, "*** fieldout = 1 cannot be combined with MPI "
+				"(the fields of a sweep point exist only on the rank that "
+				"solved it); run with -np 1\n");
+			return 1;
+		}
+	}
 
 	// 系列の出力 (hdf5 = 1)。掃引しない実行でも 1 点の系列として書く
-	// (ヒステリシスの履歴は solve_one() の中で追記されるので、ここで開けておく)
-	if (h5_open(fp_log)) return 1;
+	// (ヒステリシスの履歴は solve_one() の中で追記されるので、ここで開けておく)。
+	// MPI では rank 0 だけが書く
+	if ((mrank == 0) && h5_open(fp_log)) return 1;
 
 	if (NFreqSweep < 1) {
 		ierr = solve_one(fp_log);
@@ -1087,13 +1114,125 @@ int solve(FILE *fp_log)
 		return ierr;
 	}
 
-	FILE *fp = fopen(FN_sweep, "w");
-	if (fp == NULL) {
+	FILE *fp = ((mrank == 0) ? fopen(FN_sweep, "w") : NULL);
+	if ((mrank == 0) && (fp == NULL)) {
 		fprintf(fp_log, "*** %s open error\n", FN_sweep);
 		h5_close(NULL);
 		return 1;
 	}
-	fprintf(fp_log, "\n=== frequency sweep (%d points) ===\n", NFreqSweep);
+	fprintf(fp_log, "\n=== frequency sweep (%d points%s) ===\n", NFreqSweep,
+		((msize > 1) ? ", MPI" : ""));
+
+	if (msize > 1) {
+		/*
+		点 q を rank (q % msize) に round-robin で配る。各 rank は自分の点を
+		解いて結果 (Have* と結果行列 8 本) を 1 本の pack にして rank 0 へ送り、
+		rank 0 が**点の順に**受けて ofe_sweep.csv / ofe_series.h5 に書く。
+		最後の点の結果をグローバルに戻すので、rlc.csv / ofe.out は直列と同じく
+		「最後の周波数」の値になる。
+
+		**エラーでも打ち切らないこと。** 解けなかった点も pack (ierr つき) を
+		必ず送る。ある rank だけが途中で止まると、rank 0 の受信と食い違って
+		デッドロックする (送る側と受ける側の回数は常に一致させる)。
+		*/
+		const int nn = NPort * NPort;
+		const int npk = 8 + (8 * nn);
+		double *packs = (double *)malloc((size_t)NFreqSweep * npk * sizeof(double));
+		memset(packs, 0, (size_t)NFreqSweep * npk * sizeof(double));
+
+		for (int q = 0; q < NFreqSweep; q++) {
+			if ((q % msize) != mrank) continue;
+			double *pk = &packs[(size_t)q * npk];
+			Freq = FreqSweep[q];
+			int perr = 0;
+			if (material_freq()) {
+				fprintf(fp_log, "*** material expansion failed at %.6e Hz\n", Freq);
+				perr = 1;
+			}
+			else {
+				fprintf(fp_log, "\n--- sweep point %d/%d : %.6e [Hz] (rank %d) ---\n",
+					q + 1, NFreqSweep, Freq, mrank);
+				fflush(fp_log);
+				field_free();
+				HaveC = HaveL = HaveR = HaveM = HaveF = 0;
+				perr = solve_one(fp_log);
+			}
+			pk[0] = perr;
+			pk[1] = (HaveC != 0);
+			pk[2] = (HaveL != 0);
+			pk[3] = (HaveR != 0);
+			pk[4] = (HaveM != 0);
+			pk[5] = (HaveF != 0);
+			pk[6] = (HavePfe != 0);
+			pk[7] = Freq;
+			memcpy(&pk[8 + (0 * nn)], Cmat,   (size_t)nn * sizeof(double));
+			memcpy(&pk[8 + (1 * nn)], Lmat,   (size_t)nn * sizeof(double));
+			memcpy(&pk[8 + (2 * nn)], Gmat,   (size_t)nn * sizeof(double));
+			memcpy(&pk[8 + (3 * nn)], Rmat,   (size_t)nn * sizeof(double));
+			memcpy(&pk[8 + (4 * nn)], Mmat,   (size_t)nn * sizeof(double));
+			memcpy(&pk[8 + (5 * nn)], Rfmat,  (size_t)nn * sizeof(double));
+			memcpy(&pk[8 + (6 * nn)], Lfmat,  (size_t)nn * sizeof(double));
+			memcpy(&pk[8 + (7 * nn)], Pfemat, (size_t)nn * sizeof(double));
+			if (mrank != 0) mpi_send_dbl(pk, npk, 0, q);
+			if (perr) ierr = 1;
+		}
+
+		if (mrank == 0) {
+			sweepcol_t kcol = {0, 0, 0};
+			int nhead = 0;
+			for (int q = 0; q < NFreqSweep; q++) {
+				double *pk = &packs[(size_t)q * npk];
+				const int owner = q % msize;
+				if (owner != 0) mpi_recv_dbl(pk, npk, owner, q);
+				if (ierr) continue;			// 受信は最後まで続ける (上の注意)
+				if (pk[0] != 0) {
+					fprintf(fp_log, "*** solve failed at sweep point %d "
+						"(%.6e Hz, rank %d)\n", q + 1, pk[7], owner);
+					ierr = 1;
+					continue;
+				}
+				Freq = pk[7];
+				HaveC = (pk[1] != 0);
+				HaveL = (pk[2] != 0);
+				HaveR = (pk[3] != 0);
+				HaveM = (pk[4] != 0);
+				HaveF = (pk[5] != 0);
+				HavePfe = (pk[6] != 0);
+				memcpy(Cmat,   &pk[8 + (0 * nn)], (size_t)nn * sizeof(double));
+				memcpy(Lmat,   &pk[8 + (1 * nn)], (size_t)nn * sizeof(double));
+				memcpy(Gmat,   &pk[8 + (2 * nn)], (size_t)nn * sizeof(double));
+				memcpy(Rmat,   &pk[8 + (3 * nn)], (size_t)nn * sizeof(double));
+				memcpy(Mmat,   &pk[8 + (4 * nn)], (size_t)nn * sizeof(double));
+				memcpy(Rfmat,  &pk[8 + (5 * nn)], (size_t)nn * sizeof(double));
+				memcpy(Lfmat,  &pk[8 + (6 * nn)], (size_t)nn * sizeof(double));
+				memcpy(Pfemat, &pk[8 + (7 * nn)], (size_t)nn * sizeof(double));
+				if (!nhead) {
+					kcol.c = (HaveC != 0);
+					kcol.r = (HaveR != 0);
+					kcol.f = (HaveF != 0);
+					sweep_header(fp, kcol);
+					nhead = 1;
+				}
+				sweep_row(fp, kcol, fp_log);
+				fflush(fp);
+				ierr |= h5_add_sweep(Freq);
+				// h5_add_field は場が無ければ何も書かない
+				// (fieldout = 1 との併用は上で弾いてある)
+				ierr |= h5_add_field(Freq);
+			}
+		}
+		free(packs);
+		if (fp != NULL) fclose(fp);
+
+		if (!ierr && (mrank == 0)) {
+			fprintf(fp_log, "\n  frequency sweep written to %s (%d points, "
+				"%d MPI processes)\n", FN_sweep, NFreqSweep, msize);
+		}
+		if (mrank == 0) h5_close(fp_log);
+		field_free();
+
+		return ierr;
+	}
 
 	sweepcol_t kcol = {0, 0, 0};
 	int nhead = 0;

@@ -72,6 +72,62 @@ jobs:
   # 「外部ライブラリ依存は無い」という性質を守る。このジョブだけが
   # ofe_series.h5 を書く経路と、h5dump による検証を通す。
   # 既定ジョブ側は逆に「hdf5 = 1 が弾かれること」を検査している。
+  # MPI (任意依存)。周波数掃引の点をプロセスに分散する経路の検証。
+  # rlc_check.sh の [mpi] 節が mpirun を検出して np 2/3 の出力が直列と
+  # バイト一致することを見る。既定ジョブ側は mpirun が無いので節ごと skip し、
+  # 無効ビルドの検査 (mpirun 配下で弾かれること) はこのジョブの前段で行う
+  build-linux-mpi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenMPI
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
+
+      - name: Configure and build WITHOUT MPI (the guard must reject mpirun)
+        run: |
+          cmake -B build-off -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-off -j"$(nproc)"
+          mkdir -p /tmp/mpioff && cp data/sample/sweep_plate.ofe /tmp/mpioff/
+          cd /tmp/mpioff
+          set +e
+          mpirun -np 2 "$GITHUB_WORKSPACE/bin/ofe" -n 2 sweep_plate.ofe > out.txt 2>&1
+          rc=$?
+          set -e
+          test $rc -ne 0
+          grep -q "built without MPI" out.txt
+
+      - name: Configure (WITH_MPI=ON)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DWITH_MPI=ON
+
+      - name: Build ofe / ofe_post
+        run: |
+          rm -f bin/ofe
+          cmake --build build -j"$(nproc)"
+
+      - name: Validation test — RLGC vs analytic (+ the MPI byte-identity)
+        run: |
+          set -o pipefail
+          sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check 2>&1 | tee /tmp/mpi.log
+
+      # 「skip されずに実際に走ったこと」まで見る。mpirun が見つからないと
+      # [mpi] 節は黙って skip するので、それだけでは検査にならない
+      - name: The [mpi] section must actually have run (not skipped)
+        run: |
+          grep -q "np = 2 gives byte-identical" /tmp/mpi.log
+          grep -q "np = 3 gives byte-identical" /tmp/mpi.log
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-linux-mpi
+          path: |
+            /tmp/rlc-check/ofe.log
+            /tmp/mpi.log
+          if-no-files-found: ignore
+
   build-linux-hdf5:
     runs-on: ubuntu-latest
     timeout-minutes: 20
