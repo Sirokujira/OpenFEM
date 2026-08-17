@@ -31,6 +31,16 @@ if(WITH_HDF5)
     message(STATUS "HDF5 enabled (${HDF5_C_LIBRARIES})")
 endif()
 
+# ── MPI (任意) ───────────────────────────────────────────────────────
+# 周波数掃引の点をプロセスに分散する経路でだけ使う。**既定は OFF** (HDF5 と
+# 同じ理由)。OFF のときは mpi.h を include すらしない。mpirun 配下で
+# 起動されたことを環境変数で検出したら黙って直列に落ちず入力エラーにする。
+option(WITH_MPI "Enable MPI parallelism over frequency-sweep points" OFF)
+if(WITH_MPI)
+    find_package(MPI REQUIRED COMPONENTS C)
+    message(STATUS "MPI enabled (${MPI_C_LIBRARIES})")
+endif()
+
 option(WITH_OPENMP "Enable OpenMP support" ON)
 if(WITH_OPENMP)
     find_package(OpenMP)
@@ -65,6 +75,7 @@ set(SOL_SOURCES
     sol/eddy3d.c
     sol/fieldout.c
     sol/hdf5out.c
+    sol/mpiwrap.c
     sol/outputRLC.c
     sol/utils.c
 )
@@ -75,6 +86,10 @@ if(WITH_HDF5)
     target_include_directories(ofe PRIVATE ${HDF5_C_INCLUDE_DIRS})
     target_link_libraries(ofe PRIVATE ${HDF5_C_LIBRARIES})
     target_compile_definitions(ofe PRIVATE OFE_HDF5)
+endif()
+if(WITH_MPI)
+    target_link_libraries(ofe PRIVATE MPI::MPI_C)
+    target_compile_definitions(ofe PRIVATE OFE_MPI)
 endif()
 if(WITH_OPENMP AND OpenMP_C_FOUND)
     target_link_libraries(ofe PRIVATE OpenMP::OpenMP_C)

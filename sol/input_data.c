@@ -64,7 +64,7 @@ void input_warn(const char *fmt, ...)
 	vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
 
-	printf("*** warning : %s\n", buf);
+	if (mpi_rank() == 0) printf("*** warning : %s\n", buf);
 	if (NInputWarn < MAXINWARN) {
 		strncpy(InputWarn[NInputWarn], buf, BUFSIZ - 1);
 		InputWarn[NInputWarn][BUFSIZ - 1] = '\0';

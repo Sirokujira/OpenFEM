@@ -30,6 +30,13 @@ int main(int argc, char *argv[])
 	int ierr = 0;
 	FILE *fp_in = NULL, *fp_out = NULL, *fp_log = NULL;
 
+	// MPI (WITH_MPI=ON のときだけ実体がある。スタブは「無効ビルドで
+	// mpirun 配下に置かれた」ことを検出してエラーにする)
+	if (mpi_init(&argc, &argv)) {
+		exit(1);
+	}
+	const int mrank = mpi_rank();
+
 	int nthread = 1;
 	int prompt = 0;
 	char fn_in[BUFSIZ];
@@ -50,15 +57,27 @@ int main(int argc, char *argv[])
 	fclose(fp_in);
 	error_check(ierr, prompt);
 
-	// ログ
-	if ((fp_log = fopen(FN_log, "w")) == NULL) {
+	// ログ。rank 0 以外は ofe_rank<N>.log に書く (全 rank が同じ ofe.log に
+	// 書くと壊し合う)。**tmpfile に捨ててはいけない** — 遠隔の点で出た
+	// 非収束・表皮深さ・no awall の警告が消える (レビューの実測)。
+	// rank 0 の要約は「どの点がどの rank か」を出すので、詳細はそのログを見る
+	if (mrank == 0) {
+		fp_log = fopen(FN_log, "w");
+	}
+	else {
+		sprintf(str, "ofe_rank%d.log", mrank);
+		fp_log = fopen(str, "w");
+	}
+	if (fp_log == NULL) {
 		printf(errfmt, FN_log);
 		error_check(1, prompt);
 	}
 
-	sprintf(str, "<<< %s (CPU+OpenMP) Ver.%d.%d.%d >>>",
-		PROGRAM, VERSION_MAJOR, VERSION_MINOR, VERSION_BUILD);
-	monitor1(fp_log, str);
+	if (mrank == 0) {
+		sprintf(str, "<<< %s (CPU+OpenMP) Ver.%d.%d.%d >>>",
+			PROGRAM, VERSION_MAJOR, VERSION_MINOR, VERSION_BUILD);
+		monitor1(fp_log, str);
+	}
 
 	// 入力解釈の警告は ofe.log を開く前に出るので、ここでログにも残す
 	for (int w = 0; w < NInputWarn; w++) {
@@ -72,7 +91,7 @@ int main(int argc, char *argv[])
 		fclose(fp_log);
 		error_check(ierr, prompt);
 	}
-	monitor2(fp_log, nthread);
+	if (mrank == 0) monitor2(fp_log, nthread);
 
 	const double t1 = cputime();
 
@@ -86,27 +105,30 @@ int main(int argc, char *argv[])
 
 	const double t2 = cputime();
 
-	// 出力
-	outputRLC(fp_log);
+	// 出力 (rank 0 だけが書く)
+	if (mrank == 0) {
+		outputRLC(fp_log);
 
-	if ((fp_out = fopen(FN_out, "wb")) == NULL) {
-		printf(errfmt, FN_out);
-		fclose(fp_log);
-		error_check(1, prompt);
+		if ((fp_out = fopen(FN_out, "wb")) == NULL) {
+			printf(errfmt, FN_out);
+			fclose(fp_log);
+			error_check(1, prompt);
+		}
+		writeout(fp_out);
+		fclose(fp_out);
+
+		const double t3 = cputime();
+
+		fprintf(fp_log, "\ncpu time [sec] : setup = %.3f, solve = %.3f, output = %.3f, total = %.3f\n",
+			t1 - t0, t2 - t1, t3 - t2, t3 - t0);
+		fprintf(fp_log, "output files : %s, %s\n", FN_log, FN_out);
+
+		monitor1(fp_log, "=== normal end ===");
 	}
-	writeout(fp_out);
-	fclose(fp_out);
-
-	const double t3 = cputime();
-
-	fprintf(fp_log, "\ncpu time [sec] : setup = %.3f, solve = %.3f, output = %.3f, total = %.3f\n",
-		t1 - t0, t2 - t1, t3 - t2, t3 - t0);
-	fprintf(fp_log, "output files : %s, %s\n", FN_log, FN_out);
-
-	monitor1(fp_log, "=== normal end ===");
 
 	fclose(fp_log);
 	memfree();
+	mpi_finalize();
 
 	return 0;
 }
