@@ -193,14 +193,16 @@ static int setup_unstruct(void)
 	// 黙って誤答を出すより弾く
 	// 辺要素 (Whitney) も節点要素の自己検証も四面体の形状関数に基づく。
 	// 六面体格子を渡されたら黙って誤答を出さずに弾く
-	// 辺要素は種別が 1 つの 1 次格子 (四面体 / 六面体 / 角柱) でだけ使える。
-	// 混在は種別をまたぐ面の接線連続性 (Nedelec の適合性) の検査が別に要り、
-	// ピラミッドには多項式の Nedelec 基底が無いので、どちらも弾く
-	if (((MeshElem == MESHELEM_MIXED) || (MeshElem == MESHELEM_PYR))
-	 && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
-		printf("%s\n", "*** analysis E / A (edge elements) need a single-kind "
-			"tetrahedral, hexahedral or prism mesh (mixed element kinds and "
-			"pyramids are not supported)");
+	// 辺要素は 1 次の四面体・六面体・角柱で使える (**種別の混在も可**)。
+	// 最低次 Nedelec の接線トレースは三角形面・四角形面のどちらでも面の辺の
+	// 自由度だけで決まるので、面を共有する要素の種別が違っても接線連続性は
+	// 保たれる (solve_edge_test の (g) が直接検査する)。
+	// **ピラミッドだけは多項式の Nedelec 基底が無い** (有理基底が要る) ので弾く。
+	// 六面体 + 四面体の格子はピラミッドが要るため、ここで一緒に落ちる
+	if ((NPyr > 0) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
+		printf("%s\n", "*** analysis E / A (edge elements) do not support pyramids "
+			"(there is no polynomial Nedelec basis on a pyramid); use a mesh of "
+			"tetrahedra, hexahedra and prisms");
 		return 1;
 	}
 	if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {

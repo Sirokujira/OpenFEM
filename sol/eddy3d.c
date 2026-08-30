@@ -102,15 +102,14 @@ void crs_alloc_edge_node(crs_t *A)
 	const int nn = NNode;
 	const int n = ne + nn;
 	const int nelem = edge_elem_count();
-	const int nedge = edge_elem_nedge();
-	const int nen = edge_elem_nen();
 
 	// 自由度毎の要素数
 	int *cnt = (int *)malloc((size_t)n * sizeof(int));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < nelem; e++) {
 		const int32_t *nd = edge_elem_nodes(e);
-		for (int k = 0; k < nedge; k++) cnt[TetEdge[(e * nedge) + k]]++;
+		const int nen = edge_elem_nen(e);
+		for (int64_t k = EdgeOff[e]; k < EdgeOff[e + 1]; k++) cnt[TetEdge[k]]++;
 		for (int l = 0; l < nen; l++) cnt[ne + nd[l]]++;
 	}
 	int64_t *eptr = (int64_t *)malloc(((size_t)n + 1) * sizeof(int64_t));
@@ -120,8 +119,9 @@ void crs_alloc_edge_node(crs_t *A)
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < nelem; e++) {
 		const int32_t *nd = edge_elem_nodes(e);
-		for (int k = 0; k < nedge; k++) {
-			const int32_t d = TetEdge[(e * nedge) + k];
+		const int nen = edge_elem_nen(e);
+		for (int64_t k = EdgeOff[e]; k < EdgeOff[e + 1]; k++) {
+			const int32_t d = TetEdge[k];
 			elist[eptr[d] + cnt[d]] = (int32_t)e;
 			cnt[d]++;
 		}
@@ -141,7 +141,10 @@ void crs_alloc_edge_node(crs_t *A)
 
 	for (int i = 0; i < n; i++) {
 		const int64_t p0 = eptr[i], p1 = eptr[i + 1];
-		const int need = (int)(p1 - p0) * (nedge + nen);
+		int need = 0;
+		for (int64_t p = p0; p < p1; p++) {
+			need += edge_elem_nedge(elist[p]) + edge_elem_nen(elist[p]);
+		}
 		if (need > cap) {
 			cap = need;
 			work = (int32_t *)realloc(work, (size_t)cap * sizeof(int32_t));
@@ -150,7 +153,8 @@ void crs_alloc_edge_node(crs_t *A)
 		for (int64_t p = p0; p < p1; p++) {
 			const int32_t e = elist[p];
 			const int32_t *nd = edge_elem_nodes(e);
-			for (int k = 0; k < nedge; k++) work[m++] = TetEdge[(e * nedge) + k];
+			const int nen = edge_elem_nen(e);
+			for (int64_t k = EdgeOff[e]; k < EdgeOff[e + 1]; k++) work[m++] = TetEdge[k];
 			for (int l = 0; l < nen; l++) work[m++] = (int32_t)ne + nd[l];
 		}
 		qsort(work, (size_t)m, sizeof(int32_t), cmp_i32_en);
@@ -173,7 +177,8 @@ void crs_alloc_edge_node(crs_t *A)
 		for (int64_t p = p0; p < p1; p++) {
 			const int32_t e = elist[p];
 			const int32_t *nd = edge_elem_nodes(e);
-			for (int k = 0; k < nedge; k++) work[m++] = TetEdge[(e * nedge) + k];
+			const int nen = edge_elem_nen(e);
+			for (int64_t k = EdgeOff[e]; k < EdgeOff[e + 1]; k++) work[m++] = TetEdge[k];
 			for (int l = 0; l < nen; l++) work[m++] = (int32_t)ne + nd[l];
 		}
 		qsort(work, (size_t)m, sizeof(int32_t), cmp_i32_en);
@@ -206,12 +211,12 @@ void assemble_eddy3d(crs_t *Kr, crs_t *Ki, double omega)
 
 	const int ne = NEdge;
 	const int nelem = edge_elem_count();
-	const int nedge = edge_elem_nedge();
-	const int nen = edge_elem_nen();
-	const int (*tab)[2] = edge_elem_table();
 
 	for (int e = 0; e < nelem; e++) {
 		const int m = edge_elem_mat(e);
+		const int nedge = edge_elem_nedge(e);
+		const int nen = edge_elem_nen(e);
+		const int (*tab)[2] = edge_elem_table(e);
 		double nu[6];
 		material_coef_pub(m, 3, nu);			// ν = (μ0 μ~)^-1
 		const double sig = Material[m].sigma;
@@ -244,8 +249,8 @@ void assemble_eddy3d(crs_t *Kr, crs_t *Ki, double omega)
 			}
 		}
 
-		const int32_t *ed = &TetEdge[e * nedge];
-		const signed char *sg = &TetEdgeSgn[e * nedge];
+		const int32_t *ed = &TetEdge[EdgeOff[e]];
+		const signed char *sg = &TetEdgeSgn[EdgeOff[e]];
 		const int32_t *nd = edge_elem_nodes(e);
 
 		// (1,1) 辺 x 辺
@@ -414,9 +419,6 @@ int solve_eddy3d(FILE *fp_log)
 	// mu6[0..2] は anisomur 未指定なら mur で埋まっている (input_data.c)
 	double sigmax = 0, sigmumax = 0;
 	const int nelem = edge_elem_count();
-	const int nedge = edge_elem_nedge();
-	const int nen2 = edge_elem_nen();
-	const int (*tab)[2] = edge_elem_table();
 	for (int e = 0; e < nelem; e++) {
 		const material_t *mt = &Material[edge_elem_mat(e)];
 		const double s = mt->sigma;
@@ -433,9 +435,8 @@ int solve_eddy3d(FILE *fp_log)
 		return 1;
 	}
 	const double delta = sqrt(2 / (omega * MU0 * sigmumax));
-	fprintf(fp_log, "  nodes = %d, %s = %d, edges = %d, unknowns = %d\n",
-		nn, ((MeshElem == MESHELEM_HEX) ? "hexahedra"
-		   : (MeshElem == MESHELEM_PRISM) ? "prisms" : "tetrahedra"), nelem, ne, n);
+	fprintf(fp_log, "  nodes = %d, elements = %d (%d tet / %d hex / %d prism), "
+		"edges = %d, unknowns = %d\n", nn, nelem, NTet, NHex, NPrism, ne, n);
 	fprintf(fp_log, "  frequency = %.6e [Hz], skin depth = %.4e [m]\n", Freq, delta);
 
 	// 導体要素の最大辺長を表皮深さと並べて報告する。
@@ -446,6 +447,8 @@ int solve_eddy3d(FILE *fp_log)
 	for (int e = 0; e < nelem; e++) {
 		if (Material[edge_elem_mat(e)].sigma <= 0) continue;
 		const int32_t *nd = edge_elem_nodes(e);
+		const int nedge = edge_elem_nedge(e);
+		const int (*tab)[2] = edge_elem_table(e);
 		for (int k = 0; k < nedge; k++) {
 			const int32_t a = nd[tab[k][0]], b = nd[tab[k][1]];
 			const double dx = Xp[b] - Xp[a], dy = Yp[b] - Yp[a], dz = Zp[b] - Zp[a];
@@ -516,6 +519,7 @@ int solve_eddy3d(FILE *fp_log)
 	for (int e = 0; e < nelem; e++) {
 		if (Material[edge_elem_mat(e)].sigma <= 0) continue;
 		const int32_t *nd = edge_elem_nodes(e);
+		const int nen2 = edge_elem_nen(e);
 		for (int l = 0; l < nen2; l++) cond[nd[l]] = 1;
 	}
 	int nelec = 0, nfloat = 0;
@@ -579,110 +583,92 @@ int solve_eddy3d(FILE *fp_log)
 			ui[i] += xdi[i];
 		}
 
-		// 場の出力 : 四面体毎に B = ∇×A と J = -σ(jωA + ∇φ) を作る
-		// (∇×W_e = 2∇λ_a×∇λ_b、W_e は要素内で 1 次なので重心で評価する)
-		if (FieldOut && (jc == 1) && (MeshElem != MESHELEM_TET)) {
-			// 六面体・角柱 : 要素中心の物理基底 W と ∇×W から B と J を作る
+		// 場の出力 : 要素毎に B = ∇×A と J = -σ(jωA + ∇φ) を作る。
+		// **要素の種別ごとに分岐する** (混在格子があるため)。四面体は
+		// Whitney 基底の閉形式 (∇×W_e = 2∇λ_a×∇λ_b、W_e は 1 次なので重心で
+		// 評価)、六面体・角柱は参照基底を Piola 変換した要素中心の値を使う。
+		// 純粋な格子では従来と同じ式を同じ順に通るので出力はバイト一致する
+		if (FieldOut && (jc == 1)) {
 			double *bv = (double *)malloc((size_t)nelem * 3 * sizeof(double));
 			double *jr = (double *)malloc((size_t)nelem * 3 * sizeof(double));
 			double *ji = (double *)malloc((size_t)nelem * 3 * sizeof(double));
 			for (int e = 0; e < nelem; e++) {
-				double wc[12][3], cc[12][3];
-				edge_elem_center(e, wc, cc);
-				const int32_t *ed = &TetEdge[e * nedge];
-				const signed char *sg = &TetEdgeSgn[e * nedge];
+				const int kind = edge_elem_kind(e);
+				const int nedge = edge_elem_nedge(e);
+				const int32_t *ed = &TetEdge[EdgeOff[e]];
+				const signed char *sg = &TetEdgeSgn[EdgeOff[e]];
 				const int32_t *nd = edge_elem_nodes(e);
 				double brv[3] = {0, 0, 0}, arv[3] = {0, 0, 0}, aiv[3] = {0, 0, 0};
-				for (int k = 0; k < nedge; k++) {
-					const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
+				double pr[3] = {0, 0, 0}, pi2[3] = {0, 0, 0};	// ∇φ
+
+				if (kind == MESHELEM_TET) {
+					double g[4][3], vol;
 					for (int c = 0; c < 3; c++) {
-						brv[c] += wr * cc[k][c];
-						arv[c] += wr * wc[k][c];
-						aiv[c] += wi * wc[k][c];
+						bv[(e * 3) + c] = jr[(e * 3) + c] = ji[(e * 3) + c] = 0;
 					}
-				}
-				// ∇φ (節点要素の中心勾配)
-				double pr[3] = {0, 0, 0}, pi2[3] = {0, 0, 0};
-				if (MeshElem == MESHELEM_HEX) {
-					double gn[8][3];
-					if (!hex_grad_center(e, gn)) {
-						for (int a = 0; a < 8; a++) {
-							for (int c = 0; c < 3; c++) {
-								pr[c] += ur[ne + nd[a]] * gn[a][c];
-								pi2[c] += ui[ne + nd[a]] * gn[a][c];
-							}
+					if (tet_grad_pub(&Tet[e * 4], g, &vol)) continue;
+					for (int k = 0; k < 6; k++) {
+						const int a = EDGE_NODE3[k][0], b = EDGE_NODE3[k][1];
+						const double cr[3] = {
+							(g[a][1] * g[b][2]) - (g[a][2] * g[b][1]),
+							(g[a][2] * g[b][0]) - (g[a][0] * g[b][2]),
+							(g[a][0] * g[b][1]) - (g[a][1] * g[b][0])};
+						const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
+						for (int c = 0; c < 3; c++) {
+							brv[c] += 2 * wr * cr[c];		// ∇×W_e = 2 cr
+							// 重心での W_e = (∇λ_b - ∇λ_a)/4
+							arv[c] += wr * (g[b][c] - g[a][c]) / 4;
+							aiv[c] += wi * (g[b][c] - g[a][c]) / 4;
+						}
+					}
+					for (int a = 0; a < 4; a++) {
+						for (int c = 0; c < 3; c++) {
+							pr[c] += ur[ne + nd[a]] * g[a][c];
+							pi2[c] += ui[ne + nd[a]] * g[a][c];
 						}
 					}
 				}
 				else {
-					double gn[6][3];
-					if (!prism_grad_center(e, gn)) {
-						for (int a = 0; a < 6; a++) {
-							for (int c = 0; c < 3; c++) {
-								pr[c] += ur[ne + nd[a]] * gn[a][c];
-								pi2[c] += ui[ne + nd[a]] * gn[a][c];
+					double wc[12][3], cc[12][3];
+					edge_elem_center(e, wc, cc);
+					for (int k = 0; k < nedge; k++) {
+						const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
+						for (int c = 0; c < 3; c++) {
+							brv[c] += wr * cc[k][c];
+							arv[c] += wr * wc[k][c];
+							aiv[c] += wi * wc[k][c];
+						}
+					}
+					if (kind == MESHELEM_HEX) {
+						double gn[8][3];
+						if (!hex_grad_center(e - NTet, gn)) {
+							for (int a = 0; a < 8; a++) {
+								for (int c = 0; c < 3; c++) {
+									pr[c] += ur[ne + nd[a]] * gn[a][c];
+									pi2[c] += ui[ne + nd[a]] * gn[a][c];
+								}
+							}
+						}
+					}
+					else {
+						double gn[6][3];
+						if (!prism_grad_center(e - NTet - NHex, gn)) {
+							for (int a = 0; a < 6; a++) {
+								for (int c = 0; c < 3; c++) {
+									pr[c] += ur[ne + nd[a]] * gn[a][c];
+									pi2[c] += ui[ne + nd[a]] * gn[a][c];
+								}
 							}
 						}
 					}
 				}
+
 				const double sg2 = Material[edge_elem_mat(e)].sigma;
 				for (int c = 0; c < 3; c++) {
-					bv[(e * 3) + c] = brv[c];
+					bv[(e * 3) + c] = brv[c];		// |B| は実部で代表させる
+					// J = -σ(jωA + ∇φ)、jωA = jω(ar + j ai) = -ω ai + j ω ar
 					jr[(e * 3) + c] = -sg2 * ((-omega * aiv[c]) + pr[c]);
 					ji[(e * 3) + c] = -sg2 * ((omega * arv[c]) + pi2[c]);
-				}
-			}
-			field_add_cellvec("B_A_re", bv);
-			field_add_cellvec("J_A_re", jr);
-			field_add_cellvec("J_A_im", ji);
-			free(bv); free(jr); free(ji);
-		}
-		if (FieldOut && (jc == 1) && (MeshElem == MESHELEM_TET)) {
-			double *bv = (double *)malloc((size_t)NTet * 3 * sizeof(double));
-			double *jr = (double *)malloc((size_t)NTet * 3 * sizeof(double));
-			double *ji = (double *)malloc((size_t)NTet * 3 * sizeof(double));
-			for (int e = 0; e < NTet; e++) {
-				double g[4][3], vol;
-				for (int c = 0; c < 3; c++) {
-					bv[(e * 3) + c] = jr[(e * 3) + c] = ji[(e * 3) + c] = 0;
-				}
-				if (tet_grad_pub(&Tet[e * 4], g, &vol)) continue;
-				const int32_t *ed = &TetEdge[e * 6];
-				const signed char *sg = &TetEdgeSgn[e * 6];
-				const int32_t *nd = &Tet[e * 4];
-				double br[3] = {0, 0, 0}, bi[3] = {0, 0, 0};
-				double ar[3] = {0, 0, 0}, ai[3] = {0, 0, 0};
-				for (int k = 0; k < 6; k++) {
-					const int a = EDGE_NODE3[k][0], b = EDGE_NODE3[k][1];
-					const double cr[3] = {
-						(g[a][1] * g[b][2]) - (g[a][2] * g[b][1]),
-						(g[a][2] * g[b][0]) - (g[a][0] * g[b][2]),
-						(g[a][0] * g[b][1]) - (g[a][1] * g[b][0])};
-					const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
-					// ∇×A : ∇×W_e = 2 cr
-					for (int c = 0; c < 3; c++) {
-						br[c] += 2 * wr * cr[c];
-						bi[c] += 2 * wi * cr[c];
-					}
-					// 重心での W_e = (λ_a ∇λ_b - λ_b ∇λ_a)|_{λ=1/4} = (∇λ_b - ∇λ_a)/4
-					for (int c = 0; c < 3; c++) {
-						ar[c] += wr * (g[b][c] - g[a][c]) / 4;
-						ai[c] += wi * (g[b][c] - g[a][c]) / 4;
-					}
-				}
-				double pr[3] = {0, 0, 0}, pi[3] = {0, 0, 0};	// ∇φ
-				for (int a = 0; a < 4; a++) {
-					for (int c = 0; c < 3; c++) {
-						pr[c] += ur[ne + nd[a]] * g[a][c];
-						pi[c] += ui[ne + nd[a]] * g[a][c];
-					}
-				}
-				const double sg2 = Material[TetMat[e]].sigma;
-				for (int c = 0; c < 3; c++) {
-					bv[(e * 3) + c] = br[c];		// |B| は実部で代表させる
-					// J = -σ(jωA + ∇φ)、jωA = jω(ar + j ai) = -ω ai + j ω ar
-					jr[(e * 3) + c] = -sg2 * ((-omega * ai[c]) + pr[c]);
-					ji[(e * 3) + c] = -sg2 * ((omega * ar[c]) + pi[c]);
 				}
 			}
 			field_add_cellvec("B_A_re", bv);
