@@ -1170,6 +1170,22 @@ if ! (cd "$WORK" && "$OFE" -n 2 etorn.ofe 2>&1 | grep -q "were not merged"); the
 	echo "  *** it was rejected for a different reason than the duplicated nodes" >&2
 	status=1
 fi
+# 場の出力 (B / J) を混在格子でも出す。**セル毎のベクトルを作るループは
+# 種別ごとに式が違う** (四面体は Whitney の閉形式、六面体・角柱は Piola 変換した
+# 要素中心の基底) ので、混在格子ではその分岐を両方通る。
+# セル型と、セル数が要素数と種別ごとに合っていることを見る
+# (vtkcheck.awk は四面体と三角形しか測れないので体積の恒等式は使えない —
+#  六面体・角柱のセルは節点数で三角形と区別が付かず、型を読む必要がある)
+awk '/^analysis = A/{print "fieldout = 1"} {print}' "$SRC/bar_hexprism.ofe" > "$WORK/fldmix.ofe"
+(cd "$WORK" && "$OFE" -n 2 fldmix.ofe > /dev/null && "$OFE_POST" > /dev/null)
+res=$(awk '
+	NF == 0            { next }
+	/^CELL_TYPES/      { st = "t"; next }
+	st == "t" && NF == 1 { n[$1]++ }
+	END { printf "%s (%d hexahedra, %d wedges)",
+	             ((n[12] == 576) && (n[13] == 1152)) ? "OK" : "NG", n[12], n[13] }' "$WORK/ofe_field.vtk")
+echo "  VTK cells are 576 HEXAHEDRON + 1152 WEDGE : $res"
+case "$res" in NG*) status=1 ;; esac
 # 誤検知の対向検査 : 曲面に載せた 2 次格子は**別々の辺**の中点が同じ点に落ちる
 # (実測 coax_p2 で 48 組)。頂点だけを見ているのでこれは弾いてはいけない
 res=$( (cd "$WORK" && "$OFE" -n 2 nodal_test_coax.ofe 2>&1 | grep -c "were not merged") || true)
