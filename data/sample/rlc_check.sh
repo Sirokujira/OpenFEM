@@ -1084,20 +1084,125 @@ case "$res" in NG*) status=1 ;; esac
 sed -e 's/^analysis = .*/analysis = A/' -e 's/^material = .*/material = 1.0 5.8e7/' \
     -e 's/^solver = .*/frequency = 1e4\nvoltage = 1.0/' "$SRC/box_pyr.ofe" > "$WORK/pyredge.ofe"
 mesh_reject "analysis A on a pyramid mesh" pyredge.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 pyredge.ofe 2>&1 | grep -q "pyramids are not supported"); then
-	echo "  *** it was rejected for a different reason than the element kind" >&2
-	status=1
-fi
-sed -e 's/^analysis = .*/analysis = A/' -e 's/^material = 4.0 0$/material = 1.0 5.8e7/' \
-    -e 's/^solver = .*/frequency = 1e4\nvoltage = 1.0/' "$SRC/box_mixed.ofe" > "$WORK/mixedge.ofe"
-mesh_reject "analysis A on a mixed mesh" mixedge.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 mixedge.ofe 2>&1 | grep -q "mixed element kinds"); then
+if ! (cd "$WORK" && "$OFE" -n 2 pyredge.ofe 2>&1 | grep -q "do not support pyramids"); then
 	echo "  *** it was rejected for a different reason than the element kind" >&2
 	status=1
 fi
 sed -e 's/^analysis = .*/analysis = E/' -e 's/^material = .*/material = 1.0 1e6/' \
     "$SRC/box_hex2.ofe" > "$WORK/h2edge.ofe"
 mesh_reject "analysis E on an order-2 hex mesh" h2edge.ofe
+
+# ---- 辺要素 : 種別の混在した格子 ----
+#
+# 最低次 Nedelec の接線トレースは三角形面では三角形の Whitney 空間、四角形面では
+# 四角形の最低次 Nedelec 空間になり、どちらもその面の辺の自由度だけで決まるので、
+# 面を共有する要素の種別が違っても接線連続性が保たれる。接する面の形が揃う向きに
+# しか割れないので、組み合わせで格子の割り方が変わる:
+#   六面体 + 角柱 : x で分割 (界面は四角形面)
+#   角柱 + 四面体 : z で分割 (界面は三角形面)
+#
+# **エネルギーの恒等式 (b) (c) (c2) は接線連続性を検査できない。** {a + b×r} の
+# 場は要素毎に厳密に補間されるので、隣の要素とトレースが食い違っていても
+# 要素積分の和は合ってしまう。面をまたぐ跳びを直接見る (g) が要る。
+echo "[edge mixed] Nedelec edge elements on meshes that mix element kinds"
+cp "$SRC/edge_mix_hp.ofe" "$SRC/edge_mix_pt.ofe" "$WORK/"
+edge_pass "hexahedra + prisms (quadrilateral interface)" edge_mix_hp.ofe
+# 種別をまたぐ面が本当にあったか (0 面なら検査は素通りしているのと同じ)
+res=$(awk '/tangential continuity/ {
+		for (i = 1; i <= NF; i++) {
+			if ($i == "faces") { n = $(i-2); m = $(i+1); sub(/^\(/, "", m) }
+			if ($i == "=") j = $(i+1)
+		}
+	}
+	END { if (n == "") { printf "NG (no (g) line in the log)"; exit }
+	      if (m + 0 < 1) { printf "NG (no face between different kinds)"; exit }
+	      if (j + 0 > 1e-10) { printf "NG (jump %s)", j; exit }
+	      printf "OK (%s faces, %s between kinds, max jump %s)", n, m, j }' "$WORK/ofe.log")
+echo "  (g) tangential trace across kind-mixed faces : $res"
+case "$res" in NG*) status=1 ;; esac
+edge_pass "prisms + tetrahedra (triangular interface)" edge_mix_pt.ofe
+res=$(awk '/tangential continuity/ {
+		for (i = 1; i <= NF; i++) if ($i == "faces") { m = $(i+1); sub(/^\(/, "", m) }
+	}
+	END { printf "%s (%s faces between different kinds)",
+	             ((m + 0 > 0) ? "OK" : "NG"), (m == "" ? "no" : m) }' "$WORK/ofe.log")
+echo "  (g) the prism-tetrahedron interface is really there : $res"
+case "$res" in NG*) status=1 ;; esac
+# 渦電流 (A) : 混在させても 1 次元厳密解は同じ。純格子と同じ許容で見る
+for pair in "bar_hexprism 0 hexahedra 576 prisms 1152" \
+            "bar_prismtet 3456 tetrahedra 0 prisms 1152"; do
+	set -- $pair
+	m=$1
+	cp "$SRC/$m.ofe" "$WORK/"
+	sed "s/^frequency = .*/frequency = 1e5/" "$SRC/$m.ofe" > "$WORK/bar_mix.ofe"
+	(cd "$WORK" && "$OFE" -n 2 bar_mix.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "R($m, f=1e5) [ohm]" "$(value_of Rf)" "3.24859232e-04" "0.02"
+	compare "L($m, f=1e5) [H]" "$(value_of Lf)" "5.34552067e-10" "0.02"
+	if grep -q "NOT converged" "$WORK/ofe.log"; then
+		echo "  *** A-phi solver did not converge ($m)" >&2
+		status=1
+	fi
+	# **本当に混在した格子で解いたか。** 1 次元解はどの空間でも同じように
+	# 離散化されるので、値だけでは純格子と区別できない (実測: bar_hexprism の
+	# R は純六面体と印字全桁が一致する)。要素数の内訳をログから確かめる
+	if ! grep -q "($2 tet / $4 hex / $6 prism)" "$WORK/ofe.log"; then
+		echo "  *** $m did not solve on a mixed mesh ($2 tet / $4 hex / $6 prism)" >&2
+		status=1
+	fi
+done
+# 弾かれるべき格子
+# (1) z に積んだ六面体 + 角柱 : 四角形面を三角形 2 枚が覆う非適合な界面。
+#     **どのエネルギー恒等式も (g) も素通りする** (裂けた面はもはや共有面では
+#     ないので跳びを比べる相手がいない) ので、位相の検査だけが頼りになる
+python3 "$SRC/mkmesh.py" bar_hex "$WORK/edge_nonconf.msh" -mix 3 -nx 6 -ny 2 -nz 6 > /dev/null
+sed 's/^mesh = .*/mesh = edge_nonconf.msh/' "$SRC/edge_mix_hp.ofe" > "$WORK/enonconf.ofe"
+mesh_reject "z-stacked hexahedra + prisms (quadrilateral face covered by triangles)" enonconf.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 enonconf.ofe 2>&1 | grep -q "covered by triangular faces"); then
+	echo "  *** it was rejected for a different reason than the non-conforming face" >&2
+	status=1
+fi
+# (2) 未マージの格子 (界面の節点を複製したもの)。これも**すべての恒等式を
+#     素通りする** (実測: (a)〜(d) と (g) がすべて機械精度で通り、連結成分が
+#     2 になったことだけが痕跡だった) ので、格子そのものを見るしかない
+python3 - "$WORK/edge_mix_hp.msh" "$WORK/edge_torn.msh" <<'PYTORN'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+L = open(src).read().split("\n")
+i = L.index("$Nodes"); n = int(L[i + 1])
+xyz = {}
+for k in range(n):
+    p = L[i + 2 + k].split()
+    xyz[int(p[0])] = (float(p[1]), float(p[2]), float(p[3]))
+xs = sorted({v[0] for v in xyz.values()})
+xmid = xs[len(xs) // 2]
+dup, new = {}, n
+for nid, v in xyz.items():
+    if v[0] == xmid:
+        new += 1
+        dup[nid] = new
+L[i + 1] = str(n + len(dup))
+add = ["%d %.16g %.16g %.16g" % (dup[k], xyz[k][0], xyz[k][1], xyz[k][2]) for k in sorted(dup)]
+L = L[:i + 2 + n] + add + L[i + 2 + n:]
+j = L.index("$Elements"); m = int(L[j + 1])
+for k in range(m):
+    p = L[j + 2 + k].split()
+    nt = int(p[2]); ids = [int(q) for q in p[3 + nt:]]
+    if ids and max(xyz[q][0] for q in ids) > xmid:
+        ids = [dup.get(q, q) for q in ids]
+        L[j + 2 + k] = " ".join(p[:3 + nt] + [str(q) for q in ids])
+open(dst, "w").write("\n".join(L))
+PYTORN
+sed 's/^mesh = .*/mesh = edge_torn.msh/' "$SRC/edge_mix_hp.ofe" > "$WORK/etorn.ofe"
+mesh_reject "a torn (unmerged) mesh with duplicated interface nodes" etorn.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 etorn.ofe 2>&1 | grep -q "were not merged"); then
+	echo "  *** it was rejected for a different reason than the duplicated nodes" >&2
+	status=1
+fi
+# 誤検知の対向検査 : 曲面に載せた 2 次格子は**別々の辺**の中点が同じ点に落ちる
+# (実測 coax_p2 で 48 組)。頂点だけを見ているのでこれは弾いてはいけない
+res=$( (cd "$WORK" && "$OFE" -n 2 nodal_test_coax.ofe 2>&1 | grep -c "were not merged") || true)
+echo "  a curved order-2 mesh with coincident mid-side nodes : $([ "$res" = 0 ] && echo "accepted -> OK" || echo "NG (false positive)")"
+[ "$res" = 0 ] || status=1
 if ! (cd "$WORK" && "$OFE" -n 2 h2edge.ofe 2>&1 | grep -q "first-order mesh"); then
 	echo "  *** it was rejected for a different reason than the order" >&2
 	status=1

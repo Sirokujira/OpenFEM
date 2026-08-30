@@ -1022,6 +1022,12 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0, mix=
                 四面体は角柱を 3 つに割ったものなので、側面の四角形は
                 三角形 2 枚に割れる。x で割ると角柱の四角形面に当たって
                 非適合になるので z で割る。
+      mix = 3 : **わざと非適合にした**六面体 (z < lz/2) + 角柱 (z > lz/2)。
+                界面で六面体の四角形面に角柱の三角形面 2 枚が当たるので
+                有限要素空間が H(curl) に入らない。読み込み時の位相検査
+                (elem_face_check) で弾かれることの検証と、辺要素の
+                接線連続性の検査 (analysis = E の (g)) が**エネルギーの
+                恒等式では検出できない非適合を捕まえる**ことの実演に使う。
 
     どちらも解は 1 次元のままなので**閉形式は純格子と同じ**で、混在させた
     ことによる誤差だけを見られる。
@@ -1050,6 +1056,7 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0, mix=
     def cell_is_hex(i, k):
         if mix == 1: return i < imix
         if mix == 2: return False
+        if mix == 3: return k < kmix
         return not prism
 
     cells = []
@@ -1059,7 +1066,7 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0, mix=
             for k in range(nz):
                 # 混在では 2 つ目の種別にタグ 2 を付ける
                 tag2 = (2 if ((mix == 1) and (i >= imix))
-                          or ((mix == 2) and (k >= kmix)) else 1)
+                          or ((mix in (2, 3)) and (k >= kmix)) else 1)
                 if cell_is_hex(i, k):
                     b = [idx[(i, j, k)], idx[(i + 1, j, k)],
                          idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)]]
