@@ -1004,7 +1004,7 @@ def make_bar(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, grade=1.0):
     return nodes, tets, tris
 
 
-def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0, mix=0):
+def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0, mix=0, tear=0):
     """導体棒の**六面体** (prism=1 なら**角柱**) 版 (3 次元渦電流 A-φ の検証)
 
     make_bar と同じ形状・同じ物理タグ。1 次元厳密解も同じなので、
@@ -1025,12 +1025,21 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0, mix=
       mix = 3 : **わざと非適合にした**六面体 (z < lz/2) + 角柱 (z > lz/2)。
                 界面で六面体の四角形面に角柱の三角形面 2 枚が当たるので
                 有限要素空間が H(curl) に入らない。読み込み時の位相検査
-                (elem_face_check) で弾かれることの検証と、辺要素の
-                接線連続性の検査 (analysis = E の (g)) が**エネルギーの
-                恒等式では検出できない非適合を捕まえる**ことの実演に使う。
+                (elem_face_check) で弾かれることの検証に使う。
+                **この非適合は自己検証のどの恒等式でも検出できない**
+                (実測: elem_face_check を無効にすると (a)〜(g) が全部通った。
+                四角形面と三角形面は節点の集合が違うのでそもそも「共有面」に
+                ならず、接線連続性の検査は比べる相手を見つけられない)。
 
-    どちらも解は 1 次元のままなので**閉形式は純格子と同じ**で、混在させた
-    ことによる誤差だけを見られる。
+    mix = 1 / 2 は解が 1 次元のままなので**閉形式は純格子と同じ**で、混在
+    させたことによる誤差だけを見られる。
+
+    **tear = 1 で界面の節点を複製する** (mix = 1 と併せて使う)。部品を別々に
+    切って節点をマージし忘れた格子を模したもので、界面の両側が自由度を共有
+    しなくなる。**これも自己検証のどの恒等式にも引っかからない** (実測:
+    (a)〜(d) と (g) がすべて機械精度で通り、連結成分が 1 -> 2 に増えたことだけが
+    痕跡だった) ので、節点の重複を直接見る検査 (node_merge_check) が生きて
+    いることの検証に使う。
 
     **混在させたときは種別ごとに物理タグを分ける** (1 / 2)。同じタグにすると
     要素番号から材料を引く経路 (種別ごとに配列が別で添字のずれ方も違う) が
@@ -1119,6 +1128,20 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0, mix=
                 else:
                     cells.append((tag, 3, [a, b, c, d]))
                     cells.append((20, 3, [a, b, c, d]))
+
+    if tear:
+        # 界面 (x = lx * imix / nx) の節点を複製し、+x 側の要素だけ複製節点を
+        # 見るようにする (部品ごとに切って節点をマージし忘れた格子)
+        xmid = lx * imix / nx
+        seam = [nid for nid, p in enumerate(nodes) if p[0] == xmid]
+        renum = {nid: len(nodes) + i for i, nid in enumerate(seam)}
+        nodes = nodes + [nodes[nid] for nid in seam]
+        torn = []
+        for tag, et, ids in cells:
+            if max(nodes[q][0] for q in ids) > xmid:
+                ids = [renum.get(q, q) for q in ids]
+            torn.append((tag, et, ids))
+        cells = torn
 
     return nodes, cells
 

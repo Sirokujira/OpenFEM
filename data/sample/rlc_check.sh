@@ -1154,44 +1154,16 @@ done
 # (1) z に積んだ六面体 + 角柱 : 四角形面を三角形 2 枚が覆う非適合な界面。
 #     **どのエネルギー恒等式も (g) も素通りする** (裂けた面はもはや共有面では
 #     ないので跳びを比べる相手がいない) ので、位相の検査だけが頼りになる
-python3 "$SRC/mkmesh.py" bar_hex "$WORK/edge_nonconf.msh" -mix 3 -nx 6 -ny 2 -nz 6 > /dev/null
 sed 's/^mesh = .*/mesh = edge_nonconf.msh/' "$SRC/edge_mix_hp.ofe" > "$WORK/enonconf.ofe"
 mesh_reject "z-stacked hexahedra + prisms (quadrilateral face covered by triangles)" enonconf.ofe
 if ! (cd "$WORK" && "$OFE" -n 2 enonconf.ofe 2>&1 | grep -q "covered by triangular faces"); then
 	echo "  *** it was rejected for a different reason than the non-conforming face" >&2
 	status=1
 fi
-# (2) 未マージの格子 (界面の節点を複製したもの)。これも**すべての恒等式を
-#     素通りする** (実測: (a)〜(d) と (g) がすべて機械精度で通り、連結成分が
-#     2 になったことだけが痕跡だった) ので、格子そのものを見るしかない
-python3 - "$WORK/edge_mix_hp.msh" "$WORK/edge_torn.msh" <<'PYTORN'
-import sys
-src, dst = sys.argv[1], sys.argv[2]
-L = open(src).read().split("\n")
-i = L.index("$Nodes"); n = int(L[i + 1])
-xyz = {}
-for k in range(n):
-    p = L[i + 2 + k].split()
-    xyz[int(p[0])] = (float(p[1]), float(p[2]), float(p[3]))
-xs = sorted({v[0] for v in xyz.values()})
-xmid = xs[len(xs) // 2]
-dup, new = {}, n
-for nid, v in xyz.items():
-    if v[0] == xmid:
-        new += 1
-        dup[nid] = new
-L[i + 1] = str(n + len(dup))
-add = ["%d %.16g %.16g %.16g" % (dup[k], xyz[k][0], xyz[k][1], xyz[k][2]) for k in sorted(dup)]
-L = L[:i + 2 + n] + add + L[i + 2 + n:]
-j = L.index("$Elements"); m = int(L[j + 1])
-for k in range(m):
-    p = L[j + 2 + k].split()
-    nt = int(p[2]); ids = [int(q) for q in p[3 + nt:]]
-    if ids and max(xyz[q][0] for q in ids) > xmid:
-        ids = [dup.get(q, q) for q in ids]
-        L[j + 2 + k] = " ".join(p[:3 + nt] + [str(q) for q in ids])
-open(dst, "w").write("\n".join(L))
-PYTORN
+# (2) 未マージの格子 (界面の節点を複製したもの、mkmesh.py -mix 1 -tear 1)。
+#     これも**すべての恒等式を素通りする** (実測: (a)〜(d) と (g) がすべて
+#     機械精度で通り、連結成分が 2 になったことだけが痕跡だった) ので、
+#     格子そのものを見るしかない
 sed 's/^mesh = .*/mesh = edge_torn.msh/' "$SRC/edge_mix_hp.ofe" > "$WORK/etorn.ofe"
 mesh_reject "a torn (unmerged) mesh with duplicated interface nodes" etorn.ofe
 if ! (cd "$WORK" && "$OFE" -n 2 etorn.ofe 2>&1 | grep -q "were not merged"); then
