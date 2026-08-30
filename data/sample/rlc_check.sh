@@ -1186,6 +1186,25 @@ res=$(awk '
 	             ((n[12] == 576) && (n[13] == 1152)) ? "OK" : "NG", n[12], n[13] }' "$WORK/ofe_field.vtk")
 echo "  VTK cells are 576 HEXAHEDRON + 1152 WEDGE : $res"
 case "$res" in NG*) status=1 ;; esac
+# **四面体を含む混在格子でも場を出す。** bar_hexprism は四面体が 0 個なので、
+# 角柱の節点勾配を種別ごとの添字 (e - NTet - NHex) で引く経路が NTet > 0 で
+# 一度も実行されない。bar_prismtet はそこを通る (四面体 3456 + 角柱 1152)
+awk '/^analysis = A/{print "fieldout = 1"} {print}' "$SRC/bar_prismtet.ofe" > "$WORK/fldmix2.ofe"
+(cd "$WORK" && "$OFE" -n 2 fldmix2.ofe > /dev/null && "$OFE_POST" > /dev/null)
+res=$(awk '
+	NF == 0            { next }
+	/^CELL_TYPES/      { st = "t"; next }
+	st == "t" && NF == 1 { n[$1]++ }
+	END { printf "%s (%d tetrahedra, %d wedges)",
+	             ((n[10] == 3456) && (n[13] == 1152)) ? "OK" : "NG", n[10], n[13] }' "$WORK/ofe_field.vtk")
+echo "  VTK cells are 3456 TETRA + 1152 WEDGE : $res"
+case "$res" in NG*) status=1 ;; esac
+# **向きの恒等式はこの形状では書けない。** 棒の電流は x 方向なので B は y-z 面内を
+# 回り、y 端の近くでは B_z が物理的に 0 でない (実測: 符号つき平均で
+# |Bx|/|By| = 9.1e-3、|Bz|/|By| = 4.0e-3、最大値では 6.4e-2 / 2.1e-2)。
+# 根拠のあるしきい値が引けないので数値の恒等式は置かず、種別ごとのセル型と
+# セル数だけを見る。場の値そのものの恒等式は vtkcheck.awk が六面体・角柱の
+# 体積を測れるようになったら (∫J dV = 端子電流の形で) 書ける
 # 誤検知の対向検査 : 曲面に載せた 2 次格子は**別々の辺**の中点が同じ点に落ちる
 # (実測 coax_p2 で 48 組)。頂点だけを見ているのでこれは弾いてはいけない
 res=$( (cd "$WORK" && "$OFE" -n 2 nodal_test_coax.ofe 2>&1 | grep -c "were not merged") || true)

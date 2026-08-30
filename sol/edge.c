@@ -62,6 +62,12 @@ static const signed char EHEX_SGN[8][3] = {
 
 (ピラミッドは Nedelec 基底が無く setup_unstruct() で弾かれるので、ここに
 来る格子には含まれない)
+
+**六面体と四面体は同じ格子に共存できない** (面が適合せず、間に要るピラミッドは
+弾かれる) ので、六面体側の `e - NTet` は必ず 0 の引き算になる。つまりこの
+引き算を書き忘れる誤りは**どの検証でも落ちない** — 検証で覆えているのは
+角柱側の `- NTet - NHex` だけ。将来ピラミッドの有理基底を入れて六面体 +
+四面体を通すようになったら、ここが初めて効くようになる。
 */
 int edge_elem_count(void)
 {
@@ -701,8 +707,19 @@ void edge_elem_matrices(int e, const double nu[6], double sig,
 void edge_elem_center(int e, double w[12][3], double c[12][3])
 {
 	double wr[12][3], cr[12][3], jm[3][3], ji[3][3];
-	const int hex = (edge_elem_kind(e) == MESHELEM_HEX);
+	const int kind = edge_elem_kind(e);
+	const int hex = (kind == MESHELEM_HEX);
 	const int nedge = edge_elem_nedge(e);
+
+	// 四面体は Whitney 基底の閉形式で書けるので参照基底を持たない。
+	// 呼び出し側で分岐しているが、公開関数なので渡されても壊れないようにする
+	// (分岐が 2 つしかないため、放っておくと角柱側に落ちて負の添字になる)
+	if (kind == MESHELEM_TET) {
+		for (int k = 0; k < 6; k++) {
+			for (int i = 0; i < 3; i++) w[k][i] = c[k][i] = 0;
+		}
+		return;
+	}
 
 	if (hex) {
 		ehex_basis(0, 0, 0, wr, cr);
@@ -898,7 +915,7 @@ static int edge_face_conform(FILE *fp_log, const double *u)
 	static const double QST[3][2] = {{-0.3, 0.4}, {0.6, -0.2}, {0.1, 0.8}};
 
 	double jmax = 0, vmax = 0;
-	int64_t nshare = 0, nmix = 0;
+	int64_t nshare = 0, nmix = 0, nskip = 0;
 	for (int64_t p = 0; p + 1 < m; p++) {
 		if (cmp_eface(&fc[p], &fc[p + 1]) != 0) continue;
 		const int nv = ((fc[p].key[3] >= 0) ? 4 : 3);
@@ -912,6 +929,11 @@ static int edge_face_conform(FILE *fp_log, const double *u)
 		const int32_t *nd0 = edge_elem_nodes(e0);
 		int32_t gn[4];
 		for (int i = 0; i < nv; i++) gn[i] = nd0[ft0[fc[p].face][i]];
+		// 法線は角 0,1,2 から作る。四角形では 0->2 が**対角線**なので、これが
+		// 正しい法線になるのは**面が平面のとき**。analysis = E は naff 検査で
+		// アフィンな要素 (平行六面体 / 平行移動の角柱) に限られ、その面は
+		// 平行四辺形なので厳密。この検査を非アフィンな格子に流用するときは、
+		// 法線の取り方を直さないと落とし残しが偽の跳びになる
 		const double a1[3] = {Xp[gn[1]] - Xp[gn[0]], Yp[gn[1]] - Yp[gn[0]], Zp[gn[1]] - Zp[gn[0]]};
 		const double a2[3] = {Xp[gn[2]] - Xp[gn[0]], Yp[gn[2]] - Yp[gn[0]], Zp[gn[2]] - Zp[gn[0]]};
 		double nv3[3] = {(a1[1] * a2[2]) - (a1[2] * a2[1]),
@@ -935,6 +957,7 @@ static int edge_face_conform(FILE *fp_log, const double *u)
 			}
 
 			double side[2][3];
+			int ok = 1;
 			for (int sd = 0; sd < 2; sd++) {
 				const int e = ((sd == 0) ? e0 : e1);
 				const int kind = edge_elem_kind(e);
@@ -948,11 +971,18 @@ static int edge_face_conform(FILE *fp_log, const double *u)
 					for (int a = 0; a < nen; a++) {
 						if (nd[a] == gn[i]) l = a;
 					}
-					if (l < 0) break;
+					if (l < 0) {
+						// 面のキーは節点の集合なので起こらないはず。**途中まで
+						// 足した参照点で評価すると意味の無い値を跳びに数える**
+						// ので、その標本ごと捨てる
+						ok = 0;
+						break;
+					}
 					double rp[3];
 					edge_ref_node(kind, l, rp);
 					for (int c = 0; c < 3; c++) ref[c] += wt[i] * rp[c];
 				}
+				if (!ok) break;
 				double wb[12][3];
 				edge_basis_phys(e, ref, wb);
 				const int32_t *ed = &TetEdge[EdgeOff[e]];
@@ -962,6 +992,11 @@ static int edge_face_conform(FILE *fp_log, const double *u)
 					const double uk = sg[k] * u[ed[k]];
 					for (int c = 0; c < 3; c++) side[sd][c] += uk * wb[k][c];
 				}
+			}
+
+			if (!ok) {
+				nskip++;
+				continue;
 			}
 
 			// 接線成分の差 (法線成分は連続でなくてよい)
@@ -986,6 +1021,12 @@ static int edge_face_conform(FILE *fp_log, const double *u)
 	fprintf(fp_log, "  (g) tangential continuity : %lld shared faces (%lld between "
 		"different kinds), max jump / max|Et| = %.3e\n",
 		(long long)nshare, (long long)nmix, rel);
+	if (nskip > 0) {
+		fprintf(fp_log, "*** %lld face samples could not be located in both "
+			"elements; the face tables and the element node lists disagree\n",
+			(long long)nskip);
+		return 1;
+	}
 	if (rel > 1e-10) {
 		fprintf(fp_log, "*** the tangential trace is not continuous across faces; "
 			"the edge basis is not curl-conforming\n");

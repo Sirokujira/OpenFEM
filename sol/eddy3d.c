@@ -432,6 +432,7 @@ int solve_eddy3d(FILE *fp_log)
 	}
 	if (sigmax <= 0) {
 		fprintf(fp_log, "*** analysis A requires a conducting material (sigma > 0)\n");
+		edge_free();
 		return 1;
 	}
 	const double delta = sqrt(2 / (omega * MU0 * sigmumax));
@@ -744,6 +745,11 @@ int solve_eddy3d(FILE *fp_log)
 	free(cond);
 	crs_free(&Kr);
 	crs_free(&Ki);
+	// **辺の情報も毎回解放する。** solve() は周波数掃引の点ごとに solve_eddy3d()
+	// を呼び直すので、解放しないと点の数だけ漏れる (実測: 4 点の掃引で
+	// definitely lost 476,520 バイト)。edge_free() はポインタを NULL に戻すので
+	// 次の点で edge_build() をやり直しても安全
+	edge_free();
 
 	return ierr;
 }
