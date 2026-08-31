@@ -1229,23 +1229,25 @@ for pair in "bar_hexprism B_A_re 5.0e-10 mixed hex+prism (A)" \
 done
 # 曲げた格子 (内部節点だけ動かすので外形 = 箱のまま)
 for m in box_hex_warp box_prism_warp box_pyr_warp; do
-	sed -e "s/^mesh = .*/mesh = $m.msh/" -e '/^analysis/i fieldout = 1' \
-	    "$SRC/box_hex.ofe" > "$WORK/vv.ofe"
+	# **sed の "i" は GNU 拡張** (BSD sed は i\ + 改行を要求するので macOS で
+	# 落ちる)。行の挿入は awk で書く
+	awk -v m="$m.msh" '/^mesh = /{print "mesh = " m; next}
+		/^analysis/{print "fieldout = 1"} {print}' "$SRC/box_hex.ofe" > "$WORK/vv.ofe"
 	(cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
 	compare "field volume ($m, warped) [m^3]" "$(vtk vol E_C_port1)" 2.0e-10 1e-12
 done
 # 四面体が混ざる曲げた格子 : ソルバー自身の体積と突き合わせる
 (cd "$WORK" && "$OFE" -n 2 nodal_test_mixed.ofe > /dev/null 2>&1)
 vref=$(awk '/volume/ { for (i = 1; i <= NF; i++) if ($i == "=") { print $(i+1); exit } }' "$WORK/ofe.log")
-sed -e "s/^mesh = .*/mesh = box_mixed_warp.msh/" -e '/^analysis/i fieldout = 1' \
-    "$SRC/box_hex.ofe" > "$WORK/vv.ofe"
+awk -v m="box_mixed_warp.msh" '/^mesh = /{print "mesh = " m; next}
+	/^analysis/{print "fieldout = 1"} {print}' "$SRC/box_hex.ofe" > "$WORK/vv.ofe"
 (cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
 compare "field volume (box_mixed_warp) == the solver's own [m^3]" \
 	"$(vtk vol E_C_port1)" "$vref" 1e-12
 # ピラミッドは**底面の向きで det J の第 1 項が 0 になる**ので、行列式を
 # 1 行で書けていないと 1/3 のセルが 0 になる (実測: 総体積が 2/3 になった)。
 # 六面体・四面体だけでは検出できないので、ピラミッド格子を必ず 1 つ通すこと
-sed -e '/^analysis/i fieldout = 1' "$SRC/box_pyr.ofe" > "$WORK/vv.ofe"
+awk '/^analysis/{print "fieldout = 1"} {print}' "$SRC/box_pyr.ofe" > "$WORK/vv.ofe"
 (cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
 compare "field volume (box_pyr) [m^3]" "$(vtk vol E_C_port1)" 2.0e-10 1e-12
 res=$(awk '/^CELL_TYPES/ { st = "t"; next }
