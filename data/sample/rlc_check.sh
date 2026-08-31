@@ -1205,6 +1205,55 @@ case "$res" in NG*) status=1 ;; esac
 # 根拠のあるしきい値が引けないので数値の恒等式は置かず、種別ごとのセル型と
 # セル数だけを見る。場の値そのものの恒等式は vtkcheck.awk が六面体・角柱の
 # 体積を測れるようになったら (∫J dV = 端子電流の形で) 書ける
+# ---- 場の出力の体積 (vtkcheck.awk のセル型対応) ----
+#
+# vtkcheck.awk は**セル型 (CELL_TYPES) でセルを見分け**、六面体・角柱・
+# ピラミッドの体積を**ソルバーと同じ求積**で出す (等パラメトリック写像の体積は
+# ∫det J であって四面体に割った和ではない)。節点数だけで見分けていた頃は
+# 角柱の 6 節点を 2 次三角形と解釈して面積を足していた (実測: 5.0e-10 のところ
+# 6.0e-06)。
+#
+# 曲げた (warp) 格子でも**外形は変わらない** (内部節点だけ動かすため) ので、
+# 六面体・角柱・ピラミッドの ∫det J の和は箱の体積に厳密に一致する。
+# 四面体が混ざると直線の要素が角を削るので一致しない — そこは**ソルバー自身が
+# 出した体積と突き合わせる** (同じ積分の独立な 2 実装の一致)。
+echo "[vtk volume] cell volumes in the field output (hexahedra / prisms / pyramids)"
+for pair in "bar_hexprism B_A_re 5.0e-10 mixed hex+prism (A)" \
+            "bar_prismtet B_A_re 5.0e-10 mixed prism+tet (A)" \
+            "bar_hex B_A_re 5.0e-10 hexahedra (A)" \
+            "bar_prism B_A_re 5.0e-10 prisms (A)"; do
+	set -- $pair
+	awk '/^analysis/{print "fieldout = 1"} {print}' "$SRC/$1.ofe" > "$WORK/vv.ofe"
+	(cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
+	compare "field volume ($1) [m^3]" "$(vtk vol "$2")" "$3" 1e-12
+done
+# 曲げた格子 (内部節点だけ動かすので外形 = 箱のまま)
+for m in box_hex_warp box_prism_warp box_pyr_warp; do
+	sed -e "s/^mesh = .*/mesh = $m.msh/" -e '/^analysis/i fieldout = 1' \
+	    "$SRC/box_hex.ofe" > "$WORK/vv.ofe"
+	(cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
+	compare "field volume ($m, warped) [m^3]" "$(vtk vol E_C_port1)" 2.0e-10 1e-12
+done
+# 四面体が混ざる曲げた格子 : ソルバー自身の体積と突き合わせる
+(cd "$WORK" && "$OFE" -n 2 nodal_test_mixed.ofe > /dev/null 2>&1)
+vref=$(awk '/volume/ { for (i = 1; i <= NF; i++) if ($i == "=") { print $(i+1); exit } }' "$WORK/ofe.log")
+sed -e "s/^mesh = .*/mesh = box_mixed_warp.msh/" -e '/^analysis/i fieldout = 1' \
+    "$SRC/box_hex.ofe" > "$WORK/vv.ofe"
+(cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
+compare "field volume (box_mixed_warp) == the solver's own [m^3]" \
+	"$(vtk vol E_C_port1)" "$vref" 1e-12
+# ピラミッドは**底面の向きで det J の第 1 項が 0 になる**ので、行列式を
+# 1 行で書けていないと 1/3 のセルが 0 になる (実測: 総体積が 2/3 になった)。
+# 六面体・四面体だけでは検出できないので、ピラミッド格子を必ず 1 つ通すこと
+sed -e '/^analysis/i fieldout = 1' "$SRC/box_pyr.ofe" > "$WORK/vv.ofe"
+(cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
+compare "field volume (box_pyr) [m^3]" "$(vtk vol E_C_port1)" 2.0e-10 1e-12
+res=$(awk '/^CELL_TYPES/ { st = "t"; next }
+	st == "t" && NF == 1 { n[$1]++ }
+	END { printf "%s (%d pyramids)", ((n[14] == 162) ? "OK" : "NG"), n[14] }' "$WORK/ofe_field.vtk")
+echo "  the pyramid case really has VTK_PYRAMID cells : $res"
+case "$res" in NG*) status=1 ;; esac
+
 # 誤検知の対向検査 : 曲面に載せた 2 次格子は**別々の辺**の中点が同じ点に落ちる
 # (実測 coax_p2 で 48 組)。頂点だけを見ているのでこれは弾いてはいけない
 res=$( (cd "$WORK" && "$OFE" -n 2 nodal_test_coax.ofe 2>&1 | grep -c "were not merged") || true)
