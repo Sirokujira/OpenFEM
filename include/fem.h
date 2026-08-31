@@ -194,11 +194,13 @@ EXTERN int NEdge;
 EXTERN int64_t *EdgePtr;		// [NNode+1] 節点 i を始点とする辺の範囲
 EXTERN int32_t *EdgeTo;			// [NEdge] 終点 (昇順)
 EXTERN int32_t *EdgeFrom;		// [NEdge] 始点 (節点番号の小さい方)
-// 要素毎の辺番号と向き。stride は要素あたりの辺数 (四面体 6 / 六面体 12 /
-// 角柱 9)。辺要素は種別が 1 つの格子でだけ使うので stride は格子で 1 つ。
-// 名前は四面体由来だが純六面体・純角柱の格子でも使う
-EXTERN int32_t *TetEdge;		// [nedge*nelem] 要素の辺番号
-EXTERN signed char *TetEdgeSgn;	// [nedge*nelem] 局所の並びと全体の向きの符号
+// 要素毎の辺番号と向き。要素あたりの辺数は種別で違う (四面体 6 / 六面体 12 /
+// 角柱 9) ので、**要素 e の辺は EdgeOff[e] から EdgeOff[e+1] まで**を見る。
+// 種別が 1 つの格子では EdgeOff[e] = e * nedge になり、従来の並びと一致する。
+// 名前は四面体由来だが六面体・角柱・混在格子でも使う
+EXTERN int32_t *TetEdge;		// [EdgeOff[nelem]] 要素の辺番号
+EXTERN signed char *TetEdgeSgn;	// [EdgeOff[nelem]] 局所の並びと全体の向きの符号
+EXTERN int64_t *EdgeOff;		// [nelem+1] 要素毎の辺の開始位置
 
 EXTERN int NTri;				// 三角形数 (電極面の指定に使う)
 EXTERN int32_t *Tri;			// [3*NTri]

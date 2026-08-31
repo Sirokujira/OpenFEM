@@ -400,9 +400,114 @@ static int elem_face_check(void)
 }
 
 
+// node_merge_check() の比較関数 (qsort に渡すので座標へのポインタは静的に持つ)
+static const double *NodeSortX, *NodeSortY, *NodeSortZ;
+
+static int cmp_node_xyz(const void *va, const void *vb)
+{
+	const int32_t a = *(const int32_t *)va;
+	const int32_t b = *(const int32_t *)vb;
+
+	if (NodeSortX[a] != NodeSortX[b]) return ((NodeSortX[a] < NodeSortX[b]) ? -1 : 1);
+	if (NodeSortY[a] != NodeSortY[b]) return ((NodeSortY[a] < NodeSortY[b]) ? -1 : 1);
+	if (NodeSortZ[a] != NodeSortZ[b]) return ((NodeSortZ[a] < NodeSortZ[b]) ? -1 : 1);
+
+	return 0;
+}
+
+
+/*
+**未マージの格子 (同じ座標に別番号の節点がある) を弾く。**
+
+複数の部品を別々に切って貼り合わせた格子で節点をマージし忘れると、界面で
+要素どうしが自由度を共有しなくなり、有限要素空間が「裂けた」ものになる。
+**これは自己検証のどの恒等式にも引っかからない** (実測: 界面の 21 節点を
+複製した格子で、辺要素の (a)〜(d) と接線連続性 (g) がすべて機械精度で通り、
+連結成分が 1 -> 2 に増えたことだけが痕跡として残った。裂けた面はもはや
+「共有面」ではないので接線連続性の検査すら素通りする)。要素毎の量の和で
+書ける恒等式は裂け目を見ないので、格子そのものを見るしかない。
+
+比較は**厳密な等値**で行う (許容値を持ち込まない)。同じ点から複製された節点は
+書き出しの丸めまで一致するので、これで十分に捕まる。
+種別の混在を許すと部品ごとに切る使い方が増えるので、この検査が要る。
+
+**見るのは要素の頂点だけ** (2 次要素の中間節点は除く)。曲面に載せた 2 次格子
+では、**別々の辺**の中点が丸めまで同じ点に落ちることがある (実測: coax_p2 で
+48 組。どれも異なる頂点対の中点で、同じ辺の中点が 2 つある「本物の裂け目」は
+1 組も無かった)。中間節点まで見ると、この正しい格子を弾く誤検知になる。
+裂けた格子は必ず**頂点**を複製するので、頂点だけで検出できる。
+*/
+static int node_merge_check(void)
+{
+	const int n = NNode;
+	if (n < 2) return 0;
+
+	// 要素の頂点 (1 次の節点) だけを対象にする
+	unsigned char *cor = (unsigned char *)malloc((size_t)n * sizeof(unsigned char));
+	memset(cor, 0, (size_t)n * sizeof(unsigned char));
+	for (int e = 0; e < NTet; e++) {
+		for (int l = 0; l < 4; l++) cor[Tet[(e * 4) + l]] = 1;
+	}
+	for (int e = 0; e < NHex; e++) {
+		for (int l = 0; l < 8; l++) cor[Hex[(e * 8) + l]] = 1;
+	}
+	for (int e = 0; e < NPrism; e++) {
+		for (int l = 0; l < 6; l++) cor[Prism[(e * 6) + l]] = 1;
+	}
+	for (int e = 0; e < NPyr; e++) {
+		for (int l = 0; l < 5; l++) cor[Pyr[(e * 5) + l]] = 1;
+	}
+	for (int e = 0; e < NTri; e++) {
+		for (int l = 0; l < 3; l++) cor[Tri[(e * 3) + l]] = 1;
+	}
+	for (int e = 0; e < NQuad; e++) {
+		for (int l = 0; l < 4; l++) cor[Quad[(e * 4) + l]] = 1;
+	}
+
+	int32_t *ord = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+	int nc = 0;
+	for (int i = 0; i < n; i++) {
+		if (cor[i]) ord[nc++] = (int32_t)i;
+	}
+	free(cor);
+	if (nc < 2) {
+		free(ord);
+		return 0;
+	}
+	NodeSortX = Xp;
+	NodeSortY = Yp;
+	NodeSortZ = Zp;
+	qsort(ord, (size_t)nc, sizeof(int32_t), cmp_node_xyz);
+
+	int ndup = 0;
+	int32_t a = -1, b = -1;
+	for (int i = 1; i < nc; i++) {
+		const int32_t p = ord[i - 1], q = ord[i];
+		if ((Xp[p] == Xp[q]) && (Yp[p] == Yp[q]) && (Zp[p] == Zp[q])) {
+			if (!ndup) { a = p; b = q; }
+			ndup++;
+		}
+	}
+	free(ord);
+
+	if (ndup > 0) {
+		printf("*** mesh : %d node(s) share the coordinates of another node "
+			"(for instance %d and %d at %.6e %.6e %.6e); the parts of the mesh "
+			"were not merged, so the elements on the two sides do not share "
+			"degrees of freedom and the finite element space is torn\n",
+			ndup, (int)a + 1, (int)b + 1, Xp[a], Yp[a], Zp[a]);
+		return 1;
+	}
+
+	return 0;
+}
+
+
 // 全要素を読んだあとの整合性検査 (格子の次元と次数)
 static int elem_finish(void)
 {
+	if (node_merge_check()) return 1;
+
 	/*
 	3 次元の要素種別を決める。**混在 (四面体 + 六面体 + 角柱 + ピラミッド) を
 	許す。**

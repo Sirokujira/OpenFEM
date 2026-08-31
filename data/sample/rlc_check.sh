@@ -1084,20 +1084,183 @@ case "$res" in NG*) status=1 ;; esac
 sed -e 's/^analysis = .*/analysis = A/' -e 's/^material = .*/material = 1.0 5.8e7/' \
     -e 's/^solver = .*/frequency = 1e4\nvoltage = 1.0/' "$SRC/box_pyr.ofe" > "$WORK/pyredge.ofe"
 mesh_reject "analysis A on a pyramid mesh" pyredge.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 pyredge.ofe 2>&1 | grep -q "pyramids are not supported"); then
-	echo "  *** it was rejected for a different reason than the element kind" >&2
-	status=1
-fi
-sed -e 's/^analysis = .*/analysis = A/' -e 's/^material = 4.0 0$/material = 1.0 5.8e7/' \
-    -e 's/^solver = .*/frequency = 1e4\nvoltage = 1.0/' "$SRC/box_mixed.ofe" > "$WORK/mixedge.ofe"
-mesh_reject "analysis A on a mixed mesh" mixedge.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 mixedge.ofe 2>&1 | grep -q "mixed element kinds"); then
+if ! (cd "$WORK" && "$OFE" -n 2 pyredge.ofe 2>&1 | grep -q "do not support pyramids"); then
 	echo "  *** it was rejected for a different reason than the element kind" >&2
 	status=1
 fi
 sed -e 's/^analysis = .*/analysis = E/' -e 's/^material = .*/material = 1.0 1e6/' \
     "$SRC/box_hex2.ofe" > "$WORK/h2edge.ofe"
 mesh_reject "analysis E on an order-2 hex mesh" h2edge.ofe
+
+# ---- 辺要素 : 種別の混在した格子 ----
+#
+# 最低次 Nedelec の接線トレースは三角形面では三角形の Whitney 空間、四角形面では
+# 四角形の最低次 Nedelec 空間になり、どちらもその面の辺の自由度だけで決まるので、
+# 面を共有する要素の種別が違っても接線連続性が保たれる。接する面の形が揃う向きに
+# しか割れないので、組み合わせで格子の割り方が変わる:
+#   六面体 + 角柱 : x で分割 (界面は四角形面)
+#   角柱 + 四面体 : z で分割 (界面は三角形面)
+#
+# **エネルギーの恒等式 (b) (c) (c2) は接線連続性を検査できない。** {a + b×r} の
+# 場は要素毎に厳密に補間されるので、隣の要素とトレースが食い違っていても
+# 要素積分の和は合ってしまう。面をまたぐ跳びを直接見る (g) が要る。
+echo "[edge mixed] Nedelec edge elements on meshes that mix element kinds"
+cp "$SRC/edge_mix_hp.ofe" "$SRC/edge_mix_pt.ofe" "$WORK/"
+edge_pass "hexahedra + prisms (quadrilateral interface)" edge_mix_hp.ofe
+# 種別をまたぐ面が本当にあったか (0 面なら検査は素通りしているのと同じ)
+res=$(awk '/tangential continuity/ {
+		for (i = 1; i <= NF; i++) {
+			if ($i == "faces") { n = $(i-2); m = $(i+1); sub(/^\(/, "", m) }
+			if ($i == "=") j = $(i+1)
+		}
+	}
+	END { if (n == "") { printf "NG (no (g) line in the log)"; exit }
+	      if (m + 0 < 1) { printf "NG (no face between different kinds)"; exit }
+	      if (j + 0 > 1e-10) { printf "NG (jump %s)", j; exit }
+	      printf "OK (%s faces, %s between kinds, max jump %s)", n, m, j }' "$WORK/ofe.log")
+echo "  (g) tangential trace across kind-mixed faces : $res"
+case "$res" in NG*) status=1 ;; esac
+edge_pass "prisms + tetrahedra (triangular interface)" edge_mix_pt.ofe
+res=$(awk '/tangential continuity/ {
+		for (i = 1; i <= NF; i++) if ($i == "faces") { m = $(i+1); sub(/^\(/, "", m) }
+	}
+	END { printf "%s (%s faces between different kinds)",
+	             ((m + 0 > 0) ? "OK" : "NG"), (m == "" ? "no" : m) }' "$WORK/ofe.log")
+echo "  (g) the prism-tetrahedron interface is really there : $res"
+case "$res" in NG*) status=1 ;; esac
+# 渦電流 (A) : 混在させても 1 次元厳密解は同じ。純格子と同じ許容で見る
+for pair in "bar_hexprism 0 hexahedra 576 prisms 1152" \
+            "bar_prismtet 3456 tetrahedra 0 prisms 1152"; do
+	set -- $pair
+	m=$1
+	cp "$SRC/$m.ofe" "$WORK/"
+	sed "s/^frequency = .*/frequency = 1e5/" "$SRC/$m.ofe" > "$WORK/bar_mix.ofe"
+	(cd "$WORK" && "$OFE" -n 2 bar_mix.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	compare "R($m, f=1e5) [ohm]" "$(value_of Rf)" "3.24859232e-04" "0.02"
+	compare "L($m, f=1e5) [H]" "$(value_of Lf)" "5.34552067e-10" "0.02"
+	if grep -q "NOT converged" "$WORK/ofe.log"; then
+		echo "  *** A-phi solver did not converge ($m)" >&2
+		status=1
+	fi
+	# **本当に混在した格子で解いたか。** 1 次元解はどの空間でも同じように
+	# 離散化されるので、値だけでは純格子と区別できない (実測: bar_hexprism の
+	# R は純六面体と印字全桁が一致する)。要素数の内訳をログから確かめる
+	if ! grep -q "($2 tet / $4 hex / $6 prism)" "$WORK/ofe.log"; then
+		echo "  *** $m did not solve on a mixed mesh ($2 tet / $4 hex / $6 prism)" >&2
+		status=1
+	fi
+done
+# 弾かれるべき格子
+# (1) z に積んだ六面体 + 角柱 : 四角形面を三角形 2 枚が覆う非適合な界面。
+#     **どのエネルギー恒等式も (g) も素通りする** (裂けた面はもはや共有面では
+#     ないので跳びを比べる相手がいない) ので、位相の検査だけが頼りになる
+sed 's/^mesh = .*/mesh = edge_nonconf.msh/' "$SRC/edge_mix_hp.ofe" > "$WORK/enonconf.ofe"
+mesh_reject "z-stacked hexahedra + prisms (quadrilateral face covered by triangles)" enonconf.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 enonconf.ofe 2>&1 | grep -q "covered by triangular faces"); then
+	echo "  *** it was rejected for a different reason than the non-conforming face" >&2
+	status=1
+fi
+# (2) 未マージの格子 (界面の節点を複製したもの、mkmesh.py -mix 1 -tear 1)。
+#     これも**すべての恒等式を素通りする** (実測: (a)〜(d) と (g) がすべて
+#     機械精度で通り、連結成分が 2 になったことだけが痕跡だった) ので、
+#     格子そのものを見るしかない
+sed 's/^mesh = .*/mesh = edge_torn.msh/' "$SRC/edge_mix_hp.ofe" > "$WORK/etorn.ofe"
+mesh_reject "a torn (unmerged) mesh with duplicated interface nodes" etorn.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 etorn.ofe 2>&1 | grep -q "were not merged"); then
+	echo "  *** it was rejected for a different reason than the duplicated nodes" >&2
+	status=1
+fi
+# 場の出力 (B / J) を混在格子でも出す。**セル毎のベクトルを作るループは
+# 種別ごとに式が違う** (四面体は Whitney の閉形式、六面体・角柱は Piola 変換した
+# 要素中心の基底) ので、混在格子ではその分岐を両方通る。
+# セル型と、セル数が要素数と種別ごとに合っていることを見る
+# (vtkcheck.awk は四面体と三角形しか測れないので体積の恒等式は使えない —
+#  六面体・角柱のセルは節点数で三角形と区別が付かず、型を読む必要がある)
+awk '/^analysis = A/{print "fieldout = 1"} {print}' "$SRC/bar_hexprism.ofe" > "$WORK/fldmix.ofe"
+(cd "$WORK" && "$OFE" -n 2 fldmix.ofe > /dev/null && "$OFE_POST" > /dev/null)
+res=$(awk '
+	NF == 0            { next }
+	/^CELL_TYPES/      { st = "t"; next }
+	st == "t" && NF == 1 { n[$1]++ }
+	END { printf "%s (%d hexahedra, %d wedges)",
+	             ((n[12] == 576) && (n[13] == 1152)) ? "OK" : "NG", n[12], n[13] }' "$WORK/ofe_field.vtk")
+echo "  VTK cells are 576 HEXAHEDRON + 1152 WEDGE : $res"
+case "$res" in NG*) status=1 ;; esac
+# **四面体を含む混在格子でも場を出す。** bar_hexprism は四面体が 0 個なので、
+# 角柱の節点勾配を種別ごとの添字 (e - NTet - NHex) で引く経路が NTet > 0 で
+# 一度も実行されない。bar_prismtet はそこを通る (四面体 3456 + 角柱 1152)
+awk '/^analysis = A/{print "fieldout = 1"} {print}' "$SRC/bar_prismtet.ofe" > "$WORK/fldmix2.ofe"
+(cd "$WORK" && "$OFE" -n 2 fldmix2.ofe > /dev/null && "$OFE_POST" > /dev/null)
+res=$(awk '
+	NF == 0            { next }
+	/^CELL_TYPES/      { st = "t"; next }
+	st == "t" && NF == 1 { n[$1]++ }
+	END { printf "%s (%d tetrahedra, %d wedges)",
+	             ((n[10] == 3456) && (n[13] == 1152)) ? "OK" : "NG", n[10], n[13] }' "$WORK/ofe_field.vtk")
+echo "  VTK cells are 3456 TETRA + 1152 WEDGE : $res"
+case "$res" in NG*) status=1 ;; esac
+# **向きの恒等式はこの形状では書けない。** 棒の電流は x 方向なので B は y-z 面内を
+# 回り、y 端の近くでは B_z が物理的に 0 でない (実測: 符号つき平均で
+# |Bx|/|By| = 9.1e-3、|Bz|/|By| = 4.0e-3、最大値では 6.4e-2 / 2.1e-2)。
+# 根拠のあるしきい値が引けないので数値の恒等式は置かず、種別ごとのセル型と
+# セル数だけを見る。場の値そのものの恒等式は vtkcheck.awk が六面体・角柱の
+# 体積を測れるようになったら (∫J dV = 端子電流の形で) 書ける
+# ---- 場の出力の体積 (vtkcheck.awk のセル型対応) ----
+#
+# vtkcheck.awk は**セル型 (CELL_TYPES) でセルを見分け**、六面体・角柱・
+# ピラミッドの体積を**ソルバーと同じ求積**で出す (等パラメトリック写像の体積は
+# ∫det J であって四面体に割った和ではない)。節点数だけで見分けていた頃は
+# 角柱の 6 節点を 2 次三角形と解釈して面積を足していた (実測: 5.0e-10 のところ
+# 6.0e-06)。
+#
+# 曲げた (warp) 格子でも**外形は変わらない** (内部節点だけ動かすため) ので、
+# 六面体・角柱・ピラミッドの ∫det J の和は箱の体積に厳密に一致する。
+# 四面体が混ざると直線の要素が角を削るので一致しない — そこは**ソルバー自身が
+# 出した体積と突き合わせる** (同じ積分の独立な 2 実装の一致)。
+echo "[vtk volume] cell volumes in the field output (hexahedra / prisms / pyramids)"
+for pair in "bar_hexprism B_A_re 5.0e-10 mixed hex+prism (A)" \
+            "bar_prismtet B_A_re 5.0e-10 mixed prism+tet (A)" \
+            "bar_hex B_A_re 5.0e-10 hexahedra (A)" \
+            "bar_prism B_A_re 5.0e-10 prisms (A)"; do
+	set -- $pair
+	awk '/^analysis/{print "fieldout = 1"} {print}' "$SRC/$1.ofe" > "$WORK/vv.ofe"
+	(cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
+	compare "field volume ($1) [m^3]" "$(vtk vol "$2")" "$3" 1e-12
+done
+# 曲げた格子 (内部節点だけ動かすので外形 = 箱のまま)
+for m in box_hex_warp box_prism_warp box_pyr_warp; do
+	# **sed の "i" は GNU 拡張** (BSD sed は i\ + 改行を要求するので macOS で
+	# 落ちる)。行の挿入は awk で書く
+	awk -v m="$m.msh" '/^mesh = /{print "mesh = " m; next}
+		/^analysis/{print "fieldout = 1"} {print}' "$SRC/box_hex.ofe" > "$WORK/vv.ofe"
+	(cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
+	compare "field volume ($m, warped) [m^3]" "$(vtk vol E_C_port1)" 2.0e-10 1e-12
+done
+# 四面体が混ざる曲げた格子 : ソルバー自身の体積と突き合わせる
+(cd "$WORK" && "$OFE" -n 2 nodal_test_mixed.ofe > /dev/null 2>&1)
+vref=$(awk '/volume/ { for (i = 1; i <= NF; i++) if ($i == "=") { print $(i+1); exit } }' "$WORK/ofe.log")
+awk -v m="box_mixed_warp.msh" '/^mesh = /{print "mesh = " m; next}
+	/^analysis/{print "fieldout = 1"} {print}' "$SRC/box_hex.ofe" > "$WORK/vv.ofe"
+(cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
+compare "field volume (box_mixed_warp) == the solver's own [m^3]" \
+	"$(vtk vol E_C_port1)" "$vref" 1e-12
+# ピラミッドは**底面の向きで det J の第 1 項が 0 になる**ので、行列式を
+# 1 行で書けていないと 1/3 のセルが 0 になる (実測: 総体積が 2/3 になった)。
+# 六面体・四面体だけでは検出できないので、ピラミッド格子を必ず 1 つ通すこと
+awk '/^analysis/{print "fieldout = 1"} {print}' "$SRC/box_pyr.ofe" > "$WORK/vv.ofe"
+(cd "$WORK" && "$OFE" -n 2 vv.ofe > /dev/null 2>&1)
+compare "field volume (box_pyr) [m^3]" "$(vtk vol E_C_port1)" 2.0e-10 1e-12
+res=$(awk '/^CELL_TYPES/ { st = "t"; next }
+	st == "t" && NF == 1 { n[$1]++ }
+	END { printf "%s (%d pyramids)", ((n[14] == 162) ? "OK" : "NG"), n[14] }' "$WORK/ofe_field.vtk")
+echo "  the pyramid case really has VTK_PYRAMID cells : $res"
+case "$res" in NG*) status=1 ;; esac
+
+# 誤検知の対向検査 : 曲面に載せた 2 次格子は**別々の辺**の中点が同じ点に落ちる
+# (実測 coax_p2 で 48 組)。頂点だけを見ているのでこれは弾いてはいけない
+res=$( (cd "$WORK" && "$OFE" -n 2 nodal_test_coax.ofe 2>&1 | grep -c "were not merged") || true)
+echo "  a curved order-2 mesh with coincident mid-side nodes : $([ "$res" = 0 ] && echo "accepted -> OK" || echo "NG (false positive)")"
+[ "$res" = 0 ] || status=1
 if ! (cd "$WORK" && "$OFE" -n 2 h2edge.ofe 2>&1 | grep -q "first-order mesh"); then
 	echo "  *** it was rejected for a different reason than the order" >&2
 	status=1

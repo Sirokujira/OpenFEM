@@ -1004,7 +1004,7 @@ def make_bar(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, grade=1.0):
     return nodes, tets, tris
 
 
-def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0):
+def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0, mix=0, tear=0):
     """導体棒の**六面体** (prism=1 なら**角柱**) 版 (3 次元渦電流 A-φ の検証)
 
     make_bar と同じ形状・同じ物理タグ。1 次元厳密解も同じなので、
@@ -1012,7 +1012,43 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0):
     角柱は各セルを対角線で 2 つに割って z に押し出す
     (三角形は (x,y) 面内、押し出しは z — A_t = 0 の面と平行な向き)。
 
-    物理タグ : 1 = 体積、10 = x=0 面 (電極 0)、11 = x=lx 面 (電極 1)、
+    **mix で種別を混在させる** (辺要素の混在格子の検証)。接する面の形が
+    揃う向きにしか割れないので、組み合わせで分割の向きが変わる:
+
+      mix = 1 : 六面体 (x < lx/2) + 角柱 (x > lx/2) — 界面は**四角形面**。
+                z 方向に積むと六面体の四角形面に角柱の三角形面 2 枚が当たって
+                非適合になる (読み込み時の位相検査で弾かれる) ので x で割る。
+      mix = 2 : 角柱 (z < lz/2) + 四面体 (z > lz/2) — 界面は**三角形面**。
+                四面体は角柱を 3 つに割ったものなので、側面の四角形は
+                三角形 2 枚に割れる。x で割ると角柱の四角形面に当たって
+                非適合になるので z で割る。
+      mix = 3 : **わざと非適合にした**六面体 (z < lz/2) + 角柱 (z > lz/2)。
+                界面で六面体の四角形面に角柱の三角形面 2 枚が当たるので
+                有限要素空間が H(curl) に入らない。読み込み時の位相検査
+                (elem_face_check) で弾かれることの検証に使う。
+                **この非適合は自己検証のどの恒等式でも検出できない**
+                (実測: elem_face_check を無効にすると (a)〜(g) が全部通った。
+                四角形面と三角形面は節点の集合が違うのでそもそも「共有面」に
+                ならず、接線連続性の検査は比べる相手を見つけられない)。
+
+    mix = 1 / 2 は解が 1 次元のままなので**閉形式は純格子と同じ**で、混在
+    させたことによる誤差だけを見られる。
+
+    **tear = 1 で界面の節点を複製する** (mix = 1 と併せて使う)。部品を別々に
+    切って節点をマージし忘れた格子を模したもので、界面の両側が自由度を共有
+    しなくなる。**これも自己検証のどの恒等式にも引っかからない** (実測:
+    (a)〜(d) と (g) がすべて機械精度で通り、連結成分が 1 -> 2 に増えたことだけが
+    痕跡だった) ので、節点の重複を直接見る検査 (node_merge_check) が生きて
+    いることの検証に使う。
+
+    **混在させたときは種別ごとに物理タグを分ける** (1 / 2)。同じタグにすると
+    要素番号から材料を引く経路 (種別ごとに配列が別で添字のずれ方も違う) が
+    単一材料になり、添字を取り違えても答えが変わらない。渦電流の検証では
+    両方のタグに同じ導体材料を当てて 1 次元の閉形式を残し、辺要素の自己検証
+    (analysis = E) では別々の材料を当てて添字を効かせる。
+
+    物理タグ : 1 = 体積 (混在では 1 つ目の種別)、2 = 混在の 2 つ目の種別、
+               10 = x=0 面 (電極 0)、11 = x=lx 面 (電極 1)、
                20 = A_t = 0 の面 (z=0, z=lz, x=0, x=lx)
     """
     nodes = []
@@ -1023,39 +1059,60 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0):
                 idx[(i, j, k)] = len(nodes)
                 nodes.append((lx * i / nx, ly * j / ny, lz * k / nz))
 
+    imix = nx // 2                      # mix = 1 : ここより右が角柱
+    kmix = nz // 2                      # mix = 2 : ここより上が四面体
+
+    def cell_is_hex(i, k):
+        if mix == 1: return i < imix
+        if mix == 2: return False
+        if mix == 3: return k < kmix
+        return not prism
+
     cells = []
     tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
     for i in range(nx):
         for j in range(ny):
             for k in range(nz):
-                if prism:
-                    # (x,y) の四角形を対角線で割り、z に押し出す
-                    for tri in tris:
-                        b = [idx[(i + a, j + c, k)] for a, c in tri]
-                        t = [idx[(i + a, j + c, k + 1)] for a, c in tri]
-                        cells.append((1, 6, b + t))
-                else:
+                # 混在では 2 つ目の種別にタグ 2 を付ける
+                tag2 = (2 if ((mix == 1) and (i >= imix))
+                          or ((mix in (2, 3)) and (k >= kmix)) else 1)
+                if cell_is_hex(i, k):
                     b = [idx[(i, j, k)], idx[(i + 1, j, k)],
                          idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)]]
                     t = [idx[(i, j, k + 1)], idx[(i + 1, j, k + 1)],
                          idx[(i + 1, j + 1, k + 1)], idx[(i, j + 1, k + 1)]]
-                    cells.append((1, 5, b + t))
+                    cells.append((tag2, 5, b + t))
+                else:
+                    # (x,y) の四角形を対角線で割り、z に押し出す
+                    for tri in tris:
+                        b = [idx[(i + a, j + c, k)] for a, c in tri]
+                        t = [idx[(i + a, j + c, k + 1)] for a, c in tri]
+                        if (mix == 2) and (k >= kmix):
+                            # 角柱を 3 四面体に割る (面が三角形で揃うので適合)
+                            q = b + t
+                            for w in ((0, 1, 2, 5), (0, 1, 5, 4), (0, 4, 5, 3)):
+                                cells.append((tag2, 4, [q[w[0]], q[w[1]], q[w[2]], q[w[3]]]))
+                        else:
+                            cells.append((tag2, 6, b + t))
 
-    def bquad(a, b, c, d, tag):
-        if prism:
-            # 角柱の z 面は三角形 2 枚 (対角線は体積側と同じ向き)、側面は四角形
+    def bquad(a, b, c, d, tag, hexcell):
+        if hexcell:
+            cells.append((tag, 3, [a, b, c, d]))
+        else:
+            # 角柱・四面体の z 面は三角形 2 枚 (対角線は体積側と同じ向き)
             cells.append((tag, 2, [a, b, c]))
             cells.append((tag, 2, [a, c, d]))
-        else:
-            cells.append((tag, 3, [a, b, c, d]))
 
-    # z = 0 と z = lz : A_t = 0 (角柱ではこの面が三角形になる)
+    # z = 0 と z = lz : A_t = 0 (角柱・四面体ではこの面が三角形になる)
     for i in range(nx):
         for j in range(ny):
             for k in (0, nz):
                 bquad(idx[(i, j, k)], idx[(i + 1, j, k)],
-                      idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)], 20)
-    # x = 0 (電極 0) と x = lx (電極 1) : 電極かつ A_t = 0 (常に四角形)
+                      idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)], 20,
+                      cell_is_hex(i, (0 if k == 0 else nz - 1)))
+    # x = 0 (電極 0) と x = lx (電極 1) : 電極かつ A_t = 0
+    # (mix = 2 の四面体領域では側面の四角形が三角形 2 枚に割れるので合わせる。
+    #  ずれると四角形面と三角形面が同じ位置に重なり、位相検査で弾かれる)
     for j in range(ny):
         for k in range(nz):
             for i, tag in ((0, 10), (nx, 11)):
@@ -1063,8 +1120,28 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0):
                 b = idx[(i, j + 1, k)]
                 c = idx[(i, j + 1, k + 1)]
                 d = idx[(i, j, k + 1)]
-                cells.append((tag, 3, [a, b, c, d]))
-                cells.append((20, 3, [a, b, c, d]))
+                if (mix == 2) and (k >= kmix):
+                    # 体積側の四面体は対角線 a-c で割れている
+                    for tg in (tag, 20):
+                        cells.append((tg, 2, [a, b, c]))
+                        cells.append((tg, 2, [a, c, d]))
+                else:
+                    cells.append((tag, 3, [a, b, c, d]))
+                    cells.append((20, 3, [a, b, c, d]))
+
+    if tear:
+        # 界面 (x = lx * imix / nx) の節点を複製し、+x 側の要素だけ複製節点を
+        # 見るようにする (部品ごとに切って節点をマージし忘れた格子)
+        xmid = lx * imix / nx
+        seam = [nid for nid, p in enumerate(nodes) if p[0] == xmid]
+        renum = {nid: len(nodes) + i for i, nid in enumerate(seam)}
+        nodes = nodes + [nodes[nid] for nid in seam]
+        torn = []
+        for tag, et, ids in cells:
+            if max(nodes[q][0] for q in ids) > xmid:
+                ids = [renum.get(q, q) for q in ids]
+            torn.append((tag, et, ids))
+        cells = torn
 
     return nodes, cells
 
