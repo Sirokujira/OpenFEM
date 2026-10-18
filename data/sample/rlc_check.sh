@@ -2102,6 +2102,135 @@ else
 	status=1
 fi
 
+# ---- 電気-熱連成 (thermal) ----
+#
+# 電流が一様な棒では熱の式が T について線形になり、閉形式が残る
+# (data/sample/thermal_bar.ofe のコメント参照):
+#   R = (ρ_s L / A) tan(mL/2) / (mL/2),  T_max = T_s + (1/α')(1/cos(mL/2) - 1)
+# α < 0 では tanh / cosh、α = 0 では放物線。mL = π で定常解が無くなる (熱暴走)。
+echo "[thermal] electro-thermal coupling : a bar cooled at both ends (closed form)"
+th_r() { awk '/^  R = / { print $3; exit }' "$WORK/ofe.log"; }
+th_t() { awk '/^  T_max = / { print $3; exit }' "$WORK/ofe.log"; }
+# th_exact <I> <alpha> -> "R T_max" (thermal_bar.ofe の形状・材料)
+th_exact() {
+	awk -v I="$1" -v a="$2" 'BEGIN {
+		r0 = 1e-6; k = 10; L = 0.01; A = 1e-6; T0 = 0; Ts = 20
+		rs = r0 * (1 + a * (Ts - T0))
+		J = I / A
+		if (a == 0) { printf "%.12e %.12e", rs * L / A, Ts + J * J * rs * L * L / (8 * k); exit }
+		ap = a / (1 + a * (Ts - T0))
+		m2 = J * J * r0 * a / k
+		if (m2 > 0) { x = sqrt(m2) * L / 2; t = sin(x) / cos(x); c = cos(x) }
+		else { x = sqrt(-m2) * L / 2; ex = exp(x); t = (ex - 1 / ex) / (ex + 1 / ex); c = (ex + 1 / ex) / 2 }
+		printf "%.12e %.12e", rs * L / A * t / x, Ts + (1 / ap) * (1 / c - 1) }'
+}
+# 発熱の恒等式 : I^2 R (端子) = Σ f (場の積分) = ヒートシンクへ出ていく熱
+th_energy() {	# th_energy <ラベル>
+	res=$(awk '/joule power/ {
+		for (i = 1; i <= NF; i++) {
+			if ($i == "R") a = $(i+2)
+			if ($i == "integral") b = $(i+2)
+			if ($i == "sinks") c = $(i+2)
+		}
+	}
+	END { if (a == "") { printf "NG (no joule line)"; exit }
+	      d1 = (b - a) / a; if (d1 < 0) d1 = -d1
+	      d2 = (c - a) / a; if (d2 < 0) d2 = -d2
+	      printf "%s (field %.1e, sinks %.1e)", ((d1 < 1e-9) && (d2 < 1e-9)) ? "OK" : "NG", d1, d2 }' "$WORK/ofe.log")
+	echo "  $1 : I^2 R = field integral = heat to sinks : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+th_run() {	# th_run <ofe> : 実行して非 0 なら NG
+	if ! (cd "$WORK" && "$OFE" -n 2 "$1" > /dev/null 2>&1); then
+		echo "  $1 : the run failed -> NG" >&2
+		status=1
+	fi
+}
+cp "$SRC/thermal_bar.ofe" "$SRC/thermal_neck.ofe" "$WORK/"
+# (1) 閉形式 (I = 7.5 A, mL = 1.5)。許容 0.1% の根拠 : 要素内で σ を一定にするので
+#     離散化誤差は h² で、40 分割で R -0.018% / T_max -0.025% (実測)。
+#     次の (2) で誤差の次数そのものを見るので、許容を緩めても退行は隠れない
+th_run thermal_bar.ofe
+set -- $(th_exact 7.5 4e-3)
+compare "R(I = 7.5 A, mL = 1.5) [ohm]" "$(th_r)" "$1" 0.001
+compare "T_max(I = 7.5 A) [degC]" "$(th_t)" "$2" 0.001
+th_energy "thermal_bar"
+r40=$(th_r); rex=$1
+# (2) 誤差の次数 : 20 分割と 40 分割の誤差比が 4 (h²)。要素の温度を 8 節点の平均で
+#     なく 1 節点で取るような誤りは h の 1 次になって比が 2 に落ちる
+awk '/^xmesh/{print "xmesh = 0 20 0.01"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thb20.ofe"
+th_run thb20.ofe
+r20=$(th_r)
+res=$(awk -v a="$r20" -v b="$r40" -v e="$rex" 'BEGIN {
+	e1 = (a - e) / e; if (e1 < 0) e1 = -e1
+	e2 = (b - e) / e; if (e2 < 0) e2 = -e2
+	q = (e2 > 0) ? e1 / e2 : 0
+	printf "%s (err %.2e -> %.2e, ratio %.3f)", ((q > 3.8) && (q < 4.2)) ? "OK" : "NG", e1, e2, q }')
+echo "  second-order convergence of R (20 -> 40 cells) : $res"
+case "$res" in NG*) status=1 ;; esac
+# (3) α = 0 : σ が温度に依らないので R は冷えた棒の値に厳密に一致し、一様断面の
+#     棒の 1 次要素解は節点で厳密 (定数の発熱源の 1 次元 Poisson) なので
+#     T_max も放物線の頂点に全桁一致する
+awk '/^tempco/{print "tempco = 2 0 0"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/tha0.ofe"
+th_run tha0.ofe
+set -- $(th_exact 7.5 0)
+compare "R(alpha = 0) == the uncoupled value [ohm]" "$(th_r)" "$1" 1e-10
+compare "T_max(alpha = 0) == parabola, nodally exact [degC]" "$(th_t)" "$2" 1e-10
+# (4) α < 0 (NTC) : tanh / cosh の枝
+awk '/^tempco/{print "tempco = 2 -4e-3 0"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thntc.ofe"
+th_run thntc.ofe
+set -- $(th_exact 7.5 -4e-3)
+compare "R(alpha < 0, NTC) [ohm]" "$(th_r)" "$1" 0.001
+compare "T_max(alpha < 0, NTC) [degC]" "$(th_t)" "$2" 0.001
+# (5) 熱暴走の境目 (臨界電流 15.708 A, mL = π) の両側。
+#     手前 (mL = 2.9) は収束して閉形式に合う。臨界に近いほど解が敏感になる
+#     (tan の極) ので許容は 1% (実測 -0.53%)。Picard 反復の収縮率はほぼ
+#     (mL/π)² なので、ここでは 130 回程度かかる
+awk '/^thermal/{print "thermal = 14.5"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thnear.ofe"
+th_run thnear.ofe
+set -- $(th_exact 14.5 4e-3)
+compare "R(I = 14.5 A, mL = 2.9, near runaway) [ohm]" "$(th_r)" "$1" 0.01
+#     向こう側 (mL = 3.3) は定常解が無いので、黙って値を出さずに弾くこと
+awk '/^thermal/{print "thermal = 16.5"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thrun.ofe"
+mesh_reject "I = 16.5 A (mL = 3.3 > pi, no steady state)" thrun.ofe
+if ! grep -q "thermal runaway" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than thermal runaway" >&2
+	status=1
+fi
+# (6) 首のある導体 : ∇φ が要素の中で変わるので、発熱の積分則を検査できる
+#     (1 次元の棒では要素中心の 1 点則でも厳密に通ってしまう)
+th_run thermal_neck.ofe
+th_energy "thermal_neck (current crowding)"
+#     場の出力の温度の最大 = ログの T_max (VTK は %.9e、ログは %.10e)
+tvtk=$(awk '/^SCALARS T / { f = 1; next } f && /^LOOKUP/ { next }
+	f && (NF == 1) { if (($1 + 0) > m) m = $1 + 0; next } f { f = 0 }
+	END { printf "%.9e", m }' "$WORK/ofe_field.vtk")
+compare "max of the T field == T_max in the log [degC]" "$tvtk" "$(th_t)" 1e-8
+# (7) 弾くべき入力 (理由まで grep する)
+th_reject() {	# th_reject <ラベル> <ofe> <理由の文字列>
+	mesh_reject "$1" "$2"
+	if ! (cd "$WORK" && "$OFE" -n 2 "$2" 2>&1 | grep -q "$3"); then
+		echo "  *** it was rejected for a different reason than: $3" >&2
+		status=1
+	fi
+}
+awk '/^analysis/{print "analysis = C"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thx_c.ofe"
+th_reject "thermal with analysis C" thx_c.ofe "analysis = R alone"
+awk '/^conductor = 1/{print; print "conductor = 2 1 0.005 0.005 0 1e-3 0 1e-3"; next} {print}' \
+    "$SRC/thermal_bar.ofe" > "$WORK/thx_2p.ofe"
+th_reject "thermal with two ports" thx_2p.ofe "exactly one port"
+awk '!/^heatsink/' "$SRC/thermal_bar.ofe" > "$WORK/thx_nosink.ofe"
+th_reject "thermal without a heat sink" thx_nosink.ofe "at least one heatsink"
+awk '!/^kthermal/' "$SRC/thermal_bar.ofe" > "$WORK/thx_nok.ofe"
+th_reject "a conductor without kthermal" thx_nok.ofe "no thermal conductivity"
+awk '/^thermal/{print "frequency = 1e3"} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thx_freq.ofe"
+th_reject "thermal with frequency" thx_freq.ofe "DC coupling"
+awk '/^heatsink = 1/{print "heatsink = 3 20"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thx_badsink.ofe"
+th_reject "heatsink on a conductor that does not exist" thx_badsink.ofe "does not exist"
+awk '/^analysis/{print "kthermal = 2 10"; print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next}
+	{print}' "$SRC/box_tet.ofe" > "$WORK/thx_tet.ofe"
+th_reject "thermal on an unstructured mesh" thx_tet.ofe "structured grid only"
+
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
 # 警告が (a) 罠のケースで必ず出て (b) 正しいケースでは 1 件も出ないことを両方見る
@@ -2132,13 +2261,17 @@ lint_expect "conductortempco + analysis=A" lint_ctempco_a.ofe yes
 lint_expect "mur + analysis=C"             lint_mur_c.ofe     yes
 lint_expect "material sigma + analysis=C"  lint_sigma_c.ofe   yes
 lint_expect "analysis=L alone"             lint_l_only.ofe    yes
+awk '!/^thermal/' "$SRC/thermal_bar.ofe" | awk '!/^heatsink/' > "$WORK/lint_kth.ofe"
+awk '!/^thermal/' "$SRC/thermal_bar.ofe" | awk '!/^kthermal/' > "$WORK/lint_sink.ofe"
+lint_expect "kthermal without thermal"     lint_kth.ofe       yes
+lint_expect "heatsink without thermal"     lint_sink.ofe      yes
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
-         box_tet_41 plate2d_41 coupled_microstrip; do
+         box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

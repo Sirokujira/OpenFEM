@@ -129,6 +129,8 @@ void element_matrix(double, double, double, const double [6], double [8][8]);
 int tensor6_inverse(const double [6], double [6]);
 void assemble(crs_t *, int);
 void assemble_nu(crs_t *, const double *);
+void assemble_cell(crs_t *, const double *);
+void joule_load(const double *, const double *, double *);
 void assemble_mass(crs_t *);
 double bh_nu(const material_t *, int, double);
 void assemble_newton(crs_t *, const double *, double *);
@@ -148,6 +150,11 @@ int solver_direct_c(const crs_t *, const crs_t *, double,
 
 // solve.c
 int solve(FILE *);
+int solve_port(const crs_t *, const unsigned char *, int, double *, double *,
+	double *, double *, FILE *, const char *);
+
+// thermal.c
+int solve_thermal(FILE *, double *);
 
 // mpiwrap.c (WITH_MPI=OFF ではスタブ。mpi.h はこのモジュールの外に出さない)
 int mpi_init(int *, char ***);

@@ -128,6 +128,8 @@ typedef struct {
 	double epstempco, epstemp0;
 	double mutempco,  mutemp0;
 	double bhtempco,  bhtemp0;
+	// 熱伝導率 [W/(m K)] (熱連成 thermal で使う。0 : 熱を通さない)
+	double kth;
 	// B-H 曲線 (軸毎)。bhaniso = 0 なら軸 0 の曲線を |B| に対して等方的に使う
 	int    bhaniso;				// 1 : 軸毎に別の曲線 (直交異方性)
 	int    nbh[3];				// 各軸の点数 (0 : 線形、mu6 を使う)
@@ -308,6 +310,15 @@ EXTERN double Volt;				// 励振電圧 [V]
 EXTERN double Freq;				// 周波数 [Hz] (tanδ による誘電損の計算に使う、0 = 無効)
 EXTERN double Curr;				// 静磁場解析の励振電流 [A]
 EXTERN double Temperature;		// 動作温度 [degC] (tempco と併せて σ を補正する)
+
+// 電気-熱連成 (thermal)。定常電流界 (R) の Joule 発熱で温度分布を解き、
+// σ(T) を要素ごとに更新して R が収束するまで繰り返す
+EXTERN int ThermalOn;			// 1 : 熱連成を行う
+EXTERN double ThermalCurrent;	// 駆動電流 [A]
+EXTERN int ThermalMaxIter;		// 連成反復の上限
+EXTERN double ThermalTol;		// 連成反復の収束判定 (R と T_max の相対変化)
+EXTERN int HeatSinkOn[MAXPORT];	// 導体ごと : 1 なら温度を固定する (ヒートシンク)
+EXTERN double HeatSinkT[MAXPORT];	// ヒートシンクの温度 [degC]
 
 // 周波数掃引 (frequencysweep)。各点で分散材料を展開し直して解き直す
 EXTERN int NFreqSweep;
