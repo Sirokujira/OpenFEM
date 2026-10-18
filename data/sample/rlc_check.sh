@@ -2111,17 +2111,20 @@ fi
 echo "[thermal] electro-thermal coupling : a bar cooled at both ends (closed form)"
 th_r() { awk '/^  R = / { print $3; exit }' "$WORK/ofe.log"; }
 th_t() { awk '/^  T_max = / { print $3; exit }' "$WORK/ofe.log"; }
-# th_exact <I> <alpha> -> "R T_max" (thermal_bar.ofe の形状・材料)
+# th_exact <I> <alpha> [one] -> "R T_max" (thermal_bar.ofe の形状・材料)
+#   one を付けると片側 (x = 0) だけヒートシンクで反対側は断熱。長さ 2L の両側
+#   ヒートシンクの棒の半分と同じなので、式の mL/2 が mL になる (熱暴走は mL = π/2)
 th_exact() {
-	awk -v I="$1" -v a="$2" 'BEGIN {
+	awk -v I="$1" -v a="$2" -v one="$3" 'BEGIN {
 		r0 = 1e-6; k = 10; L = 0.01; A = 1e-6; T0 = 0; Ts = 20
 		rs = r0 * (1 + a * (Ts - T0))
 		J = I / A
-		if (a == 0) { printf "%.12e %.12e", rs * L / A, Ts + J * J * rs * L * L / (8 * k); exit }
+		h = ((one == "one") ? L : L / 2)
+		if (a == 0) { printf "%.12e %.12e", rs * L / A, Ts + J * J * rs * h * h / (2 * k); exit }
 		ap = a / (1 + a * (Ts - T0))
 		m2 = J * J * r0 * a / k
-		if (m2 > 0) { x = sqrt(m2) * L / 2; t = sin(x) / cos(x); c = cos(x) }
-		else { x = sqrt(-m2) * L / 2; ex = exp(x); t = (ex - 1 / ex) / (ex + 1 / ex); c = (ex + 1 / ex) / 2 }
+		if (m2 > 0) { x = sqrt(m2) * h; t = sin(x) / cos(x); c = cos(x) }
+		else { x = sqrt(-m2) * h; ex = exp(x); t = (ex - 1 / ex) / (ex + 1 / ex); c = (ex + 1 / ex) / 2 }
 		printf "%.12e %.12e", rs * L / A * t / x, Ts + (1 / ap) * (1 / c - 1) }'
 }
 # 発熱の恒等式 : I^2 R (端子) = Σ f (場の積分) = ヒートシンクへ出ていく熱
@@ -2167,6 +2170,31 @@ res=$(awk -v a="$r20" -v b="$r40" -v e="$rex" 'BEGIN {
 	q = (e2 > 0) ? e1 / e2 : 0
 	printf "%s (err %.2e -> %.2e, ratio %.3f)", ((q > 3.8) && (q < 4.2)) ? "OK" : "NG", e1, e2, q }')
 echo "  second-order convergence of R (20 -> 40 cells) : $res"
+case "$res" in NG*) status=1 ;; esac
+# (2b) 片側だけヒートシンク (反対側は断熱)。**両側の棒は左右対称なので、要素の
+#     温度を 8 節点の平均でなく 1 節点で取る誤り (評価点が h/2 ずれる) が
+#     左半分と右半分で逆符号の 1 次誤差になって打ち消し、h² のまま通ってしまう**
+#     (実測: 両側の棒では誤差比 4.0 のまま)。温度が単調な片側の棒では打ち消さず、
+#     1 次に落ちる (実測: 誤差比 2.0、40 分割で -0.44%)
+th_one() {	# th_one <nx> : 片側ヒートシンク、I = 3.75 A (mL = 0.75 < π/2)
+	awk -v nx="$1" '/^xmesh/{print "xmesh = 0 " nx " 0.01"; next}
+		/^heatsink = 1/{next} /^thermal/{print "thermal = 3.75"; next} {print}' \
+		"$SRC/thermal_bar.ofe" > "$WORK/thone$1.ofe"
+	th_run "thone$1.ofe"
+}
+th_one 40
+set -- $(th_exact 3.75 4e-3 one)
+compare "R(one-sided heat sink, mL = 0.75) [ohm]" "$(th_r)" "$1" 0.001
+compare "T_max(one-sided heat sink) [degC]" "$(th_t)" "$2" 0.001
+r40=$(th_r); rex=$1
+th_one 20
+r20=$(th_r)
+res=$(awk -v a="$r20" -v b="$r40" -v e="$rex" 'BEGIN {
+	e1 = (a - e) / e; if (e1 < 0) e1 = -e1
+	e2 = (b - e) / e; if (e2 < 0) e2 = -e2
+	q = (e2 > 0) ? e1 / e2 : 0
+	printf "%s (err %.2e -> %.2e, ratio %.3f)", ((q > 3.8) && (q < 4.2)) ? "OK" : "NG", e1, e2, q }')
+echo "  second-order convergence, one-sided (20 -> 40 cells) : $res"
 case "$res" in NG*) status=1 ;; esac
 # (3) α = 0 : σ が温度に依らないので R は冷えた棒の値に厳密に一致し、一様断面の
 #     棒の 1 次要素解は節点で厳密 (定数の発熱源の 1 次元 Poisson) なので
