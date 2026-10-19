@@ -52,6 +52,8 @@ extern "C" {
 #define EPS0   (1 / (C0 * C0 * MU0))
 #define ETA0   (C0 * MU0)
 #define EPS    (1e-6)
+#define STEFAN (5.670374419e-8)	// Stefan-Boltzmann 定数 [W/(m^2 K^4)]
+#define KELVIN (273.15)			// 0 degC の絶対温度 [K]
 
 // 解析種別ビット (analysis キー)
 #define ANALYSIS_C (1 << 0)		// 静電界 -> 容量行列 C
@@ -321,6 +323,8 @@ EXTERN int HeatSinkOn[MAXPORT];	// 導体ごと : 1 なら温度を固定する 
 EXTERN double HeatSinkT[MAXPORT];	// ヒートシンクの温度 [degC]
 EXTERN double ConvH;			// 対流熱伝達係数 h [W/(m^2 K)] (0 : 対流なし)
 EXTERN double ConvT;			// 対流の周囲温度 [degC]
+EXTERN double RadEps;			// 輻射の放射率 ε (0 : 輻射なし)
+EXTERN double RadT;				// 輻射の周囲 (壁) の温度 [degC]
 
 // 周波数掃引 (frequencysweep)。各点で分散材料を展開し直して解き直す
 EXTERN int NFreqSweep;

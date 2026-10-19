@@ -274,6 +274,8 @@ int input_data(FILE *fp)
 	}
 	ConvH = 0;
 	ConvT = 20;
+	RadEps = 0;
+	RadT = 20;
 
 	MeshMode = 0;
 	strcpy(MeshFile, "");
@@ -823,6 +825,22 @@ int input_data(FILE *fp)
 				return 1;
 			}
 		}
+		else if (!strcmp(strkey, "radiation")) {
+			// radiation = <ε> <T_amb [degC]>  : 表面からの輻射 (熱連成)
+			//   -k dT/dn = ε σ_SB (T^4 - T_amb^4) (絶対温度) を、convection と同じ
+			//   露出面に課す。周囲は温度 T_amb の黒体の壁とみなす (面どうしの
+			//   相互放射は扱わない)
+			if (nval != 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			RadEps = atof(token[2]);
+			RadT = atof(token[3]);
+			if ((RadEps < 0) || (RadEps > 1) || (RadT <= -KELVIN)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+		}
 		else if (!strcmp(strkey, "thermal")) {
 			// thermal = <I [A]> [<maxiter> [<tol>]]  : 電気-熱連成 (定常、analysis = R)
 			//   ポートに電流 I を流したときの Joule 発熱で温度分布を解き、
@@ -1313,10 +1331,10 @@ int input_data(FILE *fp)
 		}
 		// 熱の逃げ場が無いと、発熱し続けるのに温度が定まらない (純 Neumann で
 		// 右辺の和が 0 でない) ので定常解が存在しない。逃げ場はヒートシンクか対流
-		if ((nsink < 1) && (ConvH <= 0)) {
+		if ((nsink < 1) && (ConvH <= 0) && (RadEps <= 0)) {
 			printf("%s\n", "*** thermal needs a way for the heat to leave: at least "
-				"one heatsink (a conductor with a fixed temperature) or convection; "
-				"otherwise there is no steady state");
+				"one heatsink (a conductor with a fixed temperature), convection or "
+				"radiation; otherwise there is no steady state");
 			return 1;
 		}
 		// 電流の流れる材料が熱を通さないと、その要素の発熱が逃げられない
@@ -1347,6 +1365,10 @@ int input_data(FILE *fp)
 		}
 		if (ConvH > 0) {
 			input_warn("convection has no effect without thermal (it is only read by "
+				"the electro-thermal coupling)");
+		}
+		if (RadEps > 0) {
+			input_warn("radiation has no effect without thermal (it is only read by "
 				"the electro-thermal coupling)");
 		}
 	}

@@ -1,0 +1,47 @@
+OpenFEM 1 0
+title = electro-thermal coupling : a bar cooled at both ends and by radiation from its sides
+#
+# 輻射境界条件 (radiation) の検証。thermal_bar.ofe と同じ棒 (L = 10mm、
+# 断面 1mm x 1mm、A = 1e-6 m²、周長 P = 4e-3 m) の両端をヒートシンク (20 degC) に
+# して、側面から黒体 (ε = 1) として温度 T_r = 10 degC の壁へ放射させる:
+#   -k dT/dn = ε σ_SB (T_K^4 - T_r,K^4),  T_K = T + 273.15
+#
+#   ρ(T) = ρ0 (1 + α (T - T0)),  ρ0 = 1e-6 [Ωm], α = 4e-3 [1/K], T0 = 0 [degC]
+#   k = 1 [W/(m K)] (輻射が効くように熱伝導を弱くしてある), I = 2.5 [A]
+#
+# 温度は棒の向きにだけ変わり (断面 1 x 1 セル)、1 次元の非線形 2 点境界値問題
+#   k T'' = -J² ρ(T) + (P/A) ε σ_SB (T_K^4 - T_r,K^4),  T(0) = T(L) = 20
+# になる。閉形式は無いので、rlc_check.sh が中央 (T' = 0) から RK4 で撃って
+# 端で 20 degC になる中央の温度を二分法で求める (刻み 4000 と 8000 で全桁一致)。
+#   R     = (1/A) ∫ ρ dx = 1.284013259980e-02 [ohm]
+#   T_max = 9.608716947270e+01 [degC]
+# 発熱 0.080 W のうち約 22% が輻射、残りがヒートシンクへ出ていく。
+#
+# 要素の温度は 8 節点の平均、輻射の積分は面の 2x2 Gauss なので離散化誤差は h²。
+# 40 分割で R -0.011%、20 / 80 分割との誤差比は 4.00 (rlc_check.sh で見る)。
+#
+# 輻射は非線形なので、σ(T) の Picard 反復の各回で温度のまわりに Newton 線形化
+# する (接線 4 ε σ T_K³)。α = 0 なら非線形は輻射だけになり、2 次収束で数回で
+# 止まる (rlc_check.sh で回数の上限を見る — 線形化を誤っても答えは同じ不動点に
+# 収束し得るので、値の比較だけでは捕まらない)。
+#
+xmesh = 0 40 0.01
+ymesh = 0 1 1e-3
+zmesh = 0 1 1e-3
+
+material = 1.0 1e6
+tempco = 2 4e-3 0
+kthermal = 2 1
+geometry = 2 1 0 0.01 0 1e-3 0 1e-3
+
+conductor = 0 1 0    0    0 1e-3 0 1e-3
+conductor = 1 1 0.01 0.01 0 1e-3 0 1e-3
+heatsink = 0 20
+heatsink = 1 20
+radiation = 1 10
+
+temperature = 50
+thermal = 2.5
+analysis = R
+solver = 20000 500 1e-12
+end
