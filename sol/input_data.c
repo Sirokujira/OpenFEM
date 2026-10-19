@@ -233,6 +233,7 @@ int input_data(FILE *fp)
 		Material[m].mutemp0 = 20;
 		Material[m].bhtempco = 0;
 		Material[m].bhtemp0 = 20;
+		Material[m].kth = 0;
 		Material[m].eps6_given = 0;
 		Material[m].bhaniso = 0;
 		Material[m].ja.on = 0;
@@ -263,6 +264,18 @@ int input_data(FILE *fp)
 		CondTemp0[p] = 20;
 	}
 	Temperature = 20;
+	ThermalOn = 0;
+	ThermalCurrent = 0;
+	ThermalMaxIter = 200;
+	ThermalTol = 1e-10;
+	for (int p = 0; p < MAXPORT; p++) {
+		HeatSinkOn[p] = 0;
+		HeatSinkT[p] = 20;
+	}
+	ConvH = 0;
+	ConvT = 20;
+	RadEps = 0;
+	RadT = 20;
 
 	MeshMode = 0;
 	strcpy(MeshFile, "");
@@ -408,6 +421,7 @@ int input_data(FILE *fp)
 			Material[NMaterial].bhtempco = 0;
 			Material[NMaterial].bhtemp0 = 20;
 			Material[NMaterial].temp0 = 20;
+			Material[NMaterial].kth = 0;
 			Material[NMaterial].eps6_given = 0;
 			Material[NMaterial].bhaniso = 0;
 			Material[NMaterial].ja.on = 0;
@@ -765,6 +779,85 @@ int input_data(FILE *fp)
 			}
 			CondTempco[cid] = atof(token[3]);
 			if (nval == 3) CondTemp0[cid] = atof(token[4]);
+		}
+		else if (!strcmp(strkey, "kthermal")) {
+			// kthermal = <material_id> <k [W/(m K)]>  : 熱伝導率 (熱連成 thermal で使う)
+			//   material 行より後に書くこと (材料番号を参照するため)
+			if (nval != 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			const double k = atof(token[3]);
+			if ((mid < 0) || (mid >= NMaterial) || (k < 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			Material[mid].kth = k;
+		}
+		else if (!strcmp(strkey, "heatsink")) {
+			// heatsink = <conductor_id> <T [degC]>  : その導体の節点の温度を固定する
+			//   熱の逃げ場。少なくとも 1 つ要る (無いと発熱の行き場が無く定常解が無い)
+			if (nval != 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int cid = atoi(token[2]);
+			if ((cid < 0) || (cid >= MAXPORT)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			HeatSinkOn[cid] = 1;
+			HeatSinkT[cid] = atof(token[3]);
+		}
+		else if (!strcmp(strkey, "convection")) {
+			// convection = <h [W/(m^2 K)]> <T_amb [degC]>  : 表面からの対流 (熱連成)
+			//   -k dT/dn = h (T - T_amb) を、熱を通す領域の露出面 (隣が熱を通さない
+			//   セルか格子の外) に課す。電極の面は端子に接しているので除く
+			if (nval != 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ConvH = atof(token[2]);
+			ConvT = atof(token[3]);
+			if (ConvH < 0) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+		}
+		else if (!strcmp(strkey, "radiation")) {
+			// radiation = <ε> <T_amb [degC]>  : 表面からの輻射 (熱連成)
+			//   -k dT/dn = ε σ_SB (T^4 - T_amb^4) (絶対温度) を、convection と同じ
+			//   露出面に課す。周囲は温度 T_amb の黒体の壁とみなす (面どうしの
+			//   相互放射は扱わない)
+			if (nval != 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			RadEps = atof(token[2]);
+			RadT = atof(token[3]);
+			if ((RadEps < 0) || (RadEps > 1) || (RadT <= -KELVIN)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+		}
+		else if (!strcmp(strkey, "thermal")) {
+			// thermal = <I [A]> [<maxiter> [<tol>]]  : 電気-熱連成 (定常、analysis = R)
+			//   ポートに電流 I を流したときの Joule 発熱で温度分布を解き、
+			//   σ(T) = σ0/(1 + α(T - T0)) (tempco) を要素ごとに更新して R が
+			//   収束するまで繰り返す
+			if ((nval < 1) || (nval > 3)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ThermalOn = 1;
+			ThermalCurrent = atof(token[2]);
+			if (nval >= 2) ThermalMaxIter = atoi(token[3]);
+			if (nval >= 3) ThermalTol = atof(token[4]);
+			if ((ThermalCurrent <= 0) || (ThermalMaxIter < 1) || (ThermalTol <= 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
 		}
 		else if (!strcmp(strkey, "frequencysweep")) {
 			// frequencysweep = <f1> <f2> ...        : 周波数を明示列挙
@@ -1197,6 +1290,87 @@ int input_data(FILE *fp)
 		printf("%s\n", "*** hdf5 = 1 needs a build with HDF5 "
 			"(cmake -DWITH_HDF5=ON); this binary was built without it");
 		return 1;
+	}
+
+	// 電気-熱連成 (thermal) の前提。**非構造格子の早期 return より前に置くこと**
+	// (非構造格子で指定されたときに弾くため)
+	if (ThermalOn) {
+		if (MeshMode) {
+			printf("%s\n", "*** thermal is implemented for the structured grid only");
+			return 1;
+		}
+		if (Analysis != ANALYSIS_R) {
+			printf("%s\n", "*** thermal needs analysis = R alone (the coupling is "
+				"between DC conduction and heat conduction)");
+			return 1;
+		}
+		// 発熱は電流の 2 乗なので重ね合わせが効かない (bh と同じ理由)
+		if (NPort != 1) {
+			printf("%s\n", "*** thermal needs exactly one port (Joule heating does "
+				"not superpose, so the port matrix cannot be built port by port)");
+			return 1;
+		}
+		if ((Freq > 0) || (NFreqSweep > 0)) {
+			printf("%s\n", "*** thermal is a DC coupling; remove frequency / "
+				"frequencysweep");
+			return 1;
+		}
+		if (Tline) {
+			printf("%s\n", "*** thermal cannot be combined with tline (the drive "
+				"current and the heat are absolute, not per unit length)");
+			return 1;
+		}
+		int nsink = 0;
+		for (int p = 0; p < MAXPORT; p++) {
+			if (!HeatSinkOn[p]) continue;
+			if (p > NPort) {
+				printf("*** heatsink : conductor %d does not exist\n", p);
+				return 1;
+			}
+			nsink++;
+		}
+		// 熱の逃げ場が無いと、発熱し続けるのに温度が定まらない (純 Neumann で
+		// 右辺の和が 0 でない) ので定常解が存在しない。逃げ場はヒートシンクか対流
+		if ((nsink < 1) && (ConvH <= 0) && (RadEps <= 0)) {
+			printf("%s\n", "*** thermal needs a way for the heat to leave: at least "
+				"one heatsink (a conductor with a fixed temperature), convection or "
+				"radiation; otherwise there is no steady state");
+			return 1;
+		}
+		// 電流の流れる材料が熱を通さないと、その要素の発熱が逃げられない
+		for (int m = 0; m < NMaterial; m++) {
+			if ((Material[m].sigma > 0) && (Material[m].kth <= 0)) {
+				printf("*** thermal : material %d conducts current (sigma > 0) but "
+					"has no thermal conductivity (kthermal)\n", m);
+				return 1;
+			}
+		}
+	}
+	else {
+		// 読む解析が無いのに指定されたキーを知らせる (黙って無視しない)
+		int haveK = 0, haveSink = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].kth > 0) haveK = 1;
+		}
+		for (int p = 0; p < MAXPORT; p++) {
+			if (HeatSinkOn[p]) haveSink = 1;
+		}
+		if (haveK) {
+			input_warn("kthermal has no effect without thermal (it is only read by "
+				"the electro-thermal coupling)");
+		}
+		if (haveSink) {
+			input_warn("heatsink has no effect without thermal (it is only read by "
+				"the electro-thermal coupling)");
+		}
+		if (ConvH > 0) {
+			input_warn("convection has no effect without thermal (it is only read by "
+				"the electro-thermal coupling)");
+		}
+		if (RadEps > 0) {
+			input_warn("radiation has no effect without thermal (it is only read by "
+				"the electro-thermal coupling)");
+		}
 	}
 
 	// 非構造格子のときは xmesh 等も conductor も要らない

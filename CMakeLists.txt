@@ -69,6 +69,7 @@ set(SOL_SOURCES
     sol/solver_direct.c
     sol/solver_cocg.c
     sol/solve.c
+    sol/thermal.c
     sol/matutil.c
     sol/unstruct.c
     sol/edge.c

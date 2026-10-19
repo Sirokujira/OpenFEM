@@ -1,0 +1,32 @@
+OpenFEM 1 0
+title = electro-thermal coupling : a conductor with a neck (crowded current)
+#
+# 幅の広いパッド 2 つを細い首でつないだ導体 (3mm x 2mm x 0.5mm、首は幅 0.5mm)。
+# 閉形式は無いが、**首の角で電流が集中して ∇φ が要素の中で変わる**ので、
+# 発熱の積分の恒等式
+#   Σ_i f_i (場で積分した発熱) = I² R (端子の電力) = ヒートシンクへ出ていく熱
+# が積分則を検査できる (1 次元の棒では ∇φ が要素内で一定なので、要素中心の
+# 1 点で発熱を取る手抜きでも厳密に通ってしまう)。
+# 場の出力 (fieldout = 1) の温度 T の最大値がログの T_max と一致することも見る。
+#
+xmesh = 0 6 1e-3 6 2e-3 6 3e-3
+ymesh = 0 6 0.75e-3 4 1.25e-3 6 2e-3
+zmesh = 0 2 0.5e-3
+
+material = 1.0 1e6
+tempco = 2 4e-3 0
+kthermal = 2 10
+geometry = 2 1 0    1e-3 0       2e-3    0 0.5e-3
+geometry = 2 1 1e-3 2e-3 0.75e-3 1.25e-3 0 0.5e-3
+geometry = 2 1 2e-3 3e-3 0       2e-3    0 0.5e-3
+
+conductor = 0 1 0    0    0 2e-3 0 0.5e-3
+conductor = 1 1 3e-3 3e-3 0 2e-3 0 0.5e-3
+heatsink = 0 20
+heatsink = 1 20
+
+fieldout = 1
+thermal = 8
+analysis = R
+solver = 20000 500 1e-12
+end

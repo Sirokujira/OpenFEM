@@ -35,10 +35,13 @@ static const int EDGE_NODE[6][2] = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 
 六面体・角柱の局所辺 (Gmsh の 2 次要素の辺の並びと同じ表。fem.h 参照)。
 どの並びでも「小さい節点番号 -> 大きい方」の符号規約が向きを吸収する。
 
-辺要素は**種別が 1 つの格子** (純四面体 / 純六面体 / 純角柱) でだけ使う。
-混在格子は種別をまたぐ面での接線連続性 (Nedelec の適合性) の検査が別に要り、
-ピラミッドには多項式の Nedelec 基底が無い (有理基底が要る) ので、
-どちらも setup_unstruct() で弾く。
+**種別の混在を許す** (四面体 + 角柱 / 六面体 + 角柱)。最低次 Nedelec の
+接線トレースは三角形面で三角形の Whitney 空間、四角形面で四角形の最低次
+Nedelec 空間になり、どちらも面の 3 (4) 辺の自由度だけで決まるので、
+面を共有する要素の種別が違っても接線連続性が保たれる
+(solve_edge_test の (g) がこれを直接検査する)。
+六面体と四面体は面を共有できないので、その組は間に角柱が要る
+(ピラミッドは多項式の Nedelec 基底が無いので setup_unstruct() で弾く)。
 */
 static const int EDGE_HEX[12][2] = {
 	{0, 1}, {0, 3}, {0, 4}, {1, 2}, {1, 5}, {2, 3},
@@ -52,53 +55,77 @@ static const signed char EHEX_SGN[8][3] = {
 	{-1, -1, +1}, {+1, -1, +1}, {+1, +1, +1}, {-1, +1, +1}};
 
 
-// 辺要素で扱う要素の数・辺数・節点数・節点・局所辺表・材料
+/*
+辺要素で扱う要素の見方。**通し番号は elem3d と同じ「四面体 -> 六面体 ->
+角柱」の連番**で、種別ごとの添字は各アクセサの中で引き直す。純粋な格子では
+連番が種別内の添字と一致するので、既存の答えはビット単位で変わらない。
+
+(ピラミッドは Nedelec 基底が無く setup_unstruct() で弾かれるので、ここに
+来る格子には含まれない)
+
+**六面体と四面体は同じ格子に共存できない** (面が適合せず、間に要るピラミッドは
+弾かれる) ので、六面体側の `e - NTet` は必ず 0 の引き算になる。つまりこの
+引き算を書き忘れる誤りは**どの検証でも落ちない** — 検証で覆えているのは
+角柱側の `- NTet - NHex` だけ。将来ピラミッドの有理基底を入れて六面体 +
+四面体を通すようになったら、ここが初めて効くようになる。
+*/
 int edge_elem_count(void)
 {
-	if (MeshElem == MESHELEM_HEX) return NHex;
-	if (MeshElem == MESHELEM_PRISM) return NPrism;
-
-	return NTet;
+	return (NTet + NHex + NPrism);
 }
 
-int edge_elem_nedge(void)
+int edge_elem_kind(int e)
 {
-	if (MeshElem == MESHELEM_HEX) return 12;
-	if (MeshElem == MESHELEM_PRISM) return 9;
+	if (e < NTet) return MESHELEM_TET;
+	if (e < (NTet + NHex)) return MESHELEM_HEX;
+
+	return MESHELEM_PRISM;
+}
+
+int edge_elem_nedge(int e)
+{
+	const int kind = edge_elem_kind(e);
+
+	if (kind == MESHELEM_HEX) return 12;
+	if (kind == MESHELEM_PRISM) return 9;
 
 	return 6;
 }
 
-int edge_elem_nen(void)
+int edge_elem_nen(int e)
 {
-	if (MeshElem == MESHELEM_HEX) return 8;
-	if (MeshElem == MESHELEM_PRISM) return 6;
+	const int kind = edge_elem_kind(e);
+
+	if (kind == MESHELEM_HEX) return 8;
+	if (kind == MESHELEM_PRISM) return 6;
 
 	return 4;
 }
 
 const int32_t *edge_elem_nodes(int e)
 {
-	if (MeshElem == MESHELEM_HEX) return &Hex[e * 8];
-	if (MeshElem == MESHELEM_PRISM) return &Prism[e * 6];
+	if (e < NTet) return &Tet[e * 4];
+	if (e < (NTet + NHex)) return &Hex[(e - NTet) * 8];
 
-	return &Tet[e * 4];
+	return &Prism[(e - NTet - NHex) * 6];
 }
 
-const int (*edge_elem_table(void))[2]
+const int (*edge_elem_table(int e))[2]
 {
-	if (MeshElem == MESHELEM_HEX) return EDGE_HEX;
-	if (MeshElem == MESHELEM_PRISM) return EDGE_PRISM;
+	const int kind = edge_elem_kind(e);
+
+	if (kind == MESHELEM_HEX) return EDGE_HEX;
+	if (kind == MESHELEM_PRISM) return EDGE_PRISM;
 
 	return EDGE_NODE;
 }
 
 int edge_elem_mat(int e)
 {
-	if (MeshElem == MESHELEM_HEX) return HexMat[e];
-	if (MeshElem == MESHELEM_PRISM) return PrismMat[e];
+	if (e < NTet) return ((TetMat != NULL) ? TetMat[e] : 0);
+	if (e < (NTet + NHex)) return ((HexMat != NULL) ? HexMat[e - NTet] : 0);
 
-	return TetMat[e];
+	return ((PrismMat != NULL) ? PrismMat[e - NTet - NHex] : 0);
 }
 
 
@@ -119,14 +146,19 @@ void edge_build(void)
 {
 	const int n = NNode;
 	const int nelem = edge_elem_count();
-	const int nedge = edge_elem_nedge();
-	const int (*tab)[2] = edge_elem_table();
+
+	// 要素毎の辺の開始位置 (種別で辺数が違うので通し番号では引けない)
+	EdgeOff = (int64_t *)malloc(((size_t)nelem + 1) * sizeof(int64_t));
+	EdgeOff[0] = 0;
+	for (int e = 0; e < nelem; e++) EdgeOff[e + 1] = EdgeOff[e] + edge_elem_nedge(e);
 
 	// 節点毎の (i < j) 隣接候補を数える
 	int *cnt = (int *)malloc((size_t)n * sizeof(int));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < nelem; e++) {
 		const int32_t *nd = edge_elem_nodes(e);
+		const int nedge = edge_elem_nedge(e);
+		const int (*tab)[2] = edge_elem_table(e);
 		for (int k = 0; k < nedge; k++) {
 			const int32_t a = nd[tab[k][0]];
 			const int32_t b = nd[tab[k][1]];
@@ -141,6 +173,8 @@ void edge_build(void)
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < nelem; e++) {
 		const int32_t *nd = edge_elem_nodes(e);
+		const int nedge = edge_elem_nedge(e);
+		const int (*tab)[2] = edge_elem_table(e);
 		for (int k = 0; k < nedge; k++) {
 			const int32_t a = nd[tab[k][0]];
 			const int32_t b = nd[tab[k][1]];
@@ -189,16 +223,19 @@ void edge_build(void)
 		for (int64_t p = EdgePtr[i]; p < EdgePtr[i + 1]; p++) EdgeFrom[p] = (int32_t)i;
 	}
 
-	// 要素毎の辺番号と向き (stride は要素あたりの辺数。純四面体では従来と同じ)
-	TetEdge = (int32_t *)malloc((size_t)nelem * nedge * sizeof(int32_t));
-	TetEdgeSgn = (signed char *)malloc((size_t)nelem * nedge * sizeof(signed char));
+	// 要素毎の辺番号と向き (EdgeOff で引く。純粋な格子では従来と同じ並び)
+	TetEdge = (int32_t *)malloc((size_t)EdgeOff[nelem] * sizeof(int32_t));
+	TetEdgeSgn = (signed char *)malloc((size_t)EdgeOff[nelem] * sizeof(signed char));
 	for (int e = 0; e < nelem; e++) {
 		const int32_t *nd = edge_elem_nodes(e);
+		const int nedge = edge_elem_nedge(e);
+		const int (*tab)[2] = edge_elem_table(e);
+		const int64_t off = EdgeOff[e];
 		for (int k = 0; k < nedge; k++) {
 			const int32_t a = nd[tab[k][0]];
 			const int32_t b = nd[tab[k][1]];
-			TetEdge[(e * nedge) + k] = (int32_t)edge_id(a, b);
-			TetEdgeSgn[(e * nedge) + k] = (signed char)((a < b) ? +1 : -1);
+			TetEdge[off + k] = (int32_t)edge_id(a, b);
+			TetEdgeSgn[off + k] = (signed char)((a < b) ? +1 : -1);
 		}
 	}
 }
@@ -230,11 +267,13 @@ void edge_free(void)
 	free(EdgeFrom);
 	free(TetEdge);
 	free(TetEdgeSgn);
+	free(EdgeOff);
 	EdgePtr = NULL;
 	EdgeTo = NULL;
 	EdgeFrom = NULL;
 	TetEdge = NULL;
 	TetEdgeSgn = NULL;
+	EdgeOff = NULL;
 	NEdge = 0;
 }
 
@@ -245,13 +284,12 @@ void crs_alloc_edge(crs_t *A)
 {
 	const int ne = NEdge;
 	const int nelem = edge_elem_count();
-	const int nedge = edge_elem_nedge();
 
 	// 辺毎の要素リスト
 	int *cnt = (int *)malloc((size_t)ne * sizeof(int));
 	memset(cnt, 0, (size_t)ne * sizeof(int));
 	for (int e = 0; e < nelem; e++) {
-		for (int k = 0; k < nedge; k++) cnt[TetEdge[(e * nedge) + k]]++;
+		for (int64_t k = EdgeOff[e]; k < EdgeOff[e + 1]; k++) cnt[TetEdge[k]]++;
 	}
 	int64_t *ptr = (int64_t *)malloc(((size_t)ne + 1) * sizeof(int64_t));
 	ptr[0] = 0;
@@ -259,8 +297,8 @@ void crs_alloc_edge(crs_t *A)
 	int32_t *lst = (int32_t *)malloc((size_t)ptr[ne] * sizeof(int32_t));
 	memset(cnt, 0, (size_t)ne * sizeof(int));
 	for (int e = 0; e < nelem; e++) {
-		for (int k = 0; k < nedge; k++) {
-			const int32_t ed = TetEdge[(e * nedge) + k];
+		for (int64_t k = EdgeOff[e]; k < EdgeOff[e + 1]; k++) {
+			const int32_t ed = TetEdge[k];
 			lst[ptr[ed] + cnt[ed]] = (int32_t)e;
 			cnt[ed]++;
 		}
@@ -275,7 +313,8 @@ void crs_alloc_edge(crs_t *A)
 
 	for (int i = 0; i < ne; i++) {
 		const int64_t p0 = ptr[i], p1 = ptr[i + 1];
-		const int need = (int)(p1 - p0) * nedge;
+		int need = 0;
+		for (int64_t p = p0; p < p1; p++) need += edge_elem_nedge(lst[p]);
 		if (need > cap) {
 			cap = need;
 			work = (int32_t *)realloc(work, (size_t)cap * sizeof(int32_t));
@@ -283,7 +322,7 @@ void crs_alloc_edge(crs_t *A)
 		int m = 0;
 		for (int64_t p = p0; p < p1; p++) {
 			const int32_t t = lst[p];
-			for (int k = 0; k < nedge; k++) work[m++] = TetEdge[(t * nedge) + k];
+			for (int64_t k = EdgeOff[t]; k < EdgeOff[t + 1]; k++) work[m++] = TetEdge[k];
 		}
 		qsort(work, (size_t)m, sizeof(int32_t), cmp_i32);
 		int u = 0;
@@ -304,7 +343,7 @@ void crs_alloc_edge(crs_t *A)
 		int m = 0;
 		for (int64_t p = p0; p < p1; p++) {
 			const int32_t t = lst[p];
-			for (int k = 0; k < nedge; k++) work[m++] = TetEdge[(t * nedge) + k];
+			for (int64_t k = EdgeOff[t]; k < EdgeOff[t + 1]; k++) work[m++] = TetEdge[k];
 		}
 		qsort(work, (size_t)m, sizeof(int32_t), cmp_i32);
 		int64_t w = A->rowptr[i];
@@ -616,7 +655,9 @@ static void edge_piola_point(const int32_t *nd, int nedge, int hex,
 void edge_elem_matrices(int e, const double nu[6], double sig,
 	double se[12][12], double te[12][12])
 {
-	if (MeshElem == MESHELEM_TET) {
+	const int kind = edge_elem_kind(e);
+
+	if (kind == MESHELEM_TET) {
 		double s6[6][6], t6[6][6];
 		edge_element(e, nu, sig, s6, t6);
 		for (int k = 0; k < 6; k++) {
@@ -632,9 +673,9 @@ void edge_elem_matrices(int e, const double nu[6], double sig,
 		for (int l = 0; l < 12; l++) se[k][l] = te[k][l] = 0;
 	}
 
-	if (MeshElem == MESHELEM_HEX) {
+	if (kind == MESHELEM_HEX) {
 		const double gp = 1.0 / sqrt(3.0);
-		const int32_t *nd = &Hex[e * 8];
+		const int32_t *nd = &Hex[(e - NTet) * 8];
 		for (int i = 0; i < 2; i++) {
 		for (int j = 0; j < 2; j++) {
 		for (int k = 0; k < 2; k++) {
@@ -651,7 +692,7 @@ void edge_elem_matrices(int e, const double nu[6], double sig,
 		static const double tu[3] = {1.0 / 6, 2.0 / 3, 1.0 / 6};
 		static const double tv[3] = {1.0 / 6, 1.0 / 6, 2.0 / 3};
 		const double gp = 1.0 / sqrt(3.0);
-		const int32_t *nd = &Prism[e * 6];
+		const int32_t *nd = &Prism[(e - NTet - NHex) * 6];
 		for (int q = 0; q < 3; q++) {
 			for (int k = 0; k < 2; k++) {
 				edge_piola_point(nd, 9, 0, tu[q], tv[q], (k ? gp : -gp),
@@ -666,16 +707,27 @@ void edge_elem_matrices(int e, const double nu[6], double sig,
 void edge_elem_center(int e, double w[12][3], double c[12][3])
 {
 	double wr[12][3], cr[12][3], jm[3][3], ji[3][3];
-	const int hex = (MeshElem == MESHELEM_HEX);
-	const int nedge = edge_elem_nedge();
+	const int kind = edge_elem_kind(e);
+	const int hex = (kind == MESHELEM_HEX);
+	const int nedge = edge_elem_nedge(e);
+
+	// 四面体は Whitney 基底の閉形式で書けるので参照基底を持たない。
+	// 呼び出し側で分岐しているが、公開関数なので渡されても壊れないようにする
+	// (分岐が 2 つしかないため、放っておくと角柱側に落ちて負の添字になる)
+	if (kind == MESHELEM_TET) {
+		for (int k = 0; k < 6; k++) {
+			for (int i = 0; i < 3; i++) w[k][i] = c[k][i] = 0;
+		}
+		return;
+	}
 
 	if (hex) {
 		ehex_basis(0, 0, 0, wr, cr);
-		ehex_jac(&Hex[e * 8], 0, 0, 0, jm);
+		ehex_jac(&Hex[(e - NTet) * 8], 0, 0, 0, jm);
 	}
 	else {
 		eprism_basis(1.0 / 3, 1.0 / 3, 0, wr, cr);
-		eprism_jac(&Prism[e * 6], 1.0 / 3, 1.0 / 3, 0, jm);
+		eprism_jac(&Prism[(e - NTet - NHex) * 6], 1.0 / 3, 1.0 / 3, 0, jm);
 	}
 	const double det = edet3(jm);
 	if (det == 0) {
@@ -695,6 +747,296 @@ void edge_elem_center(int e, double w[12][3], double c[12][3])
 }
 
 
+/*
+参照点での**物理**基底 W (Piola 変換したもの)。接線連続性の検査 (g) で使う。
+ref は種別ごとの参照座標:
+  四面体 : (λ1, λ2, λ3)  (λ0 = 1 - λ1 - λ2 - λ3)
+  六面体 : (ξ, η, ζ) ∈ [-1,1]^3
+  角柱   : (u, v, ζ)     (λ = (1-u-v, u, v)、ζ ∈ [-1,1])
+四面体は Whitney 基底が物理座標の閉形式で書けるので Piola を通さない。
+*/
+static void edge_basis_phys(int e, const double ref[3], double w[12][3])
+{
+	const int kind = edge_elem_kind(e);
+	const int nedge = edge_elem_nedge(e);
+
+	for (int k = 0; k < 12; k++) {
+		for (int i = 0; i < 3; i++) w[k][i] = 0;
+	}
+
+	if (kind == MESHELEM_TET) {
+		double g[4][3], vol;
+		if (tet_grad_pub(&Tet[e * 4], g, &vol)) return;
+		const double lam[4] = {1 - ref[0] - ref[1] - ref[2], ref[0], ref[1], ref[2]};
+		for (int k = 0; k < 6; k++) {
+			const int a = EDGE_NODE[k][0], b = EDGE_NODE[k][1];
+			for (int i = 0; i < 3; i++) {
+				w[k][i] = (lam[a] * g[b][i]) - (lam[b] * g[a][i]);
+			}
+		}
+		return;
+	}
+
+	double wr[12][3], jm[3][3], ji[3][3];
+	if (kind == MESHELEM_HEX) {
+		double cr[12][3];
+		ehex_basis(ref[0], ref[1], ref[2], wr, cr);
+		ehex_jac(&Hex[(e - NTet) * 8], ref[0], ref[1], ref[2], jm);
+	}
+	else {
+		double wp[9][3], cp[9][3];
+		eprism_basis(ref[0], ref[1], ref[2], wp, cp);
+		for (int k = 0; k < 9; k++) {
+			for (int i = 0; i < 3; i++) wr[k][i] = wp[k][i];
+		}
+		eprism_jac(&Prism[(e - NTet - NHex) * 6], ref[0], ref[1], ref[2], jm);
+	}
+	const double det = edet3(jm);
+	if (det == 0) return;
+	einv3(jm, det, ji);
+	for (int k = 0; k < nedge; k++) {
+		for (int i = 0; i < 3; i++) {
+			w[k][i] = (ji[0][i] * wr[k][0]) + (ji[1][i] * wr[k][1]) + (ji[2][i] * wr[k][2]);
+		}
+	}
+}
+
+
+// 局所節点の参照座標 (edge_basis_phys の ref と同じ系)
+static void edge_ref_node(int kind, int l, double ref[3])
+{
+	static const signed char TET_REF[4][3] = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+	static const signed char PRISM_REF[6][3] = {
+		{0, 0, -1}, {1, 0, -1}, {0, 1, -1}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}};
+
+	for (int i = 0; i < 3; i++) {
+		ref[i] = ((kind == MESHELEM_HEX) ? EHEX_SGN[l][i]
+		        : (kind == MESHELEM_PRISM) ? PRISM_REF[l][i] : TET_REF[l][i]);
+	}
+}
+
+
+// 局所の面 (三角形は 4 番目が -1)。並びは Gmsh の節点順に対応する
+static const int FACE_TET[4][4] = {{0, 1, 2, -1}, {0, 1, 3, -1}, {0, 2, 3, -1}, {1, 2, 3, -1}};
+static const int FACE_HEX[6][4] = {
+	{0, 1, 2, 3}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+static const int FACE_PRISM[5][4] = {
+	{0, 1, 2, -1}, {3, 4, 5, -1}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}};
+
+static int edge_face_table(int kind, const int (**tab)[4])
+{
+	if (kind == MESHELEM_HEX) { *tab = FACE_HEX; return 6; }
+	if (kind == MESHELEM_PRISM) { *tab = FACE_PRISM; return 5; }
+	*tab = FACE_TET;
+
+	return 4;
+}
+
+
+// 面の記録 (整列した節点をキーにして共有面を見つける)
+typedef struct {
+	int32_t key[4];		// 昇順の全体節点番号 (三角形は key[3] = -1)
+	int32_t elem;
+	int16_t face;
+} eface_t;
+
+static int cmp_eface(const void *a, const void *b)
+{
+	const eface_t *x = (const eface_t *)a;
+	const eface_t *y = (const eface_t *)b;
+
+	for (int i = 0; i < 4; i++) {
+		if (x->key[i] != y->key[i]) return ((x->key[i] < y->key[i]) ? -1 : 1);
+	}
+
+	return 0;
+}
+
+
+/*
+(g) 面をまたぐ接線連続性 (Nedelec の適合性)。
+
+**これは (b) (c) (c2) の恒等式では検出できない。** {a + b×r} の場は要素毎に
+厳密に補間されるので、隣の要素とトレースが食い違っていてもエネルギーは
+要素積分の和として合ってしまう (実測: 角柱の鉛直辺の基底を 1/2 倍しても
+(a)〜(f) は全部通り、この検査だけが落ちる)。
+
+任意の辺自由度ベクトル u に対し、面を共有する 2 要素の補間場
+  u_h(x) = Σ_k sgn_k u_k W_k(x)
+の**接線成分**が面上の各点で一致することを直接見る。同じ点を両側で作るために、
+面の全体節点に重み (三角形は面積座標、四角形は双 1 次) を割り当て、
+各要素ではその全体節点が入っている局所節点の参照座標を重み付けする。
+等パラメトリック写像は面上で (双) 1 次なので、どちらの要素からも同じ物理点になる。
+
+種別をまたぐ面 (四面体 - 角柱の三角形面、六面体 - 角柱の四角形面) が
+この検査の本命だが、同じ種別どうしの面も一緒に見る (符号規約の検査になる)。
+*/
+static int edge_face_conform(FILE *fp_log, const double *u)
+{
+	const int nelem = edge_elem_count();
+
+	// 全ての面を集めて整列し、2 回現れる面 (内部面) を取り出す
+	int64_t nf = 0;
+	for (int e = 0; e < nelem; e++) {
+		const int (*ft)[4];
+		nf += edge_face_table(edge_elem_kind(e), &ft);
+	}
+	eface_t *fc = (eface_t *)malloc((size_t)nf * sizeof(eface_t));
+	int64_t m = 0;
+	for (int e = 0; e < nelem; e++) {
+		const int kind = edge_elem_kind(e);
+		const int32_t *nd = edge_elem_nodes(e);
+		const int (*ft)[4];
+		const int nfa = edge_face_table(kind, &ft);
+		for (int f = 0; f < nfa; f++) {
+			int32_t k4[4] = {-1, -1, -1, -1};
+			int nv = 0;
+			for (int i = 0; i < 4; i++) {
+				if (ft[f][i] >= 0) k4[nv++] = nd[ft[f][i]];
+			}
+			for (int i = 0; i < nv; i++) {			// 小さい方から (nv <= 4)
+				for (int j = i + 1; j < nv; j++) {
+					if (k4[j] < k4[i]) {
+						const int32_t t = k4[i]; k4[i] = k4[j]; k4[j] = t;
+					}
+				}
+			}
+			for (int i = 0; i < 4; i++) fc[m].key[i] = k4[i];
+			fc[m].elem = (int32_t)e;
+			fc[m].face = (int16_t)f;
+			m++;
+		}
+	}
+	qsort(fc, (size_t)m, sizeof(eface_t), cmp_eface);
+
+	// 面上の標本点の重み (三角形 : 面積座標、四角形 : 双 1 次の (s, t))
+	static const double TW[3][3] = {
+		{0.2, 0.3, 0.5}, {0.5, 0.25, 0.25}, {0.1, 0.6, 0.3}};
+	static const double QST[3][2] = {{-0.3, 0.4}, {0.6, -0.2}, {0.1, 0.8}};
+
+	double jmax = 0, vmax = 0;
+	int64_t nshare = 0, nmix = 0, nskip = 0;
+	for (int64_t p = 0; p + 1 < m; p++) {
+		if (cmp_eface(&fc[p], &fc[p + 1]) != 0) continue;
+		const int nv = ((fc[p].key[3] >= 0) ? 4 : 3);
+		const int e0 = fc[p].elem, e1 = fc[p + 1].elem;
+		nshare++;
+		if (edge_elem_kind(e0) != edge_elem_kind(e1)) nmix++;
+
+		// 面の全体節点 (要素 e0 の面の並び) と法線
+		const int (*ft0)[4];
+		edge_face_table(edge_elem_kind(e0), &ft0);
+		const int32_t *nd0 = edge_elem_nodes(e0);
+		int32_t gn[4];
+		for (int i = 0; i < nv; i++) gn[i] = nd0[ft0[fc[p].face][i]];
+		// 法線は角 0,1,2 から作る。四角形では 0->2 が**対角線**なので、これが
+		// 正しい法線になるのは**面が平面のとき**。analysis = E は naff 検査で
+		// アフィンな要素 (平行六面体 / 平行移動の角柱) に限られ、その面は
+		// 平行四辺形なので厳密。この検査を非アフィンな格子に流用するときは、
+		// 法線の取り方を直さないと落とし残しが偽の跳びになる
+		const double a1[3] = {Xp[gn[1]] - Xp[gn[0]], Yp[gn[1]] - Yp[gn[0]], Zp[gn[1]] - Zp[gn[0]]};
+		const double a2[3] = {Xp[gn[2]] - Xp[gn[0]], Yp[gn[2]] - Yp[gn[0]], Zp[gn[2]] - Zp[gn[0]]};
+		double nv3[3] = {(a1[1] * a2[2]) - (a1[2] * a2[1]),
+		                 (a1[2] * a2[0]) - (a1[0] * a2[2]),
+		                 (a1[0] * a2[1]) - (a1[1] * a2[0])};
+		const double nn = sqrt((nv3[0] * nv3[0]) + (nv3[1] * nv3[1]) + (nv3[2] * nv3[2]));
+		if (nn <= 0) continue;
+		for (int i = 0; i < 3; i++) nv3[i] /= nn;
+
+		for (int q = 0; q < 3; q++) {
+			double wt[4];
+			if (nv == 3) {
+				for (int i = 0; i < 3; i++) wt[i] = TW[q][i];
+			}
+			else {
+				const double s = QST[q][0], t = QST[q][1];
+				wt[0] = (1 - s) * (1 - t) / 4;
+				wt[1] = (1 + s) * (1 - t) / 4;
+				wt[2] = (1 + s) * (1 + t) / 4;
+				wt[3] = (1 - s) * (1 + t) / 4;
+			}
+
+			double side[2][3];
+			int ok = 1;
+			for (int sd = 0; sd < 2; sd++) {
+				const int e = ((sd == 0) ? e0 : e1);
+				const int kind = edge_elem_kind(e);
+				const int nen = edge_elem_nen(e);
+				const int nedge = edge_elem_nedge(e);
+				const int32_t *nd = edge_elem_nodes(e);
+				// 全体節点 -> この要素の局所節点 -> 参照座標を重み付けする
+				double ref[3] = {0, 0, 0};
+				for (int i = 0; i < nv; i++) {
+					int l = -1;
+					for (int a = 0; a < nen; a++) {
+						if (nd[a] == gn[i]) l = a;
+					}
+					if (l < 0) {
+						// 面のキーは節点の集合なので起こらないはず。**途中まで
+						// 足した参照点で評価すると意味の無い値を跳びに数える**
+						// ので、その標本ごと捨てる
+						ok = 0;
+						break;
+					}
+					double rp[3];
+					edge_ref_node(kind, l, rp);
+					for (int c = 0; c < 3; c++) ref[c] += wt[i] * rp[c];
+				}
+				if (!ok) break;
+				double wb[12][3];
+				edge_basis_phys(e, ref, wb);
+				const int32_t *ed = &TetEdge[EdgeOff[e]];
+				const signed char *sg = &TetEdgeSgn[EdgeOff[e]];
+				for (int c = 0; c < 3; c++) side[sd][c] = 0;
+				for (int k = 0; k < nedge; k++) {
+					const double uk = sg[k] * u[ed[k]];
+					for (int c = 0; c < 3; c++) side[sd][c] += uk * wb[k][c];
+				}
+			}
+
+			if (!ok) {
+				nskip++;
+				continue;
+			}
+
+			// 接線成分の差 (法線成分は連続でなくてよい)
+			double d[3], dn = 0, vn = 0;
+			for (int c = 0; c < 3; c++) d[c] = side[0][c] - side[1][c];
+			for (int c = 0; c < 3; c++) dn += d[c] * nv3[c];
+			for (int c = 0; c < 3; c++) vn += side[0][c] * nv3[c];
+			double dt = 0, vt = 0;
+			for (int c = 0; c < 3; c++) {
+				const double dd = d[c] - (dn * nv3[c]);
+				const double vv = side[0][c] - (vn * nv3[c]);
+				dt += dd * dd;
+				vt += vv * vv;
+			}
+			if (sqrt(dt) > jmax) jmax = sqrt(dt);
+			if (sqrt(vt) > vmax) vmax = sqrt(vt);
+		}
+	}
+	free(fc);
+
+	const double rel = jmax / ((vmax > 0) ? vmax : 1);
+	fprintf(fp_log, "  (g) tangential continuity : %lld shared faces (%lld between "
+		"different kinds), max jump / max|Et| = %.3e\n",
+		(long long)nshare, (long long)nmix, rel);
+	if (nskip > 0) {
+		fprintf(fp_log, "*** %lld face samples could not be located in both "
+			"elements; the face tables and the element node lists disagree\n",
+			(long long)nskip);
+		return 1;
+	}
+	if (rel > 1e-10) {
+		fprintf(fp_log, "*** the tangential trace is not continuous across faces; "
+			"the edge basis is not curl-conforming\n");
+		return 1;
+	}
+
+	return 0;
+}
+
+
 // 全体行列の作成 (辺要素)
 //   S : 回転回転行列 (ν)、T : 質量行列 (σ)。どちらも NULL 可
 void assemble_edge(crs_t *S, crs_t *T)
@@ -703,10 +1045,10 @@ void assemble_edge(crs_t *S, crs_t *T)
 	if (T != NULL) crs_zero(T);
 
 	const int nelem = edge_elem_count();
-	const int nedge = edge_elem_nedge();
 
 	for (int e = 0; e < nelem; e++) {
 		const int m = edge_elem_mat(e);
+		const int nedge = edge_elem_nedge(e);
 		double nu[6];
 		material_coef_pub(m, 3, nu);			// ν = (μ0 μ~)^-1
 		const double sig = Material[m].sigma;
@@ -714,8 +1056,8 @@ void assemble_edge(crs_t *S, crs_t *T)
 		double se[12][12], te[12][12];
 		edge_elem_matrices(e, nu, sig, se, te);
 
-		const int32_t *ed = &TetEdge[e * nedge];
-		const signed char *sg = &TetEdgeSgn[e * nedge];
+		const int32_t *ed = &TetEdge[EdgeOff[e]];
+		const signed char *sg = &TetEdgeSgn[EdgeOff[e]];
 		for (int k = 0; k < nedge; k++) {
 			for (int l = 0; l < nedge; l++) {
 				const double s = (double)(sg[k] * sg[l]);
@@ -760,10 +1102,8 @@ int solve_edge_test(FILE *fp_log)
 	edge_build();
 
 	fprintf(fp_log, "\n=== edge element (Nedelec) self test ===\n");
-	fprintf(fp_log, "  nodes = %d, %s = %d, edges = %d\n", NNode,
-		((MeshElem == MESHELEM_HEX) ? "hexahedra"
-		: (MeshElem == MESHELEM_PRISM) ? "prisms" : "tetrahedra"),
-		edge_elem_count(), NEdge);
+	fprintf(fp_log, "  nodes = %d, elements = %d (%d tet / %d hex / %d prism), edges = %d\n",
+		NNode, edge_elem_count(), NTet, NHex, NPrism, NEdge);
 	fflush(fp_log);
 
 	crs_t S, T;
@@ -801,12 +1141,13 @@ int solve_edge_test(FILE *fp_log)
 	const int nelem = edge_elem_count();
 	for (int e = 0; e < nelem; e++) {
 		const int m = edge_elem_mat(e);
+		const int kind = edge_elem_kind(e);
 		double nu[6];
 		material_coef_pub(m, 3, nu);
 		const int32_t *nd = edge_elem_nodes(e);
 		double vol = 0, ee = 0;
 
-		if (MeshElem == MESHELEM_HEX) {
+		if (kind == MESHELEM_HEX) {
 			// アフィン (平行六面体) か : 非アフィン成分の係数 (ξη, ηζ, ζξ, ξηζ)
 			double h = 0;
 			for (int a = 0; a < 8; a++) {
@@ -853,7 +1194,7 @@ int solve_edge_test(FILE *fp_log)
 			}
 			ee *= vol;
 		}
-		else if (MeshElem == MESHELEM_PRISM) {
+		else if (kind == MESHELEM_PRISM) {
 			// アフィン (上面 = 下面の平行移動) か
 			double h = 0;
 			for (int a = 0; a < 6; a++) {
@@ -1059,6 +1400,16 @@ int solve_edge_test(FILE *fp_log)
 		fprintf(fp_log, "  (d) symmetry            : max|S-S^T|/max|S| = %.3e   "
 			"max|T-T^T|/max|T| = %.3e\n", rel, relt);
 		if ((rel > 1e-12) || (relt > 1e-12)) ierr = 1;
+	}
+
+	// (g) 面をまたぐ接線連続性 (種別の混在で本命になる検査)
+	{
+		double *ur = (double *)malloc((size_t)ne * sizeof(double));
+		for (int i = 0; i < ne; i++) {
+			ur[i] = fmod((i + 1) * 0.41421356237, 1.0) - 0.5;	// 決定的な擬似乱数
+		}
+		if (edge_face_conform(fp_log, ur)) ierr = 1;
+		free(ur);
 	}
 
 	// (e) ゲージ固定 (tree-cotree)

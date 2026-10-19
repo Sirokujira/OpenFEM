@@ -84,7 +84,7 @@ static void elem_get(int64_t e, elem_t *el)
 
 
 // 1 ポート励振の求解 -> 各導体の反作用 q[0..NPort]
-static int solve_port(const crs_t *A, const unsigned char *fix, int kport,
+int solve_port(const crs_t *A, const unsigned char *fix, int kport,
 	double *phi, double *work, double *q, double *energy,
 	FILE *fp_log, const char *label)
 {
@@ -881,6 +881,19 @@ static int solve_one(FILE *fp_log)
 		if ((mode == 0) && !(Analysis & ANALYSIS_C)) continue;
 		if ((mode == 1) && !(Analysis & ANALYSIS_L)) continue;
 		if ((mode == 2) && !(Analysis & ANALYSIS_R)) continue;
+
+		// 熱連成 : 定常電流界は σ(T) を要素ごとに更新しながら thermal.c が解く。
+		// 熱連成でないときの経路には一切触れない (既存の答えをビット単位で保つ)
+		if ((mode == 2) && ThermalOn) {
+			double g = 0;
+			const int e = solve_thermal(fp_log, &g);
+			ierr |= e;
+			if (!e) {
+				Gmat[0] = g;
+				HaveR = 1;
+			}
+			continue;
+		}
 
 		const char *modename = ((mode == 0) ? "electrostatic" :
 		                        (mode == 1) ? "electrostatic (vacuum)" : "conduction");

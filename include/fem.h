@@ -52,6 +52,8 @@ extern "C" {
 #define EPS0   (1 / (C0 * C0 * MU0))
 #define ETA0   (C0 * MU0)
 #define EPS    (1e-6)
+#define STEFAN (5.670374419e-8)	// Stefan-Boltzmann 定数 [W/(m^2 K^4)]
+#define KELVIN (273.15)			// 0 degC の絶対温度 [K]
 
 // 解析種別ビット (analysis キー)
 #define ANALYSIS_C (1 << 0)		// 静電界 -> 容量行列 C
@@ -128,6 +130,8 @@ typedef struct {
 	double epstempco, epstemp0;
 	double mutempco,  mutemp0;
 	double bhtempco,  bhtemp0;
+	// 熱伝導率 [W/(m K)] (熱連成 thermal で使う。0 : 熱を通さない)
+	double kth;
 	// B-H 曲線 (軸毎)。bhaniso = 0 なら軸 0 の曲線を |B| に対して等方的に使う
 	int    bhaniso;				// 1 : 軸毎に別の曲線 (直交異方性)
 	int    nbh[3];				// 各軸の点数 (0 : 線形、mu6 を使う)
@@ -194,11 +198,13 @@ EXTERN int NEdge;
 EXTERN int64_t *EdgePtr;		// [NNode+1] 節点 i を始点とする辺の範囲
 EXTERN int32_t *EdgeTo;			// [NEdge] 終点 (昇順)
 EXTERN int32_t *EdgeFrom;		// [NEdge] 始点 (節点番号の小さい方)
-// 要素毎の辺番号と向き。stride は要素あたりの辺数 (四面体 6 / 六面体 12 /
-// 角柱 9)。辺要素は種別が 1 つの格子でだけ使うので stride は格子で 1 つ。
-// 名前は四面体由来だが純六面体・純角柱の格子でも使う
-EXTERN int32_t *TetEdge;		// [nedge*nelem] 要素の辺番号
-EXTERN signed char *TetEdgeSgn;	// [nedge*nelem] 局所の並びと全体の向きの符号
+// 要素毎の辺番号と向き。要素あたりの辺数は種別で違う (四面体 6 / 六面体 12 /
+// 角柱 9) ので、**要素 e の辺は EdgeOff[e] から EdgeOff[e+1] まで**を見る。
+// 種別が 1 つの格子では EdgeOff[e] = e * nedge になり、従来の並びと一致する。
+// 名前は四面体由来だが六面体・角柱・混在格子でも使う
+EXTERN int32_t *TetEdge;		// [EdgeOff[nelem]] 要素の辺番号
+EXTERN signed char *TetEdgeSgn;	// [EdgeOff[nelem]] 局所の並びと全体の向きの符号
+EXTERN int64_t *EdgeOff;		// [nelem+1] 要素毎の辺の開始位置
 
 EXTERN int NTri;				// 三角形数 (電極面の指定に使う)
 EXTERN int32_t *Tri;			// [3*NTri]
@@ -306,6 +312,19 @@ EXTERN double Volt;				// 励振電圧 [V]
 EXTERN double Freq;				// 周波数 [Hz] (tanδ による誘電損の計算に使う、0 = 無効)
 EXTERN double Curr;				// 静磁場解析の励振電流 [A]
 EXTERN double Temperature;		// 動作温度 [degC] (tempco と併せて σ を補正する)
+
+// 電気-熱連成 (thermal)。定常電流界 (R) の Joule 発熱で温度分布を解き、
+// σ(T) を要素ごとに更新して R が収束するまで繰り返す
+EXTERN int ThermalOn;			// 1 : 熱連成を行う
+EXTERN double ThermalCurrent;	// 駆動電流 [A]
+EXTERN int ThermalMaxIter;		// 連成反復の上限
+EXTERN double ThermalTol;		// 連成反復の収束判定 (R と T_max の相対変化)
+EXTERN int HeatSinkOn[MAXPORT];	// 導体ごと : 1 なら温度を固定する (ヒートシンク)
+EXTERN double HeatSinkT[MAXPORT];	// ヒートシンクの温度 [degC]
+EXTERN double ConvH;			// 対流熱伝達係数 h [W/(m^2 K)] (0 : 対流なし)
+EXTERN double ConvT;			// 対流の周囲温度 [degC]
+EXTERN double RadEps;			// 輻射の放射率 ε (0 : 輻射なし)
+EXTERN double RadT;				// 輻射の周囲 (壁) の温度 [degC]
 
 // 周波数掃引 (frequencysweep)。各点で分散材料を展開し直して解き直す
 EXTERN int NFreqSweep;

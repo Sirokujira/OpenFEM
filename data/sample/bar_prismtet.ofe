@@ -1,0 +1,33 @@
+OpenFEM 1 0
+title = 3D eddy current (A-phi) on a mixed mesh (角柱 + 四面体)
+#
+# bar_eddy と同じ導体棒 (2mm x 0.25mm x 1mm、24x2x24) を**角柱 + 四面体**の
+# 混在した格子で切る。
+#
+#   python3 mkmesh.py bar_hex bar_prismtet.msh -mix 2
+#
+# z で分割 (界面は三角形面)。最低次 Nedelec の接線トレースは
+# その面の辺の自由度だけで決まるので、種別が違っても接線連続性が保たれる。
+#
+# 幾何・物理タグ・1 次元厳密解 Z = γL/(2σW tanh(γt/2)) は純格子と同じ。
+# **1 次元解はどの空間でも同じように離散化されるので、R/L の値だけでは
+# 純格子と区別できない** (実測: bar_hexprism の R は純六面体と印字全桁が
+# 一致する)。混在していることは ofe.log の要素数の内訳で確かめる。
+#
+# 種別ごとに物理タグを分けてある (1 / 2) が、渦電流の検証では 1 次元の
+# 閉形式を残すため**両方に同じ導体材料**を当てる。種別ごとの材料の添字は
+# 辺要素の自己検証 (edge_mix_hp / edge_mix_pt) の側で効かせる。
+#
+mesh = bar_prismtet.msh
+material = 1.0 5.8e7
+region = 1 2
+region = 2 2
+electrode = 10 0
+electrode = 11 1
+awall = 20
+frequency = 1e5
+voltage = 1.0
+
+analysis = A
+solver = 50000 2000 1e-9
+end

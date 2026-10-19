@@ -64,10 +64,11 @@ int tri_grad_center(int, double [6][2], int *);
 // edge.c
 void edge_build(void);
 int edge_elem_count(void);
-int edge_elem_nedge(void);
-int edge_elem_nen(void);
+int edge_elem_kind(int);
+int edge_elem_nedge(int);
+int edge_elem_nen(int);
 const int32_t *edge_elem_nodes(int);
-const int (*edge_elem_table(void))[2];
+const int (*edge_elem_table(int))[2];
 int edge_elem_mat(int);
 void edge_elem_matrices(int, const double [6], double, double [12][12], double [12][12]);
 void edge_elem_center(int, double [12][3], double [12][3]);
@@ -128,6 +129,8 @@ void element_matrix(double, double, double, const double [6], double [8][8]);
 int tensor6_inverse(const double [6], double [6]);
 void assemble(crs_t *, int);
 void assemble_nu(crs_t *, const double *);
+void assemble_cell(crs_t *, const double *);
+void joule_load(const double *, const double *, double *);
 void assemble_mass(crs_t *);
 double bh_nu(const material_t *, int, double);
 void assemble_newton(crs_t *, const double *, double *);
@@ -147,6 +150,11 @@ int solver_direct_c(const crs_t *, const crs_t *, double,
 
 // solve.c
 int solve(FILE *);
+int solve_port(const crs_t *, const unsigned char *, int, double *, double *,
+	double *, double *, FILE *, const char *);
+
+// thermal.c
+int solve_thermal(FILE *, double *);
 
 // mpiwrap.c (WITH_MPI=OFF ではスタブ。mpi.h はこのモジュールの外に出さない)
 int mpi_init(int *, char ***);

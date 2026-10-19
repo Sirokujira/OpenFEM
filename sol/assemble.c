@@ -647,6 +647,78 @@ void assemble(crs_t *A, int mode)
 }
 
 
+// セル毎の等方性係数で行列を作る (熱連成 : σ(T) と熱伝導率 k)。
+// 係数が 0 以下のセルは要素ごと飛ばす (その節点は行が空になる)
+void assemble_cell(crs_t *A, const double *coefcell)
+{
+	assemble_core(A, 2, coefcell);
+}
+
+
+/*
+Joule 発熱の節点荷重 f_i = Σ_gp w σ_c |∇φ|² N_i (熱連成)。
+
+**剛性と同じ 2x2x2 Gauss・同じ重みで積分する。** そうすると Σ_i N_i = 1 から
+	Σ_i f_i = Σ_c Σ_gp w σ_c |∇φ|² = φᵀ K φ
+が丸めを除いて厳密に成り立ち、さらに自由節点で (Kφ)_i = 0 なので
+	φᵀ K φ = V I = I² R
+になる (発熱の総和 = 端子で測った電力)。熱の側でも K_T の行和が 0 なので、
+ヒートシンクから出ていく熱の総和が Σ_i f_i に一致する。この 2 つの恒等式で
+発熱の積分と熱の組み立てを検査できる (rlc_check.sh)。
+要素の中心 1 点で |∇φ|² を取るような手抜きをすると、σ が一様でない
+(温度が要素内で変わる) ときに 1 つ目が崩れる。
+*/
+void joule_load(const double *phi, const double *sigcell, double *f)
+{
+	const int64_t nn = num_node();
+	const double gp = 1 / sqrt(3.0);
+
+	for (int64_t i = 0; i < nn; i++) f[i] = 0;
+
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const int64_t cid = ((int64_t)i * Ny + j) * Nz + k;
+		const double sg = sigcell[cid];
+		if (sg <= 0) continue;
+
+		const double dx = Xn[i + 1] - Xn[i];
+		const double dy = Yn[j + 1] - Yn[j];
+		const double dz = Zn[k + 1] - Zn[k];
+		const double detj = (dx * dy * dz) / 8;
+		const double rx = 2 / dx, ry = 2 / dy, rz = 2 / dz;
+
+		int64_t nd[8];
+		double pv[8];
+		for (int l = 0; l < 8; l++) {
+			nd[l] = node_index(i + LI(l), j + LJ(l), k + LK(l));
+			pv[l] = phi[nd[l]];
+		}
+
+		for (int g = 0; g < 8; g++) {
+			const double xi  = (LI(g) ? +gp : -gp);
+			const double eta = (LJ(g) ? +gp : -gp);
+			const double zta = (LK(g) ? +gp : -gp);
+
+			double gr[3] = {0, 0, 0}, nv[8];
+			for (int l = 0; l < 8; l++) {
+				const double si = (LI(l) ? +1.0 : -1.0);
+				const double sj = (LJ(l) ? +1.0 : -1.0);
+				const double sk = (LK(l) ? +1.0 : -1.0);
+				gr[0] += pv[l] * si * (1 + (sj * eta)) * (1 + (sk * zta)) / 8 * rx;
+				gr[1] += pv[l] * sj * (1 + (sk * zta)) * (1 + (si * xi )) / 8 * ry;
+				gr[2] += pv[l] * sk * (1 + (si * xi )) * (1 + (sj * eta)) / 8 * rz;
+				nv[l] = (1 + (si * xi)) * (1 + (sj * eta)) * (1 + (sk * zta)) / 8;
+			}
+			const double qg = sg * ((gr[0] * gr[0]) + (gr[1] * gr[1]) + (gr[2] * gr[2])) * detj;
+			for (int l = 0; l < 8; l++) f[nd[l]] += qg * nv[l];
+		}
+	}
+	}
+	}
+}
+
+
 // 静磁場の行列をセル毎の ν で作る (非線形 B-H 反復)
 void assemble_nu(crs_t *A, const double *nucell)
 {
