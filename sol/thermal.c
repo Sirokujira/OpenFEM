@@ -8,7 +8,8 @@ thermal.c
 抵抗 R と最高温度が動かなくなるまで繰り返す (Picard 反復):
 
 	∇・(σ(T) ∇φ) = 0           φ = V (ポート), 0 (基準導体)
-	∇・(k ∇T)    = -σ(T)|∇φ|²  T = T_sink (heatsink を付けた導体)、他は断熱
+	∇・(k ∇T)    = -σ(T)|∇φ|²  T = T_sink (heatsink を付けた導体)
+	-k ∂T/∂n = h (T - T_amb)    露出面 (convection)、指定が無ければ断熱
 
 電気の系は σ を固定すれば線形なので、V = Volt で 1 回解いて電流が I になるよう
 φ を一様に縮尺すれば足りる (R = V / I_V は縮尺に依らない)。
@@ -19,7 +20,7 @@ thermal.c
 
 厳密に成り立つ恒等式 (rlc_check.sh で見る):
 	Σ_i f_i (場の発熱の積分) = I² R (端子の電力)            [joule_load の注釈]
-	ヒートシンクから出ていく熱 = Σ_i f_i                    (K_T の行和が 0)
+	ヒートシンク + 対流で出ていく熱 = Σ_i f_i               (K_T の列和が 0)
 α = 0 なら σ が温度に依らないので R は熱連成なしの値と一致し、一様断面の棒では
 1 次要素の解が節点で厳密になる (定数の発熱源の 1 次元 Poisson)。
 
@@ -36,6 +37,85 @@ thermal.c
 #define TK(l) ((l) & 1)
 
 
+// 対流 -k dT/dn = h (T - T_amb) の面。熱を通すセルの 6 面のうち、隣が格子の外か
+// 熱を通さないセルのものが露出面。電極の面 (4 節点がすべて導体の節点) は端子に
+// 接しているので除く。
+//   B != NULL : 面の質量 h ∫N_i N_j dA を足す (長方形なので (a/6)(1+δ) x (b/6)(1+δ)、厳密)
+//   g != NULL : 右辺 h T_amb ∫N_i dA = h T_amb ab/4 を足す
+//   t != NULL : 対流で出ていく熱 h ∫(T - T_amb) dA を返す (双 1 次の面の平均 = 4 節点の平均)
+// 戻り値は t があればその熱、なければ面の数
+static double conv_faces(crs_t *B, double *g, const double *t, const double *kcell)
+{
+	double qsum = 0;
+	int64_t nface = 0;
+
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+		if (kcell[c] <= 0) continue;
+		double h[3];
+		h[0] = Xn[i + 1] - Xn[i];
+		h[1] = Yn[j + 1] - Yn[j];
+		h[2] = Zn[k + 1] - Zn[k];
+		for (int d = 0; d < 3; d++) {
+		for (int s = 0; s < 2; s++) {
+			// 隣のセル
+			int ni = i, nj = j, nk = k, out = 0;
+			if (d == 0) { ni += (s ? 1 : -1); out = (ni < 0) || (ni >= Nx); }
+			if (d == 1) { nj += (s ? 1 : -1); out = (nj < 0) || (nj >= Ny); }
+			if (d == 2) { nk += (s ? 1 : -1); out = (nk < 0) || (nk >= Nz); }
+			if (!out && (kcell[((int64_t)ni * Ny + nj) * Nz + nk] > 0)) continue;
+
+			// 面の 4 節点 (面内の 2 軸 p < q の局所座標 (a, b))
+			const int p = ((d == 0) ? 1 : 0);
+			const int q = ((d == 2) ? 1 : 2);
+			int64_t nd[4];
+			int li[4], lj[4], lk[4], ncond = 0;
+			for (int m = 0; m < 4; m++) {
+				int l3[3];
+				l3[d] = s;
+				l3[p] = (m >> 1) & 1;
+				l3[q] = m & 1;
+				li[m] = i + l3[0];
+				lj[m] = j + l3[1];
+				lk[m] = k + l3[2];
+				nd[m] = node_index(li[m], lj[m], lk[m]);
+				if (NodeConductor[nd[m]] >= 0) ncond++;
+			}
+			if (ncond == 4) continue;	// 電極の面
+			nface++;
+
+			const double area = h[p] * h[q];
+			if (B) {
+				for (int m = 0; m < 4; m++) {
+					const int64_t rowstart = B->rowptr[nd[m]];
+					for (int mm = 0; mm < 4; mm++) {
+						const double fa = (((m >> 1) == (mm >> 1)) ? 2 : 1) * h[p] / 6;
+						const double fb = (((m & 1) == (mm & 1)) ? 2 : 1) * h[q] / 6;
+						const int64_t pos = crs_offset(rowstart, li[m], lj[m], lk[m],
+							li[mm] - li[m], lj[mm] - lj[m], lk[mm] - lk[m]);
+						B->val[pos] += ConvH * fa * fb;
+					}
+				}
+			}
+			if (g) {
+				for (int m = 0; m < 4; m++) g[nd[m]] += ConvH * ConvT * area / 4;
+			}
+			if (t) {
+				const double tm = (t[nd[0]] + t[nd[1]] + t[nd[2]] + t[nd[3]]) / 4;
+				qsum += ConvH * area * (tm - ConvT);
+			}
+		}
+		}
+	}
+	}
+	}
+
+	return (t ? qsum : (double)nface);
+}
+
+
 int solve_thermal(FILE *fp_log, double *gport)
 {
 	const int n = (int)num_node();
@@ -49,6 +129,10 @@ int solve_thermal(FILE *fp_log, double *gport)
 		if (HeatSinkOn[p]) {
 			fprintf(fp_log, "  heat sink : conductor %d at %.4f [degC]\n", p, HeatSinkT[p]);
 		}
+	}
+	if (ConvH > 0) {
+		fprintf(fp_log, "  convection : h = %.6e [W/(m^2 K)], T_amb = %.4f [degC]\n",
+			ConvH, ConvT);
 	}
 	fflush(fp_log);
 
@@ -69,6 +153,7 @@ int solve_thermal(FILE *fp_log, double *gport)
 	double *tn   = (double *)malloc((size_t)n * sizeof(double));
 	double *rhs  = (double *)malloc((size_t)n * sizeof(double));
 	double *u    = (double *)malloc((size_t)n * sizeof(double));
+	double *gc   = (double *)malloc((size_t)n * sizeof(double));
 	double *q    = (double *)malloc(((size_t)NPort + 1) * sizeof(double));
 
 	// 熱の行列は温度に依らないので 1 回だけ作る
@@ -98,13 +183,21 @@ int solve_thermal(FILE *fp_log, double *gport)
 			tn[i] = 0;
 		}
 	}
-	if (nsink < 1) {
-		fprintf(fp_log, "*** thermal : the heat-sink conductors have no node\n");
+	// 対流は熱伝導の行列に足す (温度に依らない)。節点の固定は熱伝導だけで決める
+	for (int i = 0; i < n; i++) gc[i] = 0;
+	int64_t nface = 0;
+	if (ConvH > 0) {
+		nface = (int64_t)conv_faces(&B, gc, NULL, kcell);
+		fprintf(fp_log, "  convection : %lld exposed faces\n", (long long)nface);
+	}
+	if ((nsink < 1) && (nface < 1)) {
+		fprintf(fp_log, "*** thermal : the heat has no way out (the heat-sink conductors "
+			"have no node and no face is exposed to convection)\n");
 		ierr = 1;
 	}
 
 	double rprev = 0, tmprev = 0, r = 0, g = 0, tmax = 0;
-	double ptot = 0, qsink = 0, pterm = 0;
+	double ptot = 0, qsink = 0, qconv = 0, pterm = 0;
 	int it = 0, conv = 0;
 	fprintf(fp_log, "  %4s %16s %14s %16s\n", "iter", "R [ohm]", "T_max [degC]", "dR / R");
 	for (it = 1; !ierr && (it <= ThermalMaxIter); it++) {
@@ -170,7 +263,7 @@ int solve_thermal(FILE *fp_log, double *gport)
 			if (!fixt[i]) tn[i] = 0;
 		}
 		crs_spmv(&B, tn, work, NULL);
-		for (int i = 0; i < n; i++) rhs[i] = (fixt[i] ? 0 : (f[i] - work[i]));
+		for (int i = 0; i < n; i++) rhs[i] = (fixt[i] ? 0 : (f[i] + gc[i] - work[i]));
 		sprintf(label, "T%d", it);
 		if (solver_cg(&B, rhs, u, fixt, Solver.maxiter, Solver.nout, Solver.converg,
 				NULL, label) < 0) {
@@ -183,12 +276,14 @@ int solve_thermal(FILE *fp_log, double *gport)
 			if (!fixt[i]) tn[i] += u[i];
 		}
 
-		// ヒートシンクへ出ていく熱 (K_T の行和が 0 なので Σ f に一致するはず)
+		// ヒートシンクへ出ていく熱と対流で出ていく熱。K_T の列和が 0 なので
+		// 和は Σ f に一致するはず (対流の行列と右辺の和は対流の熱そのもの)
 		qsink = 0;
 		for (int i = 0; i < n; i++) {
 			const int id = NodeConductor[i];
-			if ((id >= 0) && HeatSinkOn[id]) qsink += f[i] - crs_row_dot(&B, i, tn);
+			if ((id >= 0) && HeatSinkOn[id]) qsink += f[i] + gc[i] - crs_row_dot(&B, i, tn);
 		}
+		qconv = ((ConvH > 0) ? conv_faces(NULL, NULL, tn, kcell) : 0);
 
 		// 要素の温度 = 8 節点の平均 (3 線形の体積平均)
 		tmax = -1e300;
@@ -253,7 +348,7 @@ int solve_thermal(FILE *fp_log, double *gport)
 		fprintf(fp_log, "  T_max = %.10e [degC], T_mean (conductor) = %.10e [degC]\n",
 			tmax, ((vsum > 0) ? (tsum / vsum) : Temperature));
 		fprintf(fp_log, "  joule power : I^2 R = %.12e, field integral = %.12e, "
-			"to heat sinks = %.12e [W]\n", pterm, ptot, qsink);
+			"to heat sinks = %.12e, to convection = %.12e [W]\n", pterm, ptot, qsink, qconv);
 		*gport = g;
 
 		if (FieldOut) {
@@ -268,7 +363,7 @@ int solve_thermal(FILE *fp_log, double *gport)
 	crs_free(&B);
 	free(tcell); free(scell); free(kcell);
 	free(fix); free(fixt); free(phi); free(work); free(diag);
-	free(f); free(tn); free(rhs); free(u); free(q);
+	free(f); free(tn); free(rhs); free(u); free(gc); free(q);
 
 	return ierr;
 }

@@ -2127,20 +2127,21 @@ th_exact() {
 		else { x = sqrt(-m2) * h; ex = exp(x); t = (ex - 1 / ex) / (ex + 1 / ex); c = (ex + 1 / ex) / 2 }
 		printf "%.12e %.12e", rs * L / A * t / x, Ts + (1 / ap) * (1 / c - 1) }'
 }
-# 発熱の恒等式 : I^2 R (端子) = Σ f (場の積分) = ヒートシンクへ出ていく熱
+# 発熱の恒等式 : I^2 R (端子) = Σ f (場の積分) = ヒートシンク + 対流で出ていく熱
 th_energy() {	# th_energy <ラベル>
 	res=$(awk '/joule power/ {
 		for (i = 1; i <= NF; i++) {
 			if ($i == "R") a = $(i+2)
 			if ($i == "integral") b = $(i+2)
-			if ($i == "sinks") c = $(i+2)
+			if ($i == "sinks") c = $(i+2) + 0
+			if ($i == "convection") e = $(i+2) + 0
 		}
 	}
-	END { if (a == "") { printf "NG (no joule line)"; exit }
+	END { if ((a == "") || (e == "")) { printf "NG (no joule line)"; exit }
 	      d1 = (b - a) / a; if (d1 < 0) d1 = -d1
-	      d2 = (c - a) / a; if (d2 < 0) d2 = -d2
-	      printf "%s (field %.1e, sinks %.1e)", ((d1 < 1e-9) && (d2 < 1e-9)) ? "OK" : "NG", d1, d2 }' "$WORK/ofe.log")
-	echo "  $1 : I^2 R = field integral = heat to sinks : $res"
+	      d2 = (c + e - a) / a; if (d2 < 0) d2 = -d2
+	      printf "%s (field %.1e, sinks + convection %.1e)", ((d1 < 1e-9) && (d2 < 1e-9)) ? "OK" : "NG", d1, d2 }' "$WORK/ofe.log")
+	echo "  $1 : I^2 R = field integral = heat out (sinks + convection) : $res"
 	case "$res" in NG*) status=1 ;; esac
 }
 th_run() {	# th_run <ofe> : 実行して非 0 なら NG
@@ -2234,6 +2235,126 @@ tvtk=$(awk '/^SCALARS T / { f = 1; next } f && /^LOOKUP/ { next }
 	f && (NF == 1) { if (($1 + 0) > m) m = $1 + 0; next } f { f = 0 }
 	END { printf "%.9e", m }' "$WORK/ofe_field.vtk")
 compare "max of the T field == T_max in the log [degC]" "$tvtk" "$(th_t)" 1e-8
+# (8) 対流 (convection)。data/sample/thermal_conv.ofe : 側面だけから対流で冷やす棒。
+#     両端が断熱で発熱も冷却も一様なので温度は一様、断面を 1 x 1 セルにしてあるので
+#     離散解も厳密に一様になる (どの節点でも受け持つ体積と側面積の比が A/P)。
+#     許容 1e-9 は Picard 反復の打ち切り (1e-10、収縮率 (I/I_c)² = 0.48) の分
+echo "[thermal] convection : a bar cooled from its sides only (uniform, exact)"
+th_conv() {	# th_conv <I> -> "R T_max" (thermal_conv.ofe の形状・材料)
+	awk -v I="$1" 'BEGIN {
+		r0 = 1e-6; a = 4e-3; T0 = 0; Ta = 30; h = 200; L = 0.01; A = 5e-7; P = 3e-3
+		J = I / A; ra = r0 * (1 + a * (Ta - T0)); aa = a / (1 + a * (Ta - T0))
+		th = J * J * ra * A / (h * P - J * J * r0 * a * A)
+		printf "%.12e %.12e", ra * (1 + aa * th) * L / A, Ta + th }'
+}
+th_faces() { awk '/exposed faces/ { print $3; exit }' "$WORK/ofe.log"; }
+th_nface() {	# th_nface <ラベル> <期待値> : 対流を課した面の数
+	if [ "$(th_faces)" = "$2" ]; then echo "  $1 : $2 exposed faces -> OK"
+	else echo "  $1 : $(th_faces) exposed faces, expected $2 -> NG" >&2; status=1; fi
+}
+cp "$SRC/thermal_conv.ofe" "$WORK/"
+th_run thermal_conv.ofe
+set -- $(th_conv 6)
+compare "R(convection only, I = 6 A) [ohm]" "$(th_r)" "$1" 1e-9
+compare "T_max(convection only, uniform) [degC]" "$(th_t)" "$2" 1e-9
+th_energy "thermal_conv"
+#     電極の面 (棒の両端) は除くので側面の 40 x 4 面だけ。両端に課すと温度が
+#     一様でなくなるうえ数が 162 になる
+th_nface "thermal_conv (sides only, not the electrode faces)" 160
+#     棒の向きを y / z に回す (座標の巡回置換)。x 向きの棒では x 方向の面が
+#     電極の面として除かれるだけで、面の質量の組み立てを一度も通らない
+th_rot() {	# th_rot <y|z> : thermal_conv.ofe の座標を巡回置換した棒
+	awk -v ax="$1" '
+		function perm(a, b, c) { if (ax == "y") return c " " a " " b; return b " " c " " a }
+		/^xmesh/ { X = $3 " " $4 " " $5; next }
+		/^ymesh/ { Y = $3 " " $4 " " $5; next }
+		/^zmesh/ { Z = $3 " " $4 " " $5
+			if (ax == "y") { print "xmesh = " Z; print "ymesh = " X; print "zmesh = " Y }
+			else { print "xmesh = " Y; print "ymesh = " Z; print "zmesh = " X }
+			next }
+		/^geometry|^conductor/ { print $1, $2, $3, $4, perm($5 " " $6, $7 " " $8, $9 " " $10); next }
+		{ print }' "$SRC/thermal_conv.ofe" > "$WORK/thconv_$1.ofe"
+	th_run "thconv_$1.ofe"
+}
+for ax in y z; do
+	th_rot $ax
+	set -- $(th_conv 6)
+	compare "R(convection only, bar along $ax) [ohm]" "$(th_r)" "$1" 1e-9
+	th_nface "bar along $ax" 160
+done
+#     熱を通さないセル (空気) に囲まれた棒。露出面は格子の外だけでなく「隣が
+#     熱を通さないセル」の面も含む。格子の外だけを見る誤りはこれでだけ落ちる
+awk '/^ymesh/{print "ymesh = -1e-3 1 0 1 1e-3 1 2e-3"; next}
+	/^zmesh/{print "zmesh = -1e-3 1 0 1 0.5e-3 1 1.5e-3"; next} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/thconv_air.ofe"
+th_run thconv_air.ofe
+set -- $(th_conv 6)
+compare "R(convection only, bar embedded in air) [ohm]" "$(th_r)" "$1" 1e-9
+th_nface "bar embedded in air" 160
+#     熱暴走の境目 (I_c = 8.660 A) の両側。手前 (I = 8、収縮率 0.85) は
+#     130 回程度で収束して厳密値に合い、向こう側 (I = 9) は弾く
+awk '/^thermal/{print "thermal = 8"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thconv8.ofe"
+th_run thconv8.ofe
+set -- $(th_conv 8)
+compare "R(convection only, I = 8 A, near runaway) [ohm]" "$(th_r)" "$1" 1e-8
+awk '/^thermal/{print "thermal = 9"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thconv9.ofe"
+mesh_reject "convection only, I = 9 A (> I_c = 8.66 A, no steady state)" thconv9.ofe
+if ! grep -q "thermal runaway" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than thermal runaway" >&2
+	status=1
+fi
+# (9) ヒートシンク + 側面の対流 (フィン)。θ = T - T_s として
+#       θ'' + μ² θ = -c,  μ² = (J² ρ0 α A - h P) / (k A),  c = (J² ρ_s A - h P (T_s - T_a)) / (k A)
+#       R = (ρ_s L + ρ0 α ∫θ) / A,  ∫θ = (c/μ²) ((2/μ) tan(μL/2) - L)   (μ² < 0 なら tanh)
+#     h = 20 で μ² > 0 (tan)、h = 200 で μ² < 0 (tanh)。T_a = 30 ≠ T_s = 20 なので
+#     対流が熱を持ち込む項 (c の第 2 項) も効く。ヒートシンクの節点は側面にも
+#     接しているので、「ヒートシンクへ出ていく熱」に対流の右辺を入れ忘れると
+#     エネルギーの恒等式が落ちる
+th_fin() {	# th_fin <I> <h> -> "R T_max" (thermal_bar.ofe + convection = h 30)
+	awk -v I="$1" -v h="$2" 'BEGIN {
+		r0 = 1e-6; k = 10; L = 0.01; A = 1e-6; P = 4e-3; T0 = 0; Ts = 20; Ta = 30; a = 4e-3
+		J = I / A; rs = r0 * (1 + a * (Ts - T0))
+		mu2 = (J * J * r0 * a * A - h * P) / (k * A)
+		c = (J * J * rs * A - h * P * (Ts - Ta)) / (k * A)
+		if (mu2 > 0) { x = sqrt(mu2); t = sin(x * L / 2) / cos(x * L / 2); cc = cos(x * L / 2) }
+		else { x = sqrt(-mu2); ex = exp(x * L / 2); t = (ex - 1 / ex) / (ex + 1 / ex); cc = (ex + 1 / ex) / 2 }
+		i1 = (c / mu2) * ((2 / x) * t - L)
+		printf "%.12e %.12e", (rs * L + r0 * a * i1) / A, Ts + (c / mu2) * (1 / cc - 1) }'
+}
+for h in 20 200; do
+	for nx in 20 40; do
+		awk -v nx="$nx" -v h="$h" '/^xmesh/{print "xmesh = 0 " nx " 0.01"; next}
+			/^thermal/{print "convection = " h " 30"} {print}' \
+			"$SRC/thermal_bar.ofe" > "$WORK/thfin$h-$nx.ofe"
+		th_run "thfin$h-$nx.ofe"
+		eval "r$nx=\$(th_r)"
+	done
+	set -- $(th_fin 7.5 "$h")
+	#   許容 0.1% : h² の離散化誤差 (40 分割で -0.015% / -0.007%、実測)
+	compare "R(fin, h = $h) [ohm]" "$r40" "$1" 0.001
+	compare "T_max(fin, h = $h) [degC]" "$(th_t)" "$2" 0.001
+	th_energy "fin, h = $h"
+	res=$(awk -v a="$r20" -v b="$r40" -v e="$1" 'BEGIN {
+		e1 = (a - e) / e; if (e1 < 0) e1 = -e1
+		e2 = (b - e) / e; if (e2 < 0) e2 = -e2
+		q = (e2 > 0) ? e1 / e2 : 0
+		printf "%s (err %.2e -> %.2e, ratio %.3f)", ((q > 3.8) && (q < 4.2)) ? "OK" : "NG", e1, e2, q }')
+	echo "  second-order convergence, fin h = $h (20 -> 40 cells) : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+# (10) 首のある導体を対流だけで冷やす。x / y 方向の面 (パッドの肩と首の側面) と
+#      空気に接する面が全部出てくる 3 次元の形で、発熱 = 対流で出ていく熱
+awk '!/^heatsink/ && /^thermal/{print "convection = 500 30"} !/^heatsink/{print}' \
+	"$SRC/thermal_neck.ofe" > "$WORK/thneck_conv.ofe"
+th_run thneck_conv.ofe
+th_energy "thermal_neck cooled by convection only"
+#      エネルギーの恒等式は「どの面に課したか」を見ない (内部の面に課しても
+#      つじつまは合う) ので、面の数を別に数える:
+#        上下 (z) : 導体の柱 (パッド 6x16x2 + 首 6x4) x 2 = 432
+#        y 方向   : パッドの両脇 6x2x2x2 = 48 + 首の両脇 6x2x2 = 24
+#        x 方向   : パッドの肩 (首の外の 12x2) x 2 = 48 (両端は電極の面で除く)
+th_nface "thermal_neck (432 + 72 + 48)" 552
+
 # (7) 弾くべき入力 (理由まで grep する)
 th_reject() {	# th_reject <ラベル> <ofe> <理由の文字列>
 	mesh_reject "$1" "$2"
@@ -2258,6 +2379,13 @@ th_reject "heatsink on a conductor that does not exist" thx_badsink.ofe "does no
 awk '/^analysis/{print "kthermal = 2 10"; print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next}
 	{print}' "$SRC/box_tet.ofe" > "$WORK/thx_tet.ofe"
 th_reject "thermal on an unstructured mesh" thx_tet.ofe "structured grid only"
+#     h = 0 の対流は熱の逃げ道にならない (ヒートシンクも無ければ定常解が無い)
+awk '/^convection/{print "convection = 0 30"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thx_h0.ofe"
+th_reject "convection with h = 0 and no heat sink" thx_h0.ofe "at least one heatsink"
+awk '/^convection/{print "convection = -200 30"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thx_hneg.ofe"
+th_reject "convection with h < 0" thx_hneg.ofe "invalid convection data"
+awk '/^convection/{print "convection = 200"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thx_h1.ofe"
+th_reject "convection without the ambient temperature" thx_h1.ofe "invalid convection data"
 
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
@@ -2293,13 +2421,17 @@ awk '!/^thermal/' "$SRC/thermal_bar.ofe" | awk '!/^heatsink/' > "$WORK/lint_kth.
 awk '!/^thermal/' "$SRC/thermal_bar.ofe" | awk '!/^kthermal/' > "$WORK/lint_sink.ofe"
 lint_expect "kthermal without thermal"     lint_kth.ofe       yes
 lint_expect "heatsink without thermal"     lint_sink.ofe      yes
+awk '/^analysis = /{print "convection = 10 20"} {print}' \
+    "$SRC/resistor_bar.ofe" > "$WORK/lint_conv.ofe"
+lint_expect "convection without thermal"   lint_conv.ofe      yes
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
-         box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck; do
+         box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
+         thermal_conv; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

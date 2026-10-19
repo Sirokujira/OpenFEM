@@ -319,6 +319,8 @@ EXTERN int ThermalMaxIter;		// 連成反復の上限
 EXTERN double ThermalTol;		// 連成反復の収束判定 (R と T_max の相対変化)
 EXTERN int HeatSinkOn[MAXPORT];	// 導体ごと : 1 なら温度を固定する (ヒートシンク)
 EXTERN double HeatSinkT[MAXPORT];	// ヒートシンクの温度 [degC]
+EXTERN double ConvH;			// 対流熱伝達係数 h [W/(m^2 K)] (0 : 対流なし)
+EXTERN double ConvT;			// 対流の周囲温度 [degC]
 
 // 周波数掃引 (frequencysweep)。各点で分散材料を展開し直して解き直す
 EXTERN int NFreqSweep;

@@ -272,6 +272,8 @@ int input_data(FILE *fp)
 		HeatSinkOn[p] = 0;
 		HeatSinkT[p] = 20;
 	}
+	ConvH = 0;
+	ConvT = 20;
 
 	MeshMode = 0;
 	strcpy(MeshFile, "");
@@ -806,6 +808,21 @@ int input_data(FILE *fp)
 			HeatSinkOn[cid] = 1;
 			HeatSinkT[cid] = atof(token[3]);
 		}
+		else if (!strcmp(strkey, "convection")) {
+			// convection = <h [W/(m^2 K)]> <T_amb [degC]>  : 表面からの対流 (熱連成)
+			//   -k dT/dn = h (T - T_amb) を、熱を通す領域の露出面 (隣が熱を通さない
+			//   セルか格子の外) に課す。電極の面は端子に接しているので除く
+			if (nval != 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ConvH = atof(token[2]);
+			ConvT = atof(token[3]);
+			if (ConvH < 0) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+		}
 		else if (!strcmp(strkey, "thermal")) {
 			// thermal = <I [A]> [<maxiter> [<tol>]]  : 電気-熱連成 (定常、analysis = R)
 			//   ポートに電流 I を流したときの Joule 発熱で温度分布を解き、
@@ -1295,10 +1312,11 @@ int input_data(FILE *fp)
 			nsink++;
 		}
 		// 熱の逃げ場が無いと、発熱し続けるのに温度が定まらない (純 Neumann で
-		// 右辺の和が 0 でない) ので定常解が存在しない
-		if (nsink < 1) {
-			printf("%s\n", "*** thermal needs at least one heatsink (a conductor "
-				"with a fixed temperature); otherwise there is no steady state");
+		// 右辺の和が 0 でない) ので定常解が存在しない。逃げ場はヒートシンクか対流
+		if ((nsink < 1) && (ConvH <= 0)) {
+			printf("%s\n", "*** thermal needs a way for the heat to leave: at least "
+				"one heatsink (a conductor with a fixed temperature) or convection; "
+				"otherwise there is no steady state");
 			return 1;
 		}
 		// 電流の流れる材料が熱を通さないと、その要素の発熱が逃げられない
@@ -1325,6 +1343,10 @@ int input_data(FILE *fp)
 		}
 		if (haveSink) {
 			input_warn("heatsink has no effect without thermal (it is only read by "
+				"the electro-thermal coupling)");
+		}
+		if (ConvH > 0) {
+			input_warn("convection has no effect without thermal (it is only read by "
 				"the electro-thermal coupling)");
 		}
 	}
