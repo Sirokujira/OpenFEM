@@ -274,9 +274,9 @@ int input_data(FILE *fp)
 		HeatSinkT[p] = 20;
 	}
 	ConvH = 0;
-	ConvT = 20;
 	RadEps = 0;
-	RadT = 20;
+	NConv = 0;
+	NRad = 0;
 	TransientOn = 0;
 	TransientTime = 0;
 	TransientSteps = 0;
@@ -873,35 +873,41 @@ int input_data(FILE *fp)
 			HeatSinkOn[cid] = 1;
 			HeatSinkT[cid] = atof(token[3]);
 		}
-		else if (!strcmp(strkey, "convection")) {
-			// convection = <h [W/(m^2 K)]> <T_amb [degC]>  : 表面からの対流 (熱連成)
-			//   -k dT/dn = h (T - T_amb) を、熱を通す領域の露出面 (隣が熱を通さない
-			//   セルか格子の外) に課す。電極の面は端子に接しているので除く
-			if (nval != 2) {
+		else if (!strcmp(strkey, "convection") || !strcmp(strkey, "radiation")) {
+			// convection = <h [W/(m^2 K)]> <T_amb [degC]> [<x1> <x2> <y1> <y2> <z1> <z2>]
+			//   表面からの対流 -k dT/dn = h (T - T_amb) (熱連成)
+			// radiation  = <ε> <T_amb [degC]> [<x1> <x2> <y1> <y2> <z1> <z2>]
+			//   表面からの輻射 -k dT/dn = ε σ_SB (T^4 - T_amb^4) (絶対温度)。周囲は
+			//   温度 T_amb の黒体の壁とみなす (面どうしの相互放射は扱わない)
+			// どちらも熱を通す領域の露出面 (隣が熱を通さないセルか格子の外) に課し、
+			// 電極の面は端子に接しているので除く。何行でも書け、直方体を付けると
+			// 中心がその中にある面だけに効く。面は**あとに書いた行ほど優先**する
+			// (直方体なしの行で既定を決め、あとの行で一部を上書きする)
+			const int rad = !strcmp(strkey, "radiation");
+			surfbc_t *bc = (rad ? &RadBC[NRad] : &ConvBC[NConv]);
+			if (((nval != 2) && (nval != 8)) || ((rad ? NRad : NConv) >= MAXSURF)) {
 				printf(errfmt2, strkey);
 				return 1;
 			}
-			ConvH = atof(token[2]);
-			ConvT = atof(token[3]);
-			if (ConvH < 0) {
+			bc->c = atof(token[2]);
+			bc->t = atof(token[3]);
+			bc->box = (nval == 8);
+			for (int d = 0; d < 6; d++) bc->g[d] = (bc->box ? atof(token[4 + d]) : 0);
+			int bad = (bc->c < 0) || (rad && ((bc->c > 1) || (bc->t <= -KELVIN)));
+			for (int d = 0; bc->box && (d < 3); d++) {
+				if (bc->g[2 * d] > bc->g[(2 * d) + 1]) bad = 1;
+			}
+			if (bad) {
 				printf(errfmt2, strkey);
 				return 1;
 			}
-		}
-		else if (!strcmp(strkey, "radiation")) {
-			// radiation = <ε> <T_amb [degC]>  : 表面からの輻射 (熱連成)
-			//   -k dT/dn = ε σ_SB (T^4 - T_amb^4) (絶対温度) を、convection と同じ
-			//   露出面に課す。周囲は温度 T_amb の黒体の壁とみなす (面どうしの
-			//   相互放射は扱わない)
-			if (nval != 2) {
-				printf(errfmt2, strkey);
-				return 1;
+			if (rad) {
+				if (bc->c > RadEps) RadEps = bc->c;
+				NRad++;
 			}
-			RadEps = atof(token[2]);
-			RadT = atof(token[3]);
-			if ((RadEps < 0) || (RadEps > 1) || (RadT <= -KELVIN)) {
-				printf(errfmt2, strkey);
-				return 1;
+			else {
+				if (bc->c > ConvH) ConvH = bc->c;
+				NConv++;
 			}
 		}
 		else if (!strcmp(strkey, "thermal")) {
@@ -1441,11 +1447,11 @@ int input_data(FILE *fp)
 			input_warn("heatsink has no effect without thermal (it is only read by "
 				"the electro-thermal coupling)");
 		}
-		if (ConvH > 0) {
+		if (NConv > 0) {
 			input_warn("convection has no effect without thermal (it is only read by "
 				"the electro-thermal coupling)");
 		}
-		if (RadEps > 0) {
+		if (NRad > 0) {
 			input_warn("radiation has no effect without thermal (it is only read by "
 				"the electro-thermal coupling)");
 		}

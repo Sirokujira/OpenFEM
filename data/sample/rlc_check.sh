@@ -2697,6 +2697,93 @@ tvtk=$(awk '/^SCALARS T / { f = 1; next } f && /^LOOKUP/ { next }
 	END { printf "%.9e", m }' "$WORK/ofe_field.vtk")
 compare "transient field : max T == T_max in the log [degC]" "$tvtk" "$(th_t)" 1e-8
 
+# (14) 領域ごとの対流・輻射 (convection / radiation に直方体を付ける。面は
+#      あとに書いた行ほど優先)
+echo "[thermal] per-face convection / radiation : closed form, ordering, mirror symmetry"
+#      (a) 下面だけ冷やす板 (data/sample/thermal_plate.ofe)。α = 0 なので温度は z だけの
+#          2 次式で、1 次要素は節点で厳密 : T_max = T_a + qd/h + qd²/(2k) = 145.3125
+cp "$SRC/thermal_plate.ofe" "$WORK/"
+th_run thermal_plate.ofe
+compare "plate cooled from the bottom only : T_max == the closed form (nodally exact) [degC]" \
+	"$(th_t)" 145.3125 1e-10
+th_energy "plate cooled from the bottom only"
+th_nface "plate cooled from the bottom only (10 bottom faces)" 10
+#      (b) 同じ板を逆の書き方で : 既定 h = 500、側面 2 枚と上面を h = 0 で上書き。
+#          面ごとの係数が同じなら同じ演算になるので ofe.out はバイト一致する。
+#          **「最初に当たった行」を取る誤りは、どちらか片方の書き方で必ず落ちる**
+mkdir -p "$WORK/thpl_a" "$WORK/thpl_b"
+cp "$SRC/thermal_plate.ofe" "$WORK/thpl_a/"
+awk '/^convection = 0 30$/{print "convection = 500 30"
+		print "convection = 0 30  0 0.01  0 0  0 1e-3"
+		print "convection = 0 30  0 0.01  1e-3 1e-3  0 1e-3"
+		print "convection = 0 30  0 0.01  0 1e-3  1e-3 1e-3"; next}
+	/^convection = 500/{next} {print}' "$SRC/thermal_plate.ofe" > "$WORK/thpl_b/thermal_plate.ofe"
+(cd "$WORK/thpl_a" && "$OFE" -n 2 thermal_plate.ofe > /dev/null 2>&1)
+(cd "$WORK/thpl_b" && "$OFE" -n 2 thermal_plate.ofe > /dev/null 2>&1)
+if [ -s "$WORK/thpl_a/ofe.out" ] && cmp -s "$WORK/thpl_a/ofe.out" "$WORK/thpl_b/ofe.out"; then
+	echo "  the same faces written as 'default 0 + bottom 500' and 'default 500 + three zeros' : byte-identical -> OK"
+else
+	echo "  the two ways of writing the same faces differ -> NG" >&2; status=1
+fi
+#      (b2) 直方体の許容幅。zmesh = 0 1 1e-4 5 8e-4 の最上面は丸めで
+#          0.00079999999999999993 になり、利用者の書く 8e-4 (0.00080000000000000004) と
+#          1 ulp ずれる。上面を z = 8e-4 の直方体で断熱にしても、許容幅が無いと
+#          上面が冷えたまま残る。厚さ d = 0.8mm の閉形式 T_max = 30 + 140.625 + 2.8125
+awk '/^zmesh/{print "zmesh = 0 1 1e-4 5 8e-4"; next}
+	/^geometry/{print "geometry = 2 1 0 0.01 0 1e-3 0 8e-4"; next}
+	/^conductor = 0/{print "conductor = 0 1 0 0 0 1e-3 0 8e-4"; next}
+	/^conductor = 1/{print "conductor = 1 1 0.01 0.01 0 1e-3 0 8e-4"; next}
+	/^convection = 0 30$/{print "convection = 500 30"
+		print "convection = 0 30  0 0.01  0 0  0 8e-4"
+		print "convection = 0 30  0 0.01  1e-3 1e-3  0 8e-4"
+		print "convection = 0 30  0 0.01  0 1e-3  8e-4 8e-4"; next}
+	/^convection = 500/{next} {print}' "$SRC/thermal_plate.ofe" > "$WORK/thpl_eps.ofe"
+th_run thpl_eps.ofe
+compare "plate on a grid whose top plane is 1 ulp off the box : T_max == the closed form [degC]" \
+	"$(th_t)" 173.4375 1e-10
+th_nface "plate on a grid whose top plane is 1 ulp off the box (10 bottom faces)" 10
+#      (b3) 直方体が棒の途中で切れる場合。下面の左半分 (x <= 5mm) だけ冷やすものと
+#          右半分 (x >= 5mm) だけ冷やすものは x = L/2 の鏡映で合同 (電極は両端、
+#          断熱) なので R・T_max が一致し、どちらも 5 面 (α = 4e-3 にして R も温度に
+#          依らせる。半分しか冷やさないので 7.5 A では熱暴走する。3 A にする)。**面の係数を中心でなく
+#          角の座標で引く誤り**は、境目 x = 5mm の面を片側にだけ入れて落ちる
+#          (ここまでの直方体は棒の全長を覆うので、x の位置を見ていなかった)
+for side in left right; do
+	if [ "$side" = left ]; then box="0 5e-3"; else box="5e-3 0.01"; fi
+	awk -v box="$box" '/^convection = 500/{print "convection = 500 30  " box "  0 1e-3  0 0"; next}
+		/^tempco/{print "tempco = 2 4e-3 0"; next} /^thermal/{print "thermal = 3"; next} {print}' \
+		"$SRC/thermal_plate.ofe" > "$WORK/thpl_$side.ofe"
+	th_run "thpl_$side.ofe"
+	eval "rr_$side=\$(th_r); tt_$side=\$(th_t)"
+	th_nface "plate, bottom cooled on the $side half only" 5
+done
+compare "plate, left half vs right half cooled (mirror) : R [ohm]" "$rr_right" "$rr_left" 1e-9
+compare "plate, left half vs right half cooled (mirror) : T_max [degC]" "$tt_right" "$tt_left" 1e-9
+#      (c) 鏡映の恒等式 : 厚さ 1mm (z 2 セル) の棒を全面から冷やしたものと、その半分
+#          (厚さ 0.5mm、1 セル、電流も半分) の上面 (鏡面) だけを直方体で h = 0 / ε = 0
+#          にしたもの。離散問題が合同なので T_max が一致し、R は半分の棒が 2 倍になる。
+#          対流と輻射の両方で見る (輻射は直方体の係数で放射率を引く別の経路)
+for kind in convection radiation; do
+	if [ "$kind" = convection ]; then bcl="convection = 200 30"; bcm="convection = 0 30  0 0.01  0 1e-3  0.5e-3 0.5e-3"
+	else bcl="radiation = 0.8 10"; bcm="radiation = 0 10  0 0.01  0 1e-3  0.5e-3 0.5e-3"; fi
+	awk -v bcl="$bcl" '/^zmesh/{print "zmesh = 0 2 1e-3"; next}
+		/^geometry/{print "geometry = 2 1 0 0.01 0 1e-3 0 1e-3"; next}
+		/^conductor = 0/{print "conductor = 0 1 0 0 0 1e-3 0 1e-3"; next}
+		/^conductor = 1/{print "conductor = 1 1 0.01 0.01 0 1e-3 0 1e-3"; next}
+		/^convection/{print bcl; next} /^thermal/{print "thermal = 12"; next} {print}' \
+		"$SRC/thermal_conv.ofe" > "$WORK/thmir_full.ofe"
+	awk -v bcl="$bcl" -v bcm="$bcm" '/^convection/{print bcl; print bcm; next} {print}' \
+		"$SRC/thermal_conv.ofe" > "$WORK/thmir_half.ofe"
+	th_run thmir_full.ofe
+	rf=$(th_r); tf=$(th_t)
+	th_nface "$kind, full bar (40 x 6 faces)" 240
+	th_run thmir_half.ofe
+	compare "$kind, mirror : R(half bar, half current) == 2 R(full bar) [ohm]" "$(th_r)" \
+		"$(awk -v r="$rf" 'BEGIN { printf "%.12e", 2 * r }')" 1e-9
+	compare "$kind, mirror : T_max(half bar) == T_max(full bar) [degC]" "$(th_t)" "$tf" 1e-9
+	th_nface "$kind, half bar with the mirror face switched off (40 x 3 faces)" 120
+done
+
 # (7) 弾くべき入力 (理由まで grep する)
 th_reject() {	# th_reject <ラベル> <ofe> <理由の文字列>
 	mesh_reject "$1" "$2"
@@ -2748,6 +2835,23 @@ awk '/^waveform/{print "waveform = 0 1 2 1 1 0"; next} {print}' "$SRC/thermal_pu
 th_reject "waveform with decreasing times" thx_wdec.ofe "invalid waveform data"
 awk '/^waveform/{print "waveform = 0 1 2"; next} {print}' "$SRC/thermal_pulse.ofe" > "$WORK/thx_wodd.ofe"
 th_reject "waveform with an odd number of values" thx_wodd.ofe "invalid waveform data"
+awk '/^convection = 500/{print "convection = 500 30  0 0.01  0 1e-3  -1 -1"; next} {print}' \
+	"$SRC/thermal_plate.ofe" > "$WORK/thx_box0.ofe"
+#     (解く段で見つかるので理由はログに出る)
+mesh_reject "a convection box that contains no exposed face" thx_box0.ofe
+if ! grep -q "contains no exposed face" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than the empty box" >&2
+	status=1
+fi
+awk '/^convection = 500/{print "convection = 500 30  0.01 0  0 1e-3  0 0"; next} {print}' \
+	"$SRC/thermal_plate.ofe" > "$WORK/thx_boxinv.ofe"
+th_reject "a convection box with x1 > x2" thx_boxinv.ofe "invalid convection data"
+awk '/^convection = 500/{print "convection = 500 30  0 0.01  0 1e-3"; next} {print}' \
+	"$SRC/thermal_plate.ofe" > "$WORK/thx_box4.ofe"
+th_reject "a convection box with four coordinates" thx_box4.ofe "invalid convection data"
+awk '/^radiation/{print "radiation = 1.5 10  0 0.01  0 1e-3  0 0"; next} {print}' \
+	"$SRC/thermal_rad.ofe" > "$WORK/thx_radbox.ofe"
+th_reject "a radiation box with emissivity > 1" thx_radbox.ofe "invalid radiation data"
 
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
@@ -2799,7 +2903,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
-         thermal_conv thermal_rad thermal_transient thermal_pulse; do
+         thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

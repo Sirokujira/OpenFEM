@@ -323,10 +323,19 @@ EXTERN int ThermalMaxIter;		// 連成反復の上限
 EXTERN double ThermalTol;		// 連成反復の収束判定 (R と T_max の相対変化)
 EXTERN int HeatSinkOn[MAXPORT];	// 導体ごと : 1 なら温度を固定する (ヒートシンク)
 EXTERN double HeatSinkT[MAXPORT];	// ヒートシンクの温度 [degC]
-EXTERN double ConvH;			// 対流熱伝達係数 h [W/(m^2 K)] (0 : 対流なし)
-EXTERN double ConvT;			// 対流の周囲温度 [degC]
-EXTERN double RadEps;			// 輻射の放射率 ε (0 : 輻射なし)
-EXTERN double RadT;				// 輻射の周囲 (壁) の温度 [degC]
+// 露出面の境界条件 (convection / radiation) の 1 行。box があればその直方体に
+// 中心が入る面だけ、無ければすべての露出面。面はあとに書いた行ほど優先する
+#define MAXSURF (64)
+typedef struct {
+	double c;					// h [W/(m^2 K)] (対流) または放射率 ε (輻射)
+	double t;					// 周囲温度 [degC]
+	int    box;					// 1 : g の直方体に限る
+	double g[6];				// x1 x2 y1 y2 z1 z2 [m]
+} surfbc_t;
+EXTERN int NConv, NRad;
+EXTERN surfbc_t ConvBC[MAXSURF], RadBC[MAXSURF];
+EXTERN double ConvH;			// 対流の h の最大値 (0 : 対流なし)
+EXTERN double RadEps;			// 輻射の ε の最大値 (0 : 輻射なし)
 EXTERN int TransientOn;			// 1 : 熱連成を過渡解析にする (電流を t = 0 で入れる)
 EXTERN double TransientTime;	// 終了時刻 [s]
 EXTERN int TransientSteps;		// 時間刻みの数 (Δt = TransientTime / TransientSteps)

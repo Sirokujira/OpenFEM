@@ -1,0 +1,39 @@
+OpenFEM 1 0
+title = electro-thermal coupling : a plate cooled from its bottom face only (per-face convection)
+#
+# 領域ごとの対流 (convection に直方体を付ける) の閉形式との比較。
+# 板 (長さ L = 10mm、幅 w = 1mm、厚さ d = 1mm を 10 分割) に電流を流し、
+# **下面 (z = 0) だけ**を h = 500 W/(m² K)、T_a = 30 degC で冷やす。側面と上面は
+# 断熱、両端は電極 (断熱)。α = 0 なので発熱 q = J² ρ0 は一様で、温度は z だけの関数:
+#   -k T'' = q,  k T'(0) = h (T(0) - T_a),  T'(d) = 0
+#   T(z) = T_a + q d / h + q (d z - z²/2) / k
+#   T_max = T(d) = T_a + q d / h + q d² / (2k)
+#   J = 7.5e6 [A/m²], q = 5.625e7 [W/m³], k = 10 [W/(m K)]
+#   T_max = 30 + 112.5 + 2.8125 = 145.3125 [degC]
+# 1 次要素は定数の発熱源の 1 次元問題で節点で厳密 (下面の Robin 条件も、面の
+# 上で温度が一様なので面の質量の行和が h ∫N_i dA に一致して厳密) なので、
+# T_max は全桁一致しなければならない (rlc_check.sh)。
+#
+# 対流の行は「あとに書いた行ほど優先」:
+#   1 行目 (直方体なし) で既定を h = 0 (断熱) にし、2 行目で下面だけ h = 500。
+# rlc_check.sh では逆の書き方 (既定 500、側面 2 枚と上面を h = 0 で上書き) も
+# 回し、ofe.out がバイト一致することを見る (面ごとの係数が同じなら同じ演算になる)。
+#
+xmesh = 0 10 0.01
+ymesh = 0 1 1e-3
+zmesh = 0 10 1e-3
+
+material = 1.0 1e6
+tempco = 2 0 0
+kthermal = 2 10
+geometry = 2 1 0 0.01 0 1e-3 0 1e-3
+
+conductor = 0 1 0    0    0 1e-3 0 1e-3
+conductor = 1 1 0.01 0.01 0 1e-3 0 1e-3
+convection = 0 30
+convection = 500 30  0 0.01  0 1e-3  0 0
+
+thermal = 7.5
+analysis = R
+solver = 20000 500 1e-12
+end

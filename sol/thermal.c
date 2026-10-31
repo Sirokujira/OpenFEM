@@ -38,6 +38,34 @@ thermal.c
 #define TK(l) ((l) & 1)
 
 
+// 面の中心 (xc, yc, zc) が行 bc の直方体に入るか (直方体なしの行はどこでも入る)。
+// 許容幅は形状判定 (setup.c) と同じく解析領域の大きさの EPS 倍
+static int surf_in(const surfbc_t *bc, double xc, double yc, double zc)
+{
+	if (!bc->box) return 1;
+	const double eps = EPS * (fabs(Xn[Nx] - Xn[0]) + fabs(Yn[Ny] - Yn[0]) + fabs(Zn[Nz] - Zn[0]));
+	return (xc >= (bc->g[0] - eps)) && (xc <= (bc->g[1] + eps))
+	    && (yc >= (bc->g[2] - eps)) && (yc <= (bc->g[3] + eps))
+	    && (zc >= (bc->g[4] - eps)) && (zc <= (bc->g[5] + eps));
+}
+
+
+// 面の中心での対流 (rad = 0) / 輻射 (rad = 1) の行。あとに書いた行ほど優先し、
+// どの行にも入らなければ NULL (断熱)
+static const surfbc_t *surf_bc(int rad, double xc, double yc, double zc, int *idx)
+{
+	const surfbc_t *list = (rad ? RadBC : ConvBC);
+	const int nb = (rad ? NRad : NConv);
+	for (int e = nb - 1; e >= 0; e--) {
+		if (surf_in(&list[e], xc, yc, zc)) {
+			if (idx) *idx = e;
+			return &list[e];
+		}
+	}
+	return NULL;
+}
+
+
 // 露出面の境界条件。熱を通すセルの 6 面のうち、隣が格子の外か熱を通さないセルの
 // ものが露出面。電極の面 (4 節点がすべて導体の節点) は端子に接しているので除く。
 //
@@ -53,10 +81,14 @@ thermal.c
 //   戻り値は輻射で出ていく熱 ∫q(t) dA。積分は面の 2x2 Gauss で、接線と右辺と
 //   熱で評価点を揃える (揃えないと Newton が 2 次収束しない)。
 //   絶対温度が正でない点があれば -1e300 を返す
-static double surf_faces(crs_t *B, double *g, const double *t, const double *kcell, int rad)
+// rad = 2 : 数えるだけ。対流か輻射の係数が正の面の数を返し、hits があれば
+//   各行 (対流 0..NConv-1、輻射 NConv..) の直方体に中心が入る露出面の数を足す
+//
+// 面の係数と周囲温度は surf_bc() で面の中心から引く (あとに書いた行ほど優先)
+static double surf_faces(crs_t *B, double *g, const double *t, const double *kcell, int rad,
+	int *hits)
 {
 	const double gp[2] = {0.5 - 0.5 / sqrt(3.0), 0.5 + 0.5 / sqrt(3.0)};
-	const double ta4 = pow(RadT + KELVIN, 4);
 	double qsum = 0;
 	int64_t nface = 0;
 	int bad = 0;
@@ -96,7 +128,30 @@ static double surf_faces(crs_t *B, double *g, const double *t, const double *kce
 				if (NodeConductor[nd[m]] >= 0) ncond++;
 			}
 			if (ncond == 4) continue;	// 電極の面
+
+			// 面の中心で係数を引く
+			double xc = 0, yc = 0, zc = 0;
+			for (int m = 0; m < 4; m++) {
+				xc += Xn[li[m]] / 4;
+				yc += Yn[lj[m]] / 4;
+				zc += Zn[lk[m]] / 4;
+			}
+			if (rad == 2) {
+				const surfbc_t *cb = surf_bc(0, xc, yc, zc, NULL);
+				const surfbc_t *rb = surf_bc(1, xc, yc, zc, NULL);
+				if ((cb && (cb->c > 0)) || (rb && (rb->c > 0))) nface++;
+				if (hits) {
+					for (int e = 0; e < (NConv + NRad); e++) {
+						const surfbc_t *bc = ((e < NConv) ? &ConvBC[e] : &RadBC[e - NConv]);
+						if (surf_in(bc, xc, yc, zc)) hits[e]++;
+					}
+				}
+				continue;
+			}
+			const surfbc_t *bc = surf_bc(rad, xc, yc, zc, NULL);
+			if ((bc == NULL) || (bc->c <= 0)) continue;
 			nface++;
+			const double hc = bc->c, ta = bc->t;
 
 			const double area = h[p] * h[q];
 			double me[4][4];
@@ -106,16 +161,17 @@ static double surf_faces(crs_t *B, double *g, const double *t, const double *kce
 					for (int mm = 0; mm < 4; mm++) {
 						const double fa = (((m >> 1) == (mm >> 1)) ? 2 : 1) * h[p] / 6;
 						const double fb = (((m & 1) == (mm & 1)) ? 2 : 1) * h[q] / 6;
-						me[m][mm] = ConvH * fa * fb;
+						me[m][mm] = hc * fa * fb;
 					}
-					ge[m] = ConvH * ConvT * area / 4;
+					ge[m] = hc * ta * area / 4;
 				}
 				if (t) {
 					const double tm = (t[nd[0]] + t[nd[1]] + t[nd[2]] + t[nd[3]]) / 4;
-					qsum += ConvH * area * (tm - ConvT);
+					qsum += hc * area * (tm - ta);
 				}
 			}
 			else {
+				const double ta4 = pow(ta + KELVIN, 4);
 				for (int m = 0; m < 4; m++) {
 					for (int mm = 0; mm < 4; mm++) me[m][mm] = 0;
 				}
@@ -130,8 +186,8 @@ static double surf_faces(crs_t *B, double *g, const double *t, const double *kce
 					const double tk = tg + KELVIN;
 					if (tk <= 0) bad = 1;
 					const double w = area / 4;
-					const double qv = RadEps * STEFAN * (tk * tk * tk * tk - ta4);
-					const double dq = 4 * RadEps * STEFAN * tk * tk * tk;
+					const double qv = hc * STEFAN * (tk * tk * tk * tk - ta4);
+					const double dq = 4 * hc * STEFAN * tk * tk * tk;
 					qsum += w * qv;
 					for (int m = 0; m < 4; m++) {
 						ge[m] += w * (dq * tg - qv) * nn[m];
@@ -161,7 +217,7 @@ static double surf_faces(crs_t *B, double *g, const double *t, const double *kce
 	}
 
 	if (bad) return -1e300;
-	return ((t || rad) ? qsum : (double)nface);
+	return ((t || (rad == 1)) ? qsum : (double)nface);
 }
 
 
@@ -277,7 +333,7 @@ static int th_radlin(FILE *fp_log, crs_t *B, const double *b0, double *gr,
 	const int64_t nnz = B->rowptr[B->n];
 	for (int64_t e = 0; e < nnz; e++) B->val[e] = b0[e];
 	for (int64_t i = 0; i < B->n; i++) gr[i] = 0;
-	if (surf_faces(B, gr, tn, kcell, 1) < -1e299) {
+	if (surf_faces(B, gr, tn, kcell, 1, NULL) < -1e299) {
 		fprintf(fp_log, "*** thermal : the absolute temperature became non-positive "
 			"on a radiating face (iteration %d)\n", it);
 		return 1;
@@ -378,8 +434,8 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		ptot = cur * cur * p1;
 		crs_spmv(B, tn, work, NULL);
 		for (int i = 0; i < n; i++) resold[i] = work[i] - f[i] - gc[i] - gr[i];
-		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0) : 0);
-		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1) : 0);
+		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0, NULL) : 0);
+		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1, NULL) : 0);
 		for (int i = 0; i < n; i++) t0[i] = tn[i];
 		fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%.8e\n", 0.0, r, cur * r, tmax,
 			th_tmean(tcell, scell), cur);
@@ -475,8 +531,8 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		}
 		crs_spmv(B, tn, work, NULL);
 		for (int i = 0; i < n; i++) resold[i] = work[i] - f[i] - gc[i] - gr[i];
-		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0) : 0);
-		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1) : 0);
+		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0, NULL) : 0);
+		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1, NULL) : 0);
 		ejoule += dts * ((th * ptot) + ((1 - th) * pold));
 		econv += dts * ((th * qconv) + ((1 - th) * qcold));
 		erad += dts * ((th * qrad) + ((1 - th) * qrold));
@@ -594,8 +650,8 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 				qsink += f[i] + gc[i] + gr[i] - crs_row_dot(B, i, tn);
 			}
 		}
-		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0) : 0);
-		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1) : 0);
+		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0, NULL) : 0);
+		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1, NULL) : 0);
 
 		tmax = th_celltemp(tn, kcell, tcell);
 
@@ -661,13 +717,20 @@ int solve_thermal(FILE *fp_log, double *gport)
 			fprintf(fp_log, "  heat sink : conductor %d at %.4f [degC]\n", p, HeatSinkT[p]);
 		}
 	}
-	if (ConvH > 0) {
-		fprintf(fp_log, "  convection : h = %.6e [W/(m^2 K)], T_amb = %.4f [degC]\n",
-			ConvH, ConvT);
-	}
-	if (RadEps > 0) {
-		fprintf(fp_log, "  radiation : emissivity = %.6f, T_amb = %.4f [degC]\n",
-			RadEps, RadT);
+	for (int e = 0; e < (NConv + NRad); e++) {
+		const surfbc_t *bc = ((e < NConv) ? &ConvBC[e] : &RadBC[e - NConv]);
+		if (e < NConv) {
+			fprintf(fp_log, "  convection : h = %.6e [W/(m^2 K)], T_amb = %.4f [degC]",
+				bc->c, bc->t);
+		}
+		else {
+			fprintf(fp_log, "  radiation : emissivity = %.6f, T_amb = %.4f [degC]", bc->c, bc->t);
+		}
+		if (bc->box) {
+			fprintf(fp_log, " on faces in [%g, %g] x [%g, %g] x [%g, %g]",
+				bc->g[0], bc->g[1], bc->g[2], bc->g[3], bc->g[4], bc->g[5]);
+		}
+		fprintf(fp_log, "\n");
 	}
 	fflush(fp_log);
 
@@ -727,14 +790,25 @@ int solve_thermal(FILE *fp_log, double *gport)
 	}
 	int64_t nface = 0;
 	if (ConvH > 0) {
-		nface = (int64_t)surf_faces(&B, gc, NULL, kcell, 0);
+		surf_faces(&B, gc, NULL, kcell, 0, NULL);
 	}
-	else if (RadEps > 0) {
-		nface = (int64_t)surf_faces(NULL, NULL, NULL, kcell, 0);
-	}
-	if ((ConvH > 0) || (RadEps > 0)) {
+	if ((NConv + NRad) > 0) {
+		// 係数が正の露出面の数。直方体を付けた行は、露出面に 1 つも当たらなければ
+		// 書き間違い (座標の桁違いなど) なので黙って無視せず入力エラーにする
+		int *hits = (int *)calloc((size_t)(NConv + NRad), sizeof(int));
+		nface = (int64_t)surf_faces(NULL, NULL, NULL, kcell, 2, hits);
+		for (int e = 0; e < (NConv + NRad); e++) {
+			const surfbc_t *bc = ((e < NConv) ? &ConvBC[e] : &RadBC[e - NConv]);
+			if (bc->box && (hits[e] < 1)) {
+				fprintf(fp_log, "*** thermal : the %s box [%g, %g] x [%g, %g] x [%g, %g] "
+					"contains no exposed face\n", ((e < NConv) ? "convection" : "radiation"),
+					bc->g[0], bc->g[1], bc->g[2], bc->g[3], bc->g[4], bc->g[5]);
+				ierr = 1;
+			}
+		}
+		free(hits);
 		fprintf(fp_log, "  %s : %lld exposed faces\n",
-			((ConvH > 0) ? ((RadEps > 0) ? "convection / radiation" : "convection") : "radiation"),
+			((NConv > 0) ? ((NRad > 0) ? "convection / radiation" : "convection") : "radiation"),
 			(long long)nface);
 	}
 	if (!TransientOn && (nsink < 1) && (nface < 1)) {
