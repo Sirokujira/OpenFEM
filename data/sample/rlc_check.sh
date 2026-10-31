@@ -1279,9 +1279,14 @@ if ! command -v mpirun > /dev/null 2>&1; then
 	echo "  mpirun not found : skipped"
 else
 	# root で走る CI コンテナと少コア環境のための OpenMPI の環境変数
-	# (他の MPI 実装は無視するだけなので無害)
+	# (他の MPI 実装は無視するだけなので無害)。**過剰割り当ての変数は OpenMPI 4 と
+	# 5 で違う**: 5 (PRRTE) は OMPI_MCA_rmaps_base_oversubscribe を読まない。
+	# 実測: CI の runner が OpenMPI 5.0.10 に上がった日から、2 コアの runner で
+	# np = 3 が「スロット不足」で起動に失敗し、mpirun がこのスクリプトの
+	# シェルごと落として NG の行すら出なかった
 	export OMPI_ALLOW_RUN_AS_ROOT=1 OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 	export OMPI_MCA_rmaps_base_oversubscribe=1
+	export PRTE_MCA_rmaps_default_mapping_policy=:oversubscribe
 	cp "$SRC/sweep_plate.ofe" "$WORK/"
 	mpimsg=$( (cd "$WORK" && mpirun -np 2 "$OFE" -n 2 sweep_plate.ofe 2>&1) || true)
 	case "$mpimsg" in
