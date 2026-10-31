@@ -2587,6 +2587,111 @@ awk '/^thermal/{print "convection = 100 30"; print "radiation = 0.9 10"; print "
 th_run thneck_tr.ofe
 th_balance "thermal_neck, transient (CN, sinks + convection + radiation)"
 
+# (13) 電流の波形 (waveform = <t0> <f0> <t1> <f1> ...、I(t) = I x f(t) の折れ線)。
+#      刻み [t_n, t_{n+1}] の中では f(t_n^+) と f(t_{n+1}^-) を使う
+echo "[thermal] transient current waveform : a pulse (exact recurrence, CN order), a ramp"
+#      (a) 一定の波形 (waveform = 0 1) は波形なしとバイト一致 (恒等式)
+mkdir -p "$WORK/thw1" "$WORK/thw0"
+cp "$SRC/thermal_transient.ofe" "$WORK/thw0/"
+awk '/^transient/{print; print "waveform = 0 1"; next} {print}' "$SRC/thermal_transient.ofe" \
+	> "$WORK/thw1/thermal_transient.ofe"
+(cd "$WORK/thw0" && "$OFE" -n 2 thermal_transient.ofe > /dev/null 2>&1)
+(cd "$WORK/thw1" && "$OFE" -n 2 thermal_transient.ofe > /dev/null 2>&1)
+if [ -s "$WORK/thw0/ofe_transient.csv" ] && cmp -s "$WORK/thw0/ofe.out" "$WORK/thw1/ofe.out" \
+	&& cmp -s "$WORK/thw0/ofe_transient.csv" "$WORK/thw1/ofe_transient.csv"; then
+	echo "  waveform = 0 1 == no waveform (ofe.out, ofe_transient.csv byte-identical) -> OK"
+else
+	echo "  waveform = 0 1 differs from no waveform -> NG" >&2; status=1
+fi
+#      (b) 矩形パルス (data/sample/thermal_pulse.ofe)。一様な棒なので θ 法の離散解は
+#          1 次の漸化式で厳密 (段差の両側の電流を刻みの両端で取り分ける)
+th_pulse() {	# th_pulse <N> <θ> -> 離散解の R T、連続解の R T
+	awk -v ns="$1" -v th="$2" 'function curr(t) { return (t < 2) ? 6 : 0 }
+	function curl(t) { return (t <= 2) ? 6 : 0 }
+	BEGIN {
+		r0 = 1e-6; al = 4e-3; T0 = 0; L = 0.01; A = 5e-7; P = 3e-3; h = 200; Ta = 30; c = 3.4e6; te = 4
+		ra = r0 * (1 + al * (Ta - T0)); aa = al / (1 + al * (Ta - T0)); hp = h * P / A
+		dt = te / ns; x = 50 - Ta
+		for (k = 0; k < ns; k++) {
+			J0 = curr(k * dt) / A; J1 = curl((k + 1) * dt) / A
+			G0 = J0 * J0 * ra * (1 + aa * x) - hp * x
+			x = (x + (dt / c) * ((1 - th) * G0 + th * J1 * J1 * ra)) / (1 - (dt / c) * th * (J1 * J1 * ra * aa - hp))
+		}
+		J = 6 / A; a1 = J * J * ra / c; b1 = (hp - J * J * r0 * al) / c; b2 = hp / c
+		thi = a1 / b1; x2 = thi + (20 - thi) * exp(-b1 * 2); xc = x2 * exp(-b2 * (te - 2))
+		printf "%.12e %.12e %.12e %.12e", ra * (1 + aa * x) * L / A, Ta + x, ra * (1 + aa * xc) * L / A, Ta + xc }'
+}
+for th in 1 0.5; do
+	for ns in 64 128; do
+		awk -v th="$th" -v ns="$ns" '/^transient/{print "transient = 4 " ns " " th; next} {print}' \
+			"$SRC/thermal_pulse.ofe" > "$WORK/thpu$ns.ofe"
+		th_run "thpu$ns.ofe"
+		eval "r$ns=\$(th_r)"
+	done
+	set -- $(th_pulse 128 "$th")
+	compare "pulse, theta = $th : R == the discrete recurrence [ohm]" "$r128" "$1" 1e-9
+	compare "pulse, theta = $th : T == the discrete recurrence [degC]" "$(th_t)" "$2" 1e-9
+	th_balance "pulse, theta = $th"
+	#   段差が刻みの境目にあっても次数が落ちない : 後退 Euler 2、CN 4。
+	#   **段差の両側を取り分けずに f(t_{n+1}) をそのまま使うと CN は 1 次に落ちる**
+	res=$(awk -v a="$r64" -v b="$r128" -v e="$3" -v th="$th" 'BEGIN {
+		e1 = (a - e) / e; if (e1 < 0) e1 = -e1
+		e2 = (b - e) / e; if (e2 < 0) e2 = -e2
+		q = (e2 > 0) ? e1 / e2 : 0; w = ((th == 1) ? 2 : 4)
+		printf "%s (err %.2e -> %.2e, ratio %.3f, expected %d)", ((q > 0.95 * w) && (q < 1.05 * w)) ? "OK" : "NG", e1, e2, q, w }')
+	echo "  time order across the jump, theta = $th (64 -> 128 steps) : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+#          csv の電流の列 : 段差の時刻 t = 2 の行は右極限 (0)、その 1 刻み前は 6
+res=$(awk -F, '($1 + 0 == 2) { a = $6 } (($1 + 0) > 1.96) && (($1 + 0) < 1.97) { b = $6 }
+	END { printf "%s (I(1.96875) = %s, I(2) = %s)", ((b + 0 == 6) && (a != "") && (a + 0 == 0)) ? "OK" : "NG", b, a }' "$WORK/ofe_transient.csv")
+echo "  ofe_transient.csv current column at the jump : $res"
+case "$res" in NG*) status=1 ;; esac
+#      (c) 直線のランプ (waveform = 0 0 10 1) を断熱の棒 (α = 0) に。
+#          ρc dT/dt = J0² ρ0 (t/10)² なので T = T_0 + c0 t³ / 300 (c0 = J0² ρ0 / ρc)。
+#          離散解は和で厳密に書ける (後退 Euler : Δt Σ f(t_n)、CN : 台形則)。
+#          電流を刻みの始めの時刻で取り違えると後退 Euler の和が 1 項ずれて落ちる
+th_ramp() {	# th_ramp <N> <θ> -> 離散解の T、連続解の T
+	awk -v ns="$1" -v th="$2" 'BEGIN {
+		c0 = 7.5e6 * 7.5e6 * 1e-6 / 3.4e6; dt = 10 / ns; T = 50
+		for (k = 1; k <= ns; k++) T += dt * c0 * (th * (k * dt / 10) ^ 2 + (1 - th) * ((k - 1) * dt / 10) ^ 2)
+		printf "%.12e %.12e", T, 50 + c0 * 1000 / 300 }'
+}
+for th in 1 0.5; do
+	for ns in 50 100; do
+		awk -v th="$th" -v ns="$ns" '/^heatsink/{next} /^tempco/{print "tempco = 2 0 0"; next}
+			/^thermal/{print; print "heatcap = 2 3.4e6"; print "transient = 10 " ns " " th; print "waveform = 0 0 10 1"; next} {print}' \
+			"$SRC/thermal_bar.ofe" > "$WORK/thramp$ns.ofe"
+		th_run "thramp$ns.ofe"
+		eval "t$ns=\$(th_t)"
+	done
+	set -- $(th_ramp 100 "$th")
+	compare "ramp, theta = $th : T == the discrete sum [degC]" "$t100" "$1" 1e-9
+	th_balance "ramp, theta = $th"
+	res=$(awk -v a="$t50" -v b="$t100" -v e="$2" -v th="$th" 'BEGIN {
+		e1 = (a - e) / (e - 50); if (e1 < 0) e1 = -e1
+		e2 = (b - e) / (e - 50); if (e2 < 0) e2 = -e2
+		q = (e2 > 0) ? e1 / e2 : 0; w = ((th == 1) ? 2 : 4)
+		printf "%s (err %.2e -> %.2e, ratio %.3f, expected %d)", ((q > 0.95 * w) && (q < 1.05 * w)) ? "OK" : "NG", e1, e2, q, w }')
+	echo "  time order of the ramp, theta = $th (50 -> 100 steps) : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+#      (d) 過渡解析の場の出力。電気は単位電流で解いて最後に終了時刻の電流を掛けるので、
+#          φ の最大 (ポートの電位) = ログの V = I R、T の最大 = ログの T_max を見る。
+#          終了時刻の電流が 1 でない波形 (0.5 倍) にして、掛け忘れを落とす
+awk '/^waveform/{print "waveform = 0 1 3 0.5"; print "fieldout = 1"; next} {print}' \
+	"$SRC/thermal_pulse.ofe" > "$WORK/thpu_vtk.ofe"
+th_run thpu_vtk.ofe
+vmax=$(awk '/^SCALARS phi_R_port1 / { f = 1; next } f && /^LOOKUP/ { next }
+	f && (NF == 1) { if (($1 + 0) > m) m = $1 + 0; next } f { f = 0 }
+	END { printf "%.9e", m }' "$WORK/ofe_field.vtk")
+vlog=$(awk '/^  R = / { gsub(/\(V = /, ""); for (i = 1; i <= NF; i++) if ($i == "[V]),") print $(i-1); exit }' "$WORK/ofe.log")
+compare "transient field : max phi == V = I R at t_end [V]" "$vmax" "$vlog" 1e-8
+tvtk=$(awk '/^SCALARS T / { f = 1; next } f && /^LOOKUP/ { next }
+	f && (NF == 1) { if (($1 + 0) > m) m = $1 + 0; next } f { f = 0 }
+	END { printf "%.9e", m }' "$WORK/ofe_field.vtk")
+compare "transient field : max T == T_max in the log [degC]" "$tvtk" "$(th_t)" 1e-8
+
 # (7) 弾くべき入力 (理由まで grep する)
 th_reject() {	# th_reject <ラベル> <ofe> <理由の文字列>
 	mesh_reject "$1" "$2"
@@ -2632,6 +2737,12 @@ awk '/^transient/{print "transient = 2 0"; next} {print}' "$SRC/thermal_transien
 th_reject "transient with no time step" thx_ns0.ofe "invalid transient data"
 awk '!/^heatcap/' "$SRC/thermal_transient.ofe" > "$WORK/thx_noc.ofe"
 th_reject "transient with a material without heatcap" thx_noc.ofe "no heat capacity"
+awk '!/^transient/' "$SRC/thermal_pulse.ofe" > "$WORK/thx_wnotr.ofe"
+th_reject "waveform without transient" thx_wnotr.ofe "waveform needs transient"
+awk '/^waveform/{print "waveform = 0 1 2 1 1 0"; next} {print}' "$SRC/thermal_pulse.ofe" > "$WORK/thx_wdec.ofe"
+th_reject "waveform with decreasing times" thx_wdec.ofe "invalid waveform data"
+awk '/^waveform/{print "waveform = 0 1 2"; next} {print}' "$SRC/thermal_pulse.ofe" > "$WORK/thx_wodd.ofe"
+th_reject "waveform with an odd number of values" thx_wodd.ofe "invalid waveform data"
 
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
@@ -2683,7 +2794,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
-         thermal_conv thermal_rad thermal_transient; do
+         thermal_conv thermal_rad thermal_transient thermal_pulse; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

@@ -281,6 +281,9 @@ int input_data(FILE *fp)
 	TransientTime = 0;
 	TransientSteps = 0;
 	TransientTheta = 1;
+	WaveN = 0;
+	WaveT = NULL;
+	WaveF = NULL;
 
 	MeshMode = 0;
 	strcpy(MeshFile, "");
@@ -833,6 +836,26 @@ int input_data(FILE *fp)
 			 || (TransientTheta < 0.5) || (TransientTheta > 1)) {
 				printf(errfmt2, strkey);
 				return 1;
+			}
+		}
+		else if (!strcmp(strkey, "waveform")) {
+			// waveform = <t0> <f0> <t1> <f1> ...  : 過渡解析の電流 I(t) = I x f(t)
+			//   f は (t, f) の折れ線 (範囲の外は端の値)。時刻は単調非減少で、同じ時刻を
+			//   2 回書くと段差になる (その時刻ちょうどではあとの値)。省略時は f = 1
+			if ((nval < 2) || (nval % 2) || (WaveN > 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			WaveN = nval / 2;
+			WaveT = (double *)malloc((size_t)WaveN * sizeof(double));
+			WaveF = (double *)malloc((size_t)WaveN * sizeof(double));
+			for (int k = 0; k < WaveN; k++) {
+				WaveT[k] = atof(token[2 + (2 * k)]);
+				WaveF[k] = atof(token[3 + (2 * k)]);
+				if ((k > 0) && (WaveT[k] < WaveT[k - 1])) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
 			}
 		}
 		else if (!strcmp(strkey, "heatsink")) {
@@ -1426,6 +1449,12 @@ int input_data(FILE *fp)
 			input_warn("radiation has no effect without thermal (it is only read by "
 				"the electro-thermal coupling)");
 		}
+	}
+	// 電流の波形は時間発展でしか意味が無い (定常では t が無い)
+	if ((WaveN > 0) && !TransientOn) {
+		printf("%s\n", "*** waveform needs transient (the current waveform is a "
+			"function of time)");
+		return 1;
 	}
 	// 熱容量は過渡解析だけが読む (定常の熱連成でも読まない)
 	if (!TransientOn) {

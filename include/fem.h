@@ -331,6 +331,8 @@ EXTERN int TransientOn;			// 1 : 熱連成を過渡解析にする (電流を t 
 EXTERN double TransientTime;	// 終了時刻 [s]
 EXTERN int TransientSteps;		// 時間刻みの数 (Δt = TransientTime / TransientSteps)
 EXTERN double TransientTheta;	// θ 法の θ (1 : 後退 Euler、0.5 : Crank-Nicolson)
+EXTERN int WaveN;				// 過渡解析の電流の折れ線の点数 (0 : 一定)
+EXTERN double *WaveT, *WaveF;	// その時刻 [s] と電流の倍率 (thermal の I に掛ける)
 
 // 周波数掃引 (frequencysweep)。各点で分散材料を展開し直して解き直す
 EXTERN int NFreqSweep;

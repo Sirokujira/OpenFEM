@@ -191,9 +191,10 @@ static int th_sigma(FILE *fp_log, int64_t nc, const double *tcell, double *scell
 }
 
 
-// 電気 : V = Volt で解いて、電流が I になるよう φ を縮尺する。*gout = I_V / V
+// 電気 : V = Volt で解いて、電流が cur になるよう φ を縮尺する。*gout = I_V / V
+// (cur = 0 でも R = V / I_V は決まる。発熱は 0)
 static int th_conduct(FILE *fp_log, crs_t *A, const double *scell, unsigned char *fix,
-	double *phi, double *work, double *diag, double *q, int it, double *gout)
+	double *phi, double *work, double *diag, double *q, int it, double cur, double *gout)
 {
 	const int n = (int)A->n;
 
@@ -220,7 +221,7 @@ static int th_conduct(FILE *fp_log, crs_t *A, const double *scell, unsigned char
 		return 1;
 	}
 	*gout = iv / Volt;
-	const double s = ThermalCurrent / iv;
+	const double s = cur / iv;
 	for (int i = 0; i < n; i++) phi[i] *= s;
 	return 0;
 }
@@ -285,6 +286,26 @@ static int th_radlin(FILE *fp_log, crs_t *B, const double *b0, double *gr,
 }
 
 
+// 時刻 t の駆動電流 = I x (waveform の折れ線の値)。waveform が無ければ一定 (t = 0 で
+// 入れる段差)。折れ線の範囲の外は端の値のまま。同じ時刻が 2 回あれば段差で、
+// left = 1 ならその時刻の左極限 (前の値)、0 なら右極限 (あとの値) を返す。
+// 刻み [t_n, t_{n+1}] の中では f(t_n^+) と f(t_{n+1}^-) を使う。こうすると段差が
+// 刻みの境目にあるとき、θ 法の台形側が段差をまたいで平均することがなく、
+// Crank-Nicolson が 2 次のまま (段差をまたぐと 1 次に落ちる)
+static double th_current(double t, int left)
+{
+	if (WaveN < 1) return ThermalCurrent;
+	int k = -1;
+	for (int m = 0; m < WaveN; m++) {
+		if (left ? (WaveT[m] < t) : (WaveT[m] <= t)) k = m;
+	}
+	if (k < 0) return ThermalCurrent * WaveF[0];
+	if (k == (WaveN - 1)) return ThermalCurrent * WaveF[k];
+	const double w = (t - WaveT[k]) / (WaveT[k + 1] - WaveT[k]);
+	return ThermalCurrent * (WaveF[k] + (w * (WaveF[k + 1] - WaveF[k])));
+}
+
+
 // 熱連成の過渡解析 (transient)。θ 法で
 //   M (T^{n+1} - T^n)/Δt + θ R(T^{n+1}) + (1-θ) R(T^n) = 0,
 //   R(T) = K T + (対流・輻射) - f(T)      (f は Joule 発熱、σ(T) を通して T に依る)
@@ -316,6 +337,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	double *t0     = (double *)malloc((size_t)n * sizeof(double));
 	double *mtold  = (double *)malloc((size_t)n * sizeof(double));
 	double *resold = (double *)malloc((size_t)n * sizeof(double));
+	double *f1     = (double *)malloc((size_t)n * sizeof(double));
 	for (int64_t c = 0; c < nc; c++) {
 		ccell[c] = ((kcell[c] > 0) ? Material[CellMaterial[c]].cth : 0);
 	}
@@ -330,7 +352,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		ierr = 1;
 	}
 	else {
-		fprintf(fcsv, "t [s],R [ohm],V [V],T_max [degC],T_mean [degC]\n");
+		fprintf(fcsv, "t [s],R [ohm],V [V],T_max [degC],T_mean [degC],I [A]\n");
 	}
 
 	// 時刻 0 : 一様な初期温度 (ヒートシンクの節点だけその温度)。R(T^0) を作るため
@@ -340,29 +362,38 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		tmax = th_celltemp(tn, kcell, tcell);
 		ierr = th_sigma(fp_log, nc, tcell, scell);
 	}
-	if (!ierr) ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, 0, &g);
+	// 電気は単位電流で解き、発熱は f = I² f1 (σ を固定すれば発熱は I² に比例するので、
+	// 段差の両側の発熱を解き直さずに作れる)
+	double cur = th_current(0, 0), p1 = 0;
+	if (!ierr) ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, 0, 1.0, &g);
 	if (!ierr && (RadEps > 0)) ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, 0);
 	if (!ierr) {
 		r = 1 / g;
-		joule_load(phi, scell, f);
-		ptot = 0;
-		for (int i = 0; i < n; i++) ptot += f[i];
+		joule_load(phi, scell, f1);
+		p1 = 0;
+		for (int i = 0; i < n; i++) {
+			f[i] = cur * cur * f1[i];
+			p1 += f1[i];
+		}
+		ptot = cur * cur * p1;
 		crs_spmv(B, tn, work, NULL);
 		for (int i = 0; i < n; i++) resold[i] = work[i] - f[i] - gc[i] - gr[i];
 		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0) : 0);
 		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1) : 0);
 		for (int i = 0; i < n; i++) t0[i] = tn[i];
-		fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e\n", 0.0, r, ThermalCurrent * r, tmax,
-			th_tmean(tcell, scell));
-		fprintf(fp_log, "  %6s %14s %16s %14s %5s\n", "step", "t [s]", "R [ohm]",
-			"T_max [degC]", "iter");
-		fprintf(fp_log, "  %6d %14.6e %16.9e %14.6f %5d\n", 0, 0.0, r, tmax, 0);
+		fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%.8e\n", 0.0, r, cur * r, tmax,
+			th_tmean(tcell, scell), cur);
+		fprintf(fp_log, "  %6s %14s %16s %14s %5s %14s\n", "step", "t [s]", "R [ohm]",
+			"T_max [degC]", "iter", "I [A]");
+		fprintf(fp_log, "  %6d %14.6e %16.9e %14.6f %5d %14.6e\n", 0, 0.0, r, tmax, 0, cur);
 	}
 
 	double ejoule = 0, esink = 0, econv = 0, erad = 0;
 	int nittot = 0, step = 0;
 	for (step = 1; !ierr && (step <= TransientSteps); step++) {
 		const double pold = ptot, qcold = qconv, qrold = qrad;
+		// この刻みの中の電流は終わりの時刻の左極限
+		cur = th_current(step * dts, 1);
 		for (int i = 0; i < n; i++) told[i] = tn[i];
 		crs_spmv(&M, told, mtold, NULL);
 
@@ -371,11 +402,15 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		for (it = 1; it <= ThermalMaxIter; it++) {
 			const int tag = step * 1000 + it;
 			if ((ierr = th_sigma(fp_log, nc, tcell, scell)) != 0) break;
-			if ((ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, tag, &g)) != 0) break;
+			if ((ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, tag, 1.0, &g)) != 0) break;
 			r = 1 / g;
-			joule_load(phi, scell, f);
-			ptot = 0;
-			for (int i = 0; i < n; i++) ptot += f[i];
+			joule_load(phi, scell, f1);
+			p1 = 0;
+			for (int i = 0; i < n; i++) {
+				f[i] = cur * cur * f1[i];
+				p1 += f1[i];
+			}
+			ptot = cur * cur * p1;
 			if ((RadEps > 0) && ((ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, tag)) != 0)) break;
 
 			// 系の行列 S = M/Δt + θ B、右辺 = M T^n/Δt + θ (f + g) - (1-θ) R(T^n)
@@ -447,10 +482,22 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		erad += dts * ((th * qrad) + ((1 - th) * qrold));
 		esink += dts * qsink;
 
+		// 段差 : 次の刻みの (1-θ) 側は右極限の電流での R(T^{n+1})。発熱だけが変わる
+		const double cr = th_current(step * dts, 0);
+		if (cr != cur) {
+			for (int i = 0; i < n; i++) {
+				resold[i] -= ((cr * cr) - (cur * cur)) * f1[i];
+				f[i] = cr * cr * f1[i];
+			}
+			ptot = cr * cr * p1;
+			cur = cr;
+		}
+
 		const double tmean = th_tmean(tcell, scell);
-		fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e\n", step * dts, r, ThermalCurrent * r,
-			tmax, tmean);
-		fprintf(fp_log, "  %6d %14.6e %16.9e %14.6f %5d\n", step, step * dts, r, tmax, it);
+		fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%.8e\n", step * dts, r, cur * r,
+			tmax, tmean, cur);
+		fprintf(fp_log, "  %6d %14.6e %16.9e %14.6f %5d %14.6e\n", step, step * dts, r, tmax,
+			it, cur);
 		fflush(fp_log);
 	}
 
@@ -462,16 +509,17 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		for (int i = 0; i < n; i++) du += rhs[i];
 		fprintf(fp_log, "  %d steps, %d iterations in total\n", TransientSteps, nittot);
 		fprintf(fp_log, "  R = %.10e [ohm] at I = %.6e [A] (V = %.10e [V]), t = %.6e [s]\n",
-			r, ThermalCurrent, ThermalCurrent * r, TransientTime);
+			r, cur, cur * r, TransientTime);
 		fprintf(fp_log, "  T_max = %.10e [degC], T_mean (conductor) = %.10e [degC]\n",
 			tmax, th_tmean(tcell, scell));
 		fprintf(fp_log, "  joule power : I^2 R = %.12e, field integral = %.12e [W] (t = t_end)\n",
-			ThermalCurrent * ThermalCurrent * r, ptot);
+			cur * cur * r, ptot);
 		fprintf(fp_log, "  heat balance : joule = %.12e, stored = %.12e, to heat sinks = %.12e, "
 			"to convection = %.12e, to radiation = %.12e [J]\n", ejoule, du, esink, econv, erad);
 		*gport = g;
 
 		if (FieldOut) {
+			for (int i = 0; i < n; i++) phi[i] *= cur;	// 単位電流の φ を終了時刻の電流に
 			field_add_node("phi_R_port1", phi);
 			field_add_grad("E_R_port1", phi, 0);
 			field_add_node("T", tn);
@@ -482,7 +530,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	if (fcsv) fclose(fcsv);
 	crs_free(&M);
 	crs_free(&S);
-	free(ccell); free(told); free(t0); free(mtold); free(resold);
+	free(ccell); free(told); free(t0); free(mtold); free(resold); free(f1);
 
 	return ierr;
 }
@@ -506,7 +554,7 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	fprintf(fp_log, "  %4s %16s %14s %16s\n", "iter", "R [ohm]", "T_max [degC]", "dR / R");
 	for (it = 1; !ierr && (it <= ThermalMaxIter); it++) {
 		if ((ierr = th_sigma(fp_log, nc, tcell, scell)) != 0) break;
-		if ((ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, it, &g)) != 0) break;
+		if ((ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, it, ThermalCurrent, &g)) != 0) break;
 		r = 1 / g;
 		pterm = ThermalCurrent * ThermalCurrent * r;
 
