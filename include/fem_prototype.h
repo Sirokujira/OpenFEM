@@ -130,6 +130,7 @@ int tensor6_inverse(const double [6], double [6]);
 void assemble(crs_t *, int);
 void assemble_nu(crs_t *, const double *);
 void assemble_cell(crs_t *, const double *);
+void assemble_mass_cell(crs_t *, const double *);
 void joule_load(const double *, const double *, double *);
 void assemble_mass(crs_t *);
 double bh_nu(const material_t *, int, double);

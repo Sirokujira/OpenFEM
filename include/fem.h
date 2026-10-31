@@ -44,6 +44,7 @@ extern "C" {
 #define FN_field "ofe_field.vtk"
 #define FN_sweep "ofe_sweep.csv"
 #define FN_series "ofe_series.h5"
+#define FN_transient "ofe_transient.csv"
 
 // 数学・物理定数 (OpenFDTD の ofd.h と同じ定義)
 #define PI     (4.0 * atan(1.0))
@@ -132,6 +133,7 @@ typedef struct {
 	double bhtempco,  bhtemp0;
 	// 熱伝導率 [W/(m K)] (熱連成 thermal で使う。0 : 熱を通さない)
 	double kth;
+	double cth;					// 体積熱容量 ρc [J/(m^3 K)] (熱連成の過渡解析 transient で使う)
 	// B-H 曲線 (軸毎)。bhaniso = 0 なら軸 0 の曲線を |B| に対して等方的に使う
 	int    bhaniso;				// 1 : 軸毎に別の曲線 (直交異方性)
 	int    nbh[3];				// 各軸の点数 (0 : 線形、mu6 を使う)
@@ -325,6 +327,10 @@ EXTERN double ConvH;			// 対流熱伝達係数 h [W/(m^2 K)] (0 : 対流なし)
 EXTERN double ConvT;			// 対流の周囲温度 [degC]
 EXTERN double RadEps;			// 輻射の放射率 ε (0 : 輻射なし)
 EXTERN double RadT;				// 輻射の周囲 (壁) の温度 [degC]
+EXTERN int TransientOn;			// 1 : 熱連成を過渡解析にする (電流を t = 0 で入れる)
+EXTERN double TransientTime;	// 終了時刻 [s]
+EXTERN int TransientSteps;		// 時間刻みの数 (Δt = TransientTime / TransientSteps)
+EXTERN double TransientTheta;	// θ 法の θ (1 : 後退 Euler、0.5 : Crank-Nicolson)
 
 // 周波数掃引 (frequencysweep)。各点で分散材料を展開し直して解き直す
 EXTERN int NFreqSweep;

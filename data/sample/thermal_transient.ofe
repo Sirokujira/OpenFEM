@@ -1,0 +1,44 @@
+OpenFEM 1 0
+title = electro-thermal coupling, transient : a bar with heat sinks heated from t = 0
+#
+# 熱連成の過渡解析 (transient) の Fourier 級数解との比較。
+# thermal_bar.ofe と同じ棒 (L = 10mm、断面 1mm x 1mm) の両端を 20 degC の
+# ヒートシンクにして、t = 0 で電流 I = 7.5 A を入れる。初期温度も 20 degC。
+# α = 0 (σ が温度に依らない) なので発熱は一様で一定 q = J² ρ0、熱の式は線形:
+#   θ_t = κ θ_xx + s,   θ = T - 20,  s = q / ρc,  κ = k / ρc,  θ(0) = θ(L) = 0, θ(x,0) = 0
+#   θ(x,t) = (s/(2κ)) x (L - x) + Σ_{n 奇数} b_n sin(nπx/L) exp(-κ (nπ/L)² t)
+#   b_n = -(s/κ) 4 L² / (nπ)³
+#   ρ0 = 1e-6 [Ωm], J = 7.5e6 [A/m²], q = 5.625e7 [W/m³]
+#   ρc = 3.4e6 [J/(m³ K)] (銅程度), k = 10 [W/(m K)]
+#   κ = 2.941e-6 [m²/s], 最も遅い減衰の時定数 L²/(π² κ) = 3.44 [s]
+#   中央の温度 (t = 2 s) : T_max = 4.972034841943e+01 [degC]
+#   (定常なら 20 + s L² / (8κ) = 90.3125)
+#
+# Crank-Nicolson (θ = 0.5) で 200 刻み。初期値が境界条件と整合する
+# (θ(x,0) = 0) ので CN の 2 次の精度が出る。誤差は空間の h² が支配的で、
+# 40 分割で θ_max の +0.040%、20 分割との誤差比 4.01 (rlc_check.sh)。
+#
+# 発熱 I²R t = 56.25 x 0.01 x 2 = 1.125 [J] のうち 0.714 J が蓄熱、0.411 J が
+# ヒートシンクへ出ていく。ログの熱の収支は丸めの程度で閉じる。
+#
+xmesh = 0 40 0.01
+ymesh = 0 1 1e-3
+zmesh = 0 1 1e-3
+
+material = 1.0 1e6
+tempco = 2 0 0
+kthermal = 2 10
+heatcap = 2 3.4e6
+geometry = 2 1 0 0.01 0 1e-3 0 1e-3
+
+conductor = 0 1 0    0    0 1e-3 0 1e-3
+conductor = 1 1 0.01 0.01 0 1e-3 0 1e-3
+heatsink = 0 20
+heatsink = 1 20
+
+temperature = 20
+thermal = 7.5
+transient = 2 200 0.5
+analysis = R
+solver = 20000 500 1e-12
+end

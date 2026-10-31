@@ -2457,6 +2457,136 @@ th_run thneck_rad.ofe
 th_energy "thermal_neck : sinks + convection + radiation"
 th_nface "thermal_neck with convection and radiation" 552
 
+# (12) 過渡解析 (transient = <t_end> <nstep> [<θ>]、heatcap = ρc)。θ 法で
+#        M (T^{n+1} - T^n)/Δt + θ R(T^{n+1}) + (1-θ) R(T^n) = 0
+#      を各刻みで (σ(T) と輻射を含めて) 完全陰的に解く。
+echo "[thermal] transient : uniform bars (exact recurrence), Fourier series, steady limit"
+th_balance() {	# th_balance <ラベル> : 発熱 = 蓄熱 + ヒートシンク + 対流 + 輻射 [J]
+	res=$(awk '/heat balance/ {
+		for (i = 1; i <= NF; i++) {
+			if ($i == "joule") a = $(i+2) + 0
+			if ($i == "stored") b = $(i+2) + 0
+			if ($i == "sinks") c = $(i+2) + 0
+			if ($i == "convection") e = $(i+2) + 0
+			if ($i == "radiation") g = $(i+2) + 0
+		}
+		got = 1
+	}
+	END { if (!got || (a == 0)) { printf "NG (no heat balance line)"; exit }
+	      d = (b + c + e + g - a) / a; if (d < 0) d = -d
+	      printf "%s (%.1e)", (d < 1e-9) ? "OK" : "NG", d }' "$WORK/ofe.log")
+	echo "  $1 : joule = stored + sinks + convection + radiation : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+#      一様な棒では温度が一様のまま (断面 1 x 1 セル、電極の面は断熱) なので、
+#      θ 法の離散解が 1 次の漸化式で**厳密に**書ける。y = θ - θ_∞ が y' = λ y に
+#      従うとき y_N = y_0 ((1 + (1-θ) λ Δt) / (1 - θ λ Δt))^N (連続解は y_0 e^{λt})
+th_ode() {	# th_ode <λ> <y_0> <T_∞> <t_end> <N> <θ> <ρ0 (1+α(T-T0)) を R にする L/A> <α> <T0>
+	awk -v lam="$1" -v y0="$2" -v Tf="$3" -v te="$4" -v ns="$5" -v th="$6" -v la="$7" -v a="$8" -v T0="$9" 'BEGIN {
+		dt = te / ns
+		yd = y0 * ((1 + (1 - th) * lam * dt) / (1 - th * lam * dt)) ^ ns
+		yc = y0 * exp(lam * te)
+		printf "%.12e %.12e %.12e %.12e", 1e-6 * (1 + a * (Tf + yd - T0)) * la, Tf + yd,
+			1e-6 * (1 + a * (Tf + yc - T0)) * la, Tf + yc }'
+}
+#      (a) 断熱の棒 (thermal_bar.ofe からヒートシンクを外す)。
+#          ρc dθ/dt = J² ρ_i (1 + α_i θ) なので λ = J² ρ0 α / ρc、y = θ + 1/α_i
+th_adia() {	# th_adia <N> <θ> -> 離散解の R, T と連続解の R, T
+	awk -v I=7.5 'BEGIN { J = I / 1e-6; ai = 4e-3 / (1 + 4e-3 * 50)
+		printf "%.15e %.15e %.15e", J * J * 1e-6 * 4e-3 / 3.4e6, 1 / ai, 50 - 1 / ai }' > "$WORK/thode.txt"
+	set -- $(cat "$WORK/thode.txt") "$1" "$2"
+	th_ode "$1" "$2" "$3" 10 "$4" "$5" 1e4 4e-3 0
+}
+for th in 1 0.5; do
+	for ns in 50 100; do
+		awk -v th="$th" -v ns="$ns" '/^heatsink/{next}
+			/^thermal/{print "heatcap = 2 3.4e6"; print "transient = 10 " ns " " th} {print}' \
+			"$SRC/thermal_bar.ofe" > "$WORK/thad$ns.ofe"
+		th_run "thad$ns.ofe"
+		eval "r$ns=\$(th_r)"
+	done
+	set -- $(th_adia 100 "$th")
+	#   許容 1e-9 : 内側の反復の打ち切り (1e-10) の分。漸化式は厳密
+	compare "adiabatic bar, theta = $th : R == the discrete recurrence [ohm]" "$r100" "$1" 1e-9
+	compare "adiabatic bar, theta = $th : T == the discrete recurrence [degC]" "$(th_t)" "$2" 1e-9
+	th_balance "adiabatic bar, theta = $th"
+	#   時間の次数 : 連続解に対する 50 -> 100 刻みの誤差比が 2 (後退 Euler) / 4 (CN)
+	rc=$3
+	set -- $(th_adia 50 "$th")
+	res=$(awk -v a="$r50" -v b="$r100" -v e="$rc" -v th="$th" 'BEGIN {
+		e1 = (a - e) / e; if (e1 < 0) e1 = -e1
+		e2 = (b - e) / e; if (e2 < 0) e2 = -e2
+		q = (e2 > 0) ? e1 / e2 : 0; w = ((th == 1) ? 2 : 4)
+		printf "%s (err %.2e -> %.2e, ratio %.3f, expected %d)", ((q > 0.95 * w) && (q < 1.05 * w)) ? "OK" : "NG", e1, e2, q, w }')
+	echo "  time order, theta = $th (50 -> 100 steps) : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+#      csv : 行数 = 刻み + 1 (t = 0 を含む)、最初の行は初期温度の R、最後の行はログの R
+nrow=$(awk 'NR > 1' "$WORK/ofe_transient.csv" | wc -l | tr -d ' ')
+if [ "$nrow" = 101 ]; then echo "  ofe_transient.csv : 101 rows (100 steps + t = 0) -> OK"
+else echo "  ofe_transient.csv : $nrow rows, expected 101 -> NG" >&2; status=1; fi
+compare "ofe_transient.csv : R at t = 0 == rho(50 degC) L / A [ohm]" \
+	"$(awk -F, 'NR == 2 { print $2 }' "$WORK/ofe_transient.csv")" 1.2e-2 1e-8
+compare "ofe_transient.csv : last R == the log [ohm]" \
+	"$(awk -F, 'END { print $2 }' "$WORK/ofe_transient.csv")" "$(th_r)" 1e-8
+#      (b) 対流で冷やす一様な棒 (thermal_conv.ofe)。θ = T - T_a は
+#          dθ/dt = a - b θ、a = J² ρ_a / ρc、b = (hP/A - J² ρ0 α) / ρc、θ(0) = 20
+set -- $(awk 'BEGIN { J = 6 / 5e-7; ra = 1e-6 * 1.12; a = J * J * ra / 3.4e6
+	b = (200 * 3e-3 / 5e-7 - J * J * 1e-6 * 4e-3) / 3.4e6
+	printf "%.15e %.15e %.15e", -b, 20 - a / b, 30 + a / b }')
+set -- $(th_ode "$1" "$2" "$3" 5 50 1 2e4 4e-3 0)
+awk '/^thermal/{print "heatcap = 2 3.4e6"; print "transient = 5 50"} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/thconv_tr.ofe"
+th_run thconv_tr.ofe
+compare "convection-cooled bar, transient : R == the discrete recurrence [ohm]" "$(th_r)" "$1" 1e-9
+compare "convection-cooled bar, transient : T == the discrete recurrence [degC]" "$(th_t)" "$2" 1e-9
+th_balance "convection-cooled bar, transient"
+#      (c) ヒートシンクの棒 (data/sample/thermal_transient.ofe) : Fourier 級数解。
+#          比べるのは中央の温度上昇 θ_max = T_max - 20 (T_max そのものだと 20 の分だけ
+#          誤差が薄まる)
+th_four() {	# th_four -> t = 2 s の中央の温度 [degC]
+	awk 'BEGIN { PI = atan2(0, -1); k = 10; c = 3.4e6; L = 0.01
+		s = (7.5e6 * 7.5e6 * 1e-6) / c; kap = k / c; th = (s / (2 * kap)) * (L / 2) * (L / 2)
+		for (nn = 1; nn < 4000; nn += 2) th += -(s / kap) * 4 * L * L / (nn * PI) ^ 3 * sin(nn * PI / 2) * exp(-kap * (nn * PI / L) ^ 2 * 2)
+		printf "%.12e", 20 + th }'
+}
+cp "$SRC/thermal_transient.ofe" "$WORK/"
+th_run thermal_transient.ofe
+tf=$(th_four)
+t40=$(th_t)
+#   許容 0.1% : 空間の h² (40 分割で +0.040%、実測)。時間の誤差は 1e-5 以下
+compare "heat-sink bar, transient : T_max - 20 vs Fourier series (t = 2 s) [K]" \
+	"$(awk -v t="$t40" 'BEGIN { printf "%.12e", t - 20 }')" "$(awk -v t="$tf" 'BEGIN { printf "%.12e", t - 20 }')" 0.001
+th_balance "thermal_transient"
+awk '/^xmesh/{print "xmesh = 0 20 0.01"; next} {print}' "$SRC/thermal_transient.ofe" > "$WORK/thtr20.ofe"
+th_run thtr20.ofe
+t20=$(th_t)
+res=$(awk -v a="$t20" -v b="$t40" -v e="$tf" 'BEGIN {
+	e1 = (a - e) / (e - 20); if (e1 < 0) e1 = -e1
+	e2 = (b - e) / (e - 20); if (e2 < 0) e2 = -e2
+	q = (e2 > 0) ? e1 / e2 : 0
+	printf "%s (err %.2e -> %.2e, ratio %.3f)", ((q > 3.8) && (q < 4.2)) ? "OK" : "NG", e1, e2, q }')
+echo "  second-order convergence in space, transient (20 -> 40 cells) : $res"
+case "$res" in NG*) status=1 ;; esac
+#      (d) 長い時間で定常解に行き着く (thermal_bar.ofe を 400 s = 時定数の約 90 倍)。
+#          後退 Euler の刻みの式は ΔT -> 0 で定常の式そのものになるので、定常の
+#          ソルバーの R と内側の反復の打ち切りの程度で一致しなければならない
+th_run thermal_bar.ofe
+rss=$(th_r)
+awk '/^thermal/{print "heatcap = 2 3.4e6"; print "transient = 400 200"} {print}' \
+	"$SRC/thermal_bar.ofe" > "$WORK/thlong.ofe"
+th_run thlong.ofe
+compare "transient at t = 400 s == the steady solver [ohm]" "$(th_r)" "$rss" 1e-8
+#          初期温度 (50) がヒートシンク (20) と違う唯一のケースなので、蓄熱を
+#          「初期の温度場」でなく「temperature の値」から測る誤りはここでだけ落ちる
+th_balance "thermal_bar, transient to steady (initial 50 degC, sinks 20 degC)"
+#      (e) 首のある導体を ヒートシンク + 対流 + 輻射で、CN (θ = 0.5) : 4 経路の収支。
+#          (1-θ) 側の項 R(T^n) を取り違えると後退 Euler では見えないので CN で見る
+awk '/^thermal/{print "convection = 100 30"; print "radiation = 0.9 10"; print "heatcap = 2 3.4e6"; print "transient = 1 50 0.5"} {print}' \
+	"$SRC/thermal_neck.ofe" > "$WORK/thneck_tr.ofe"
+th_run thneck_tr.ofe
+th_balance "thermal_neck, transient (CN, sinks + convection + radiation)"
+
 # (7) 弾くべき入力 (理由まで grep する)
 th_reject() {	# th_reject <ラベル> <ofe> <理由の文字列>
 	mesh_reject "$1" "$2"
@@ -2494,6 +2624,14 @@ awk '/^radiation/{print "radiation = 1.2 10"; next} {print}' "$SRC/thermal_rad.o
 th_reject "radiation with emissivity > 1" thx_e12.ofe "invalid radiation data"
 awk '/^radiation/{print "radiation = 0.5 -300"; next} {print}' "$SRC/thermal_rad.ofe" > "$WORK/thx_tk.ofe"
 th_reject "radiation to a wall below absolute zero" thx_tk.ofe "invalid radiation data"
+awk '!/^thermal/' "$SRC/thermal_transient.ofe" > "$WORK/thx_trnoth.ofe"
+th_reject "transient without thermal" thx_trnoth.ofe "transient needs thermal"
+awk '/^transient/{print "transient = 2 200 0.4"; next} {print}' "$SRC/thermal_transient.ofe" > "$WORK/thx_th04.ofe"
+th_reject "transient with theta < 0.5 (conditionally stable)" thx_th04.ofe "invalid transient data"
+awk '/^transient/{print "transient = 2 0"; next} {print}' "$SRC/thermal_transient.ofe" > "$WORK/thx_ns0.ofe"
+th_reject "transient with no time step" thx_ns0.ofe "invalid transient data"
+awk '!/^heatcap/' "$SRC/thermal_transient.ofe" > "$WORK/thx_noc.ofe"
+th_reject "transient with a material without heatcap" thx_noc.ofe "no heat capacity"
 
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
@@ -2535,6 +2673,9 @@ lint_expect "convection without thermal"   lint_conv.ofe      yes
 awk '/^analysis = /{print "radiation = 0.5 20"} {print}' \
     "$SRC/resistor_bar.ofe" > "$WORK/lint_rad.ofe"
 lint_expect "radiation without thermal"    lint_rad.ofe       yes
+awk '/^thermal/{print "heatcap = 2 3.4e6"} {print}' \
+    "$SRC/thermal_bar.ofe" > "$WORK/lint_heatcap.ofe"
+lint_expect "heatcap without transient"    lint_heatcap.ofe   yes
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
@@ -2542,7 +2683,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
-         thermal_conv thermal_rad; do
+         thermal_conv thermal_rad thermal_transient; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

@@ -165,6 +165,440 @@ static double surf_faces(crs_t *B, double *g, const double *t, const double *kce
 }
 
 
+// σ(T) を要素ごとに。入力解釈で σ には周囲温度での補正
+// σ_s = σ0 / (1 + α(T_amb - T0)) が掛かっているので、それを外して掛け直す。
+// α = 0 なら因子は厳密に 1 で、熱連成なしと同じ σ になる
+static int th_sigma(FILE *fp_log, int64_t nc, const double *tcell, double *scell)
+{
+	for (int64_t c = 0; c < nc; c++) {
+		const material_t *mt = &Material[CellMaterial[c]];
+		if (mt->sigma <= 0) {
+			scell[c] = 0;
+			continue;
+		}
+		const double num = 1 + (mt->tempco * (Temperature - mt->temp0));
+		const double den = 1 + (mt->tempco * (tcell[c] - mt->temp0));
+		if (den <= 0) {
+			// α < 0 で温度が上がりすぎると抵抗率が負になる (モデルの適用範囲外)
+			fprintf(fp_log, "*** thermal : the resistivity factor 1 + alpha (T - T0) "
+				"became non-positive (T = %.4e degC); the linear sigma(T) model "
+				"does not apply here\n", tcell[c]);
+			return 1;
+		}
+		scell[c] = mt->sigma * num / den;
+	}
+	return 0;
+}
+
+
+// 電気 : V = Volt で解いて、電流が I になるよう φ を縮尺する。*gout = I_V / V
+static int th_conduct(FILE *fp_log, crs_t *A, const double *scell, unsigned char *fix,
+	double *phi, double *work, double *diag, double *q, int it, double *gout)
+{
+	const int n = (int)A->n;
+
+	assemble_cell(A, scell);
+	crs_diag(A, diag);
+	double dmax = 0;
+	for (int i = 0; i < n; i++) {
+		if (diag[i] > dmax) dmax = diag[i];
+	}
+	for (int i = 0; i < n; i++) {
+		fix[i] = ((NodeConductor[i] >= 0) || (diag[i] <= (1e-12 * dmax))) ? 1 : 0;
+	}
+	char label[64];
+	sprintf(label, "phi%d", it);
+	double energy = 0;
+	if (solve_port(A, fix, 1, phi, work, q, &energy, NULL, label) < 0) {
+		fprintf(fp_log, "*** thermal : the conduction solve did not converge "
+			"(iteration %d)\n", it);
+		return 1;
+	}
+	const double iv = q[1];
+	if (iv <= 0) {
+		fprintf(fp_log, "*** thermal : no current flows through the port\n");
+		return 1;
+	}
+	*gout = iv / Volt;
+	const double s = ThermalCurrent / iv;
+	for (int i = 0; i < n; i++) phi[i] *= s;
+	return 0;
+}
+
+
+// 要素の温度 = 8 節点の平均 (3 線形の体積平均)。戻り値は熱を通す領域の節点の最高温度
+static double th_celltemp(const double *tn, const double *kcell, double *tcell)
+{
+	double tmax = -1e300;
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+		if (kcell[c] <= 0) continue;
+		double t = 0;
+		for (int l = 0; l < 8; l++) {
+			const double tl = tn[node_index(i + TI(l), j + TJ(l), k + TK(l))];
+			t += tl / 8;
+			if (tl > tmax) tmax = tl;
+		}
+		tcell[c] = t;
+	}
+	}
+	}
+	return tmax;
+}
+
+
+// 導電領域の体積加重の平均温度
+static double th_tmean(const double *tcell, const double *scell)
+{
+	double vsum = 0, tsum = 0;
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+		if (scell[c] <= 0) continue;
+		const double v = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]);
+		vsum += v;
+		tsum += v * tcell[c];
+	}
+	}
+	}
+	return ((vsum > 0) ? (tsum / vsum) : Temperature);
+}
+
+
+// 輻射 : いまの温度のまわりで Newton 線形化して、伝導 + 対流の行列 b0 に
+// 接線を足したものを B に、右辺を gr に入れる
+static int th_radlin(FILE *fp_log, crs_t *B, const double *b0, double *gr,
+	const double *tn, const double *kcell, int it)
+{
+	const int64_t nnz = B->rowptr[B->n];
+	for (int64_t e = 0; e < nnz; e++) B->val[e] = b0[e];
+	for (int64_t i = 0; i < B->n; i++) gr[i] = 0;
+	if (surf_faces(B, gr, tn, kcell, 1) < -1e299) {
+		fprintf(fp_log, "*** thermal : the absolute temperature became non-positive "
+			"on a radiating face (iteration %d)\n", it);
+		return 1;
+	}
+	return 0;
+}
+
+
+// 熱連成の過渡解析 (transient)。θ 法で
+//   M (T^{n+1} - T^n)/Δt + θ R(T^{n+1}) + (1-θ) R(T^n) = 0,
+//   R(T) = K T + (対流・輻射) - f(T)      (f は Joule 発熱、σ(T) を通して T に依る)
+// を各時刻で解く。各時刻の中は定常と同じく σ(T) の Picard 反復 + 輻射の Newton
+// 線形化で、R と T_max が動かなくなるまで繰り返す (完全陰的)。
+// M は熱容量の質量行列 ∫ρc N_i N_j dV (2x2x2 Gauss で直方体に厳密)。
+// 時刻ごとの R・T_max・平均温度を ofe_transient.csv に、熱の収支
+//   ∫(発熱) dt = ΔU (蓄熱) + ∫(ヒートシンク + 対流 + 輻射) dt
+// をログに出す。M の行和が ∫ρc N_i dV なので、これは丸めと内側の反復の
+// 打ち切りを除いて厳密に成り立つ (rlc_check.sh で見る)。
+static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
+	const double *kcell, double *tcell, double *scell, unsigned char *fix,
+	const unsigned char *fixt, double *phi, double *work, double *diag, double *f,
+	double *tn, double *rhs, double *u, const double *gc, double *gr, double *q,
+	double *gport)
+{
+	const int n = (int)B->n;
+	const int64_t nc = (int64_t)Nx * Ny * Nz;
+	const int64_t nnz = B->rowptr[n];
+	const double dts = TransientTime / TransientSteps;
+	const double th = TransientTheta;
+	int ierr = 0;
+
+	fprintf(fp_log, "  transient : t_end = %.6e [s], %d steps (dt = %.6e [s]), "
+		"theta = %.3f\n", TransientTime, TransientSteps, dts, th);
+
+	double *ccell  = (double *)malloc((size_t)nc * sizeof(double));
+	double *told   = (double *)malloc((size_t)n * sizeof(double));
+	double *t0     = (double *)malloc((size_t)n * sizeof(double));
+	double *mtold  = (double *)malloc((size_t)n * sizeof(double));
+	double *resold = (double *)malloc((size_t)n * sizeof(double));
+	for (int64_t c = 0; c < nc; c++) {
+		ccell[c] = ((kcell[c] > 0) ? Material[CellMaterial[c]].cth : 0);
+	}
+	crs_t M, S;
+	crs_alloc(&M);
+	crs_alloc(&S);
+	assemble_mass_cell(&M, ccell);
+
+	FILE *fcsv = fopen(FN_transient, "w");
+	if (fcsv == NULL) {
+		fprintf(fp_log, "*** thermal : cannot open %s\n", FN_transient);
+		ierr = 1;
+	}
+	else {
+		fprintf(fcsv, "t [s],R [ohm],V [V],T_max [degC],T_mean [degC]\n");
+	}
+
+	// 時刻 0 : 一様な初期温度 (ヒートシンクの節点だけその温度)。R(T^0) を作るため
+	// 電気を 1 回解き、θ 法の (1-θ) 側に要る R(T^0) を持っておく
+	double g = 0, r = 0, tmax = 0, ptot = 0, qconv = 0, qrad = 0;
+	if (!ierr) {
+		tmax = th_celltemp(tn, kcell, tcell);
+		ierr = th_sigma(fp_log, nc, tcell, scell);
+	}
+	if (!ierr) ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, 0, &g);
+	if (!ierr && (RadEps > 0)) ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, 0);
+	if (!ierr) {
+		r = 1 / g;
+		joule_load(phi, scell, f);
+		ptot = 0;
+		for (int i = 0; i < n; i++) ptot += f[i];
+		crs_spmv(B, tn, work, NULL);
+		for (int i = 0; i < n; i++) resold[i] = work[i] - f[i] - gc[i] - gr[i];
+		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0) : 0);
+		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1) : 0);
+		for (int i = 0; i < n; i++) t0[i] = tn[i];
+		fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e\n", 0.0, r, ThermalCurrent * r, tmax,
+			th_tmean(tcell, scell));
+		fprintf(fp_log, "  %6s %14s %16s %14s %5s\n", "step", "t [s]", "R [ohm]",
+			"T_max [degC]", "iter");
+		fprintf(fp_log, "  %6d %14.6e %16.9e %14.6f %5d\n", 0, 0.0, r, tmax, 0);
+	}
+
+	double ejoule = 0, esink = 0, econv = 0, erad = 0;
+	int nittot = 0, step = 0;
+	for (step = 1; !ierr && (step <= TransientSteps); step++) {
+		const double pold = ptot, qcold = qconv, qrold = qrad;
+		for (int i = 0; i < n; i++) told[i] = tn[i];
+		crs_spmv(&M, told, mtold, NULL);
+
+		double rprev = 0, tmprev = 0, qsink = 0;
+		int it = 0, conv = 0;
+		for (it = 1; it <= ThermalMaxIter; it++) {
+			const int tag = step * 1000 + it;
+			if ((ierr = th_sigma(fp_log, nc, tcell, scell)) != 0) break;
+			if ((ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, tag, &g)) != 0) break;
+			r = 1 / g;
+			joule_load(phi, scell, f);
+			ptot = 0;
+			for (int i = 0; i < n; i++) ptot += f[i];
+			if ((RadEps > 0) && ((ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, tag)) != 0)) break;
+
+			// 系の行列 S = M/Δt + θ B、右辺 = M T^n/Δt + θ (f + g) - (1-θ) R(T^n)
+			for (int64_t e = 0; e < nnz; e++) S.val[e] = M.val[e] / dts + th * B->val[e];
+			for (int i = 0; i < n; i++) {
+				if (!fixt[i]) tn[i] = 0;
+			}
+			crs_spmv(&S, tn, work, NULL);
+			for (int i = 0; i < n; i++) {
+				rhs[i] = (fixt[i] ? 0 : ((mtold[i] / dts) + (th * (f[i] + gc[i] + gr[i]))
+					- ((1 - th) * resold[i]) - work[i]));
+			}
+			char label[64];
+			sprintf(label, "T%d", tag);
+			if (solver_cg(&S, rhs, u, fixt, Solver.maxiter, Solver.nout, Solver.converg,
+					NULL, label) < 0) {
+				fprintf(fp_log, "*** thermal : the heat-conduction solve did not converge "
+					"(step %d, iteration %d)\n", step, it);
+				ierr = 1;
+				break;
+			}
+			for (int i = 0; i < n; i++) {
+				if (!fixt[i]) tn[i] += u[i];
+			}
+			tmax = th_celltemp(tn, kcell, tcell);
+
+			const double dr = ((rprev > 0) ? fabs(r - rprev) / r : 1);
+			const double dt = fabs(tmax - tmprev) / ((fabs(tmax) > 1) ? fabs(tmax) : 1);
+			if ((it > 1) && (dr < ThermalTol) && (dt < ThermalTol)) {
+				conv = 1;
+				break;
+			}
+			if (tmax > 1e5) break;
+			rprev = r;
+			tmprev = tmax;
+		}
+		if (ierr) break;
+		if (tmax > 1e5) {
+			fprintf(fp_log, "*** thermal runaway : T_max exceeded 1e5 degC at t = %.6e [s] "
+				"(step %d)\n", step * dts, step);
+			ierr = 1;
+			break;
+		}
+		if (!conv) {
+			fprintf(fp_log, "*** thermal : the coupling did not converge in %d iterations "
+				"at step %d\n", ThermalMaxIter, step);
+			ierr = 1;
+			break;
+		}
+		nittot += it;
+
+		// この刻みの熱の収支。ヒートシンクの節点では刻みの式の残差が
+		// (符号を変えて) ヒートシンクへ出ていく熱の流れになる
+		qsink = 0;
+		for (int i = 0; i < n; i++) {
+			const int id = NodeConductor[i];
+			if ((id >= 0) && HeatSinkOn[id]) {
+				const double dm = crs_row_dot(&M, i, tn) - mtold[i];
+				qsink -= (dm / dts) + (th * (crs_row_dot(B, i, tn) - f[i] - gc[i] - gr[i]))
+					+ ((1 - th) * resold[i]);
+			}
+		}
+		crs_spmv(B, tn, work, NULL);
+		for (int i = 0; i < n; i++) resold[i] = work[i] - f[i] - gc[i] - gr[i];
+		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0) : 0);
+		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1) : 0);
+		ejoule += dts * ((th * ptot) + ((1 - th) * pold));
+		econv += dts * ((th * qconv) + ((1 - th) * qcold));
+		erad += dts * ((th * qrad) + ((1 - th) * qrold));
+		esink += dts * qsink;
+
+		const double tmean = th_tmean(tcell, scell);
+		fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e\n", step * dts, r, ThermalCurrent * r,
+			tmax, tmean);
+		fprintf(fp_log, "  %6d %14.6e %16.9e %14.6f %5d\n", step, step * dts, r, tmax, it);
+		fflush(fp_log);
+	}
+
+	if (!ierr) {
+		// 蓄熱 ΔU = Σ_i (M (T - T^0))_i = ∫ρc (T - T^0) dV
+		for (int i = 0; i < n; i++) work[i] = tn[i] - t0[i];
+		crs_spmv(&M, work, rhs, NULL);
+		double du = 0;
+		for (int i = 0; i < n; i++) du += rhs[i];
+		fprintf(fp_log, "  %d steps, %d iterations in total\n", TransientSteps, nittot);
+		fprintf(fp_log, "  R = %.10e [ohm] at I = %.6e [A] (V = %.10e [V]), t = %.6e [s]\n",
+			r, ThermalCurrent, ThermalCurrent * r, TransientTime);
+		fprintf(fp_log, "  T_max = %.10e [degC], T_mean (conductor) = %.10e [degC]\n",
+			tmax, th_tmean(tcell, scell));
+		fprintf(fp_log, "  joule power : I^2 R = %.12e, field integral = %.12e [W] (t = t_end)\n",
+			ThermalCurrent * ThermalCurrent * r, ptot);
+		fprintf(fp_log, "  heat balance : joule = %.12e, stored = %.12e, to heat sinks = %.12e, "
+			"to convection = %.12e, to radiation = %.12e [J]\n", ejoule, du, esink, econv, erad);
+		*gport = g;
+
+		if (FieldOut) {
+			field_add_node("phi_R_port1", phi);
+			field_add_grad("E_R_port1", phi, 0);
+			field_add_node("T", tn);
+		}
+	}
+	fflush(fp_log);
+
+	if (fcsv) fclose(fcsv);
+	crs_free(&M);
+	crs_free(&S);
+	free(ccell); free(told); free(t0); free(mtold); free(resold);
+
+	return ierr;
+}
+
+
+// 熱連成の定常解析。σ(T) の Picard 反復 (+ 輻射の Newton 線形化) を R と T_max が
+// 動かなくなるまで回す
+static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
+	const double *kcell, double *tcell, double *scell, unsigned char *fix,
+	const unsigned char *fixt, double *phi, double *work, double *diag, double *f,
+	double *tn, double *rhs, double *u, const double *gc, double *gr, double *q,
+	double *gport)
+{
+	const int n = (int)B->n;
+	const int64_t nc = (int64_t)Nx * Ny * Nz;
+	int ierr = 0;
+
+	double rprev = 0, tmprev = 0, r = 0, g = 0, tmax = 0;
+	double ptot = 0, qsink = 0, qconv = 0, qrad = 0, pterm = 0;
+	int it = 0, conv = 0;
+	fprintf(fp_log, "  %4s %16s %14s %16s\n", "iter", "R [ohm]", "T_max [degC]", "dR / R");
+	for (it = 1; !ierr && (it <= ThermalMaxIter); it++) {
+		if ((ierr = th_sigma(fp_log, nc, tcell, scell)) != 0) break;
+		if ((ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, it, &g)) != 0) break;
+		r = 1 / g;
+		pterm = ThermalCurrent * ThermalCurrent * r;
+
+		// 発熱と熱 : T = T_D + u、自由節点で B u = f - B T_D
+		joule_load(phi, scell, f);
+		ptot = 0;
+		for (int i = 0; i < n; i++) ptot += f[i];
+		// 輻射 : いまの温度のまわりで Newton 線形化して行列と右辺に入れる。
+		// σ(T) の Picard 反復と同じ回で回すので、収束すれば両方の不動点になる
+		if ((RadEps > 0) && ((ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, it)) != 0)) break;
+		for (int i = 0; i < n; i++) {
+			if (!fixt[i]) tn[i] = 0;
+		}
+		crs_spmv(B, tn, work, NULL);
+		for (int i = 0; i < n; i++) rhs[i] = (fixt[i] ? 0 : (f[i] + gc[i] + gr[i] - work[i]));
+		char label[64];
+		sprintf(label, "T%d", it);
+		if (solver_cg(B, rhs, u, fixt, Solver.maxiter, Solver.nout, Solver.converg,
+				NULL, label) < 0) {
+			fprintf(fp_log, "*** thermal : the heat-conduction solve did not converge "
+				"(iteration %d)\n", it);
+			ierr = 1;
+			break;
+		}
+		for (int i = 0; i < n; i++) {
+			if (!fixt[i]) tn[i] += u[i];
+		}
+
+		// ヒートシンク・対流・輻射で出ていく熱。K_T の列和が 0 なので
+		// 和は Σ f に一致するはず (対流の行列と右辺の和は対流の熱そのもの)。
+		// 輻射は線形化した式で解いているので、出ていく熱を新しい温度で
+		// 評価し直した値とは O(ΔT²) だけ違う (収束すれば丸めの程度)
+		qsink = 0;
+		for (int i = 0; i < n; i++) {
+			const int id = NodeConductor[i];
+			if ((id >= 0) && HeatSinkOn[id]) {
+				qsink += f[i] + gc[i] + gr[i] - crs_row_dot(B, i, tn);
+			}
+		}
+		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0) : 0);
+		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1) : 0);
+
+		tmax = th_celltemp(tn, kcell, tcell);
+
+		const double dr = ((rprev > 0) ? fabs(r - rprev) / r : 1);
+		const double dt = fabs(tmax - tmprev) / ((fabs(tmax) > 1) ? fabs(tmax) : 1);
+		fprintf(fp_log, "  %4d %16.9e %14.6f %16.3e\n", it, r, tmax, dr);
+		fflush(fp_log);
+		if ((it > 1) && (dr < ThermalTol) && (dt < ThermalTol)) {
+			conv = 1;
+			break;
+		}
+		// 熱暴走 : 定常解が無いと温度が増え続ける。物理的に意味の無い温度まで
+		// 追いかけずに打ち切る
+		if (tmax > 1e5) {
+			fprintf(fp_log, "*** thermal runaway : T_max exceeded 1e5 degC at iteration "
+				"%d (no steady state for this current)\n", it);
+			ierr = 1;
+			break;
+		}
+		rprev = r;
+		tmprev = tmax;
+	}
+	if (!ierr && !conv) {
+		fprintf(fp_log, "*** thermal : the coupling did not converge in %d iterations "
+			"(thermal runaway: no steady state for this current?)\n", ThermalMaxIter);
+		ierr = 1;
+	}
+
+	if (!ierr) {
+		fprintf(fp_log, "  converged in %d iterations\n", it);
+		fprintf(fp_log, "  R = %.10e [ohm] at I = %.6e [A] (V = %.10e [V])\n",
+			r, ThermalCurrent, ThermalCurrent * r);
+		fprintf(fp_log, "  T_max = %.10e [degC], T_mean (conductor) = %.10e [degC]\n",
+			tmax, th_tmean(tcell, scell));
+		fprintf(fp_log, "  joule power : I^2 R = %.12e, field integral = %.12e, "
+			"to heat sinks = %.12e, to convection = %.12e, to radiation = %.12e [W]\n",
+			pterm, ptot, qsink, qconv, qrad);
+		*gport = g;
+
+		if (FieldOut) {
+			field_add_node("phi_R_port1", phi);
+			field_add_grad("E_R_port1", phi, 0);
+			field_add_node("T", tn);
+		}
+	}
+
+
+	return ierr;
+}
+
+
 int solve_thermal(FILE *fp_log, double *gport)
 {
 	const int n = (int)num_node();
@@ -234,13 +668,14 @@ int solve_thermal(FILE *fp_log, double *gport)
 		}
 		else {
 			fixt[i] = 0;
-			tn[i] = Temperature;			// 輻射の最初の線形化の点 (それ以外では使わない)
+			tn[i] = Temperature;			// 輻射の最初の線形化の点・過渡解析の初期値
 		}
 	}
 	// 対流は熱伝導の行列に足す (温度に依らない)。節点の固定は熱伝導だけで決める
 	for (int i = 0; i < n; i++) {
 		gc[i] = 0;
 		gr[i] = 0;
+		u[i] = 0;
 	}
 	int64_t nface = 0;
 	if (ConvH > 0) {
@@ -254,7 +689,7 @@ int solve_thermal(FILE *fp_log, double *gport)
 			((ConvH > 0) ? ((RadEps > 0) ? "convection / radiation" : "convection") : "radiation"),
 			(long long)nface);
 	}
-	if ((nsink < 1) && (nface < 1)) {
+	if (!TransientOn && (nsink < 1) && (nface < 1)) {
 		fprintf(fp_log, "*** thermal : the heat has no way out (the heat-sink conductors "
 			"have no node and no face is exposed to convection / radiation)\n");
 		ierr = 1;
@@ -267,184 +702,9 @@ int solve_thermal(FILE *fp_log, double *gport)
 		for (int64_t e = 0; e < nnz; e++) b0[e] = B.val[e];
 	}
 
-	double rprev = 0, tmprev = 0, r = 0, g = 0, tmax = 0;
-	double ptot = 0, qsink = 0, qconv = 0, qrad = 0, pterm = 0;
-	int it = 0, conv = 0;
-	fprintf(fp_log, "  %4s %16s %14s %16s\n", "iter", "R [ohm]", "T_max [degC]", "dR / R");
-	for (it = 1; !ierr && (it <= ThermalMaxIter); it++) {
-		// σ(T) を要素ごとに。入力解釈で σ には周囲温度での補正
-		// σ_s = σ0 / (1 + α(T_amb - T0)) が掛かっているので、それを外して掛け直す。
-		// α = 0 なら因子は厳密に 1 で、熱連成なしと同じ σ になる
-		for (int64_t c = 0; c < nc; c++) {
-			const material_t *mt = &Material[CellMaterial[c]];
-			if (mt->sigma <= 0) {
-				scell[c] = 0;
-				continue;
-			}
-			const double num = 1 + (mt->tempco * (Temperature - mt->temp0));
-			const double den = 1 + (mt->tempco * (tcell[c] - mt->temp0));
-			if (den <= 0) {
-				// α < 0 で温度が上がりすぎると抵抗率が負になる (モデルの適用範囲外)
-				fprintf(fp_log, "*** thermal : the resistivity factor 1 + alpha (T - T0) "
-					"became non-positive (T = %.4e degC); the linear sigma(T) model "
-					"does not apply here\n", tcell[c]);
-				ierr = 1;
-				break;
-			}
-			scell[c] = mt->sigma * num / den;
-		}
-		if (ierr) break;
-
-		// 電気 : V = Volt で解いて、電流が I になるよう縮尺する
-		assemble_cell(&A, scell);
-		crs_diag(&A, diag);
-		double dmax = 0;
-		for (int i = 0; i < n; i++) {
-			if (diag[i] > dmax) dmax = diag[i];
-		}
-		for (int i = 0; i < n; i++) {
-			fix[i] = ((NodeConductor[i] >= 0) || (diag[i] <= (1e-12 * dmax))) ? 1 : 0;
-		}
-		char label[64];
-		sprintf(label, "phi%d", it);
-		double energy = 0;
-		if (solve_port(&A, fix, 1, phi, work, q, &energy, NULL, label) < 0) {
-			fprintf(fp_log, "*** thermal : the conduction solve did not converge "
-				"(iteration %d)\n", it);
-			ierr = 1;
-			break;
-		}
-		const double iv = q[1];
-		if (iv <= 0) {
-			fprintf(fp_log, "*** thermal : no current flows through the port\n");
-			ierr = 1;
-			break;
-		}
-		g = iv / Volt;
-		r = 1 / g;
-		const double s = ThermalCurrent / iv;
-		for (int i = 0; i < n; i++) phi[i] *= s;
-		pterm = ThermalCurrent * ThermalCurrent * r;
-
-		// 発熱と熱 : T = T_D + u、自由節点で B u = f - B T_D
-		joule_load(phi, scell, f);
-		ptot = 0;
-		for (int i = 0; i < n; i++) ptot += f[i];
-		// 輻射 : いまの温度のまわりで Newton 線形化して行列と右辺に入れる。
-		// σ(T) の Picard 反復と同じ回で回すので、収束すれば両方の不動点になる
-		if (RadEps > 0) {
-			for (int64_t e = 0; e < nnz; e++) B.val[e] = b0[e];
-			for (int i = 0; i < n; i++) gr[i] = 0;
-			if (surf_faces(&B, gr, tn, kcell, 1) < -1e299) {
-				fprintf(fp_log, "*** thermal : the absolute temperature became non-positive "
-					"on a radiating face (iteration %d)\n", it);
-				ierr = 1;
-				break;
-			}
-		}
-		for (int i = 0; i < n; i++) {
-			if (!fixt[i]) tn[i] = 0;
-		}
-		crs_spmv(&B, tn, work, NULL);
-		for (int i = 0; i < n; i++) rhs[i] = (fixt[i] ? 0 : (f[i] + gc[i] + gr[i] - work[i]));
-		sprintf(label, "T%d", it);
-		if (solver_cg(&B, rhs, u, fixt, Solver.maxiter, Solver.nout, Solver.converg,
-				NULL, label) < 0) {
-			fprintf(fp_log, "*** thermal : the heat-conduction solve did not converge "
-				"(iteration %d)\n", it);
-			ierr = 1;
-			break;
-		}
-		for (int i = 0; i < n; i++) {
-			if (!fixt[i]) tn[i] += u[i];
-		}
-
-		// ヒートシンク・対流・輻射で出ていく熱。K_T の列和が 0 なので
-		// 和は Σ f に一致するはず (対流の行列と右辺の和は対流の熱そのもの)。
-		// 輻射は線形化した式で解いているので、出ていく熱を新しい温度で
-		// 評価し直した値とは O(ΔT²) だけ違う (収束すれば丸めの程度)
-		qsink = 0;
-		for (int i = 0; i < n; i++) {
-			const int id = NodeConductor[i];
-			if ((id >= 0) && HeatSinkOn[id]) {
-				qsink += f[i] + gc[i] + gr[i] - crs_row_dot(&B, i, tn);
-			}
-		}
-		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0) : 0);
-		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1) : 0);
-
-		// 要素の温度 = 8 節点の平均 (3 線形の体積平均)
-		tmax = -1e300;
-		for (int i = 0; i < Nx; i++) {
-		for (int j = 0; j < Ny; j++) {
-		for (int k = 0; k < Nz; k++) {
-			const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
-			if (kcell[c] <= 0) continue;
-			double t = 0;
-			for (int l = 0; l < 8; l++) {
-				const double tl = tn[node_index(i + TI(l), j + TJ(l), k + TK(l))];
-				t += tl / 8;
-				if (tl > tmax) tmax = tl;
-			}
-			tcell[c] = t;
-		}
-		}
-		}
-
-		const double dr = ((rprev > 0) ? fabs(r - rprev) / r : 1);
-		const double dt = fabs(tmax - tmprev) / ((fabs(tmax) > 1) ? fabs(tmax) : 1);
-		fprintf(fp_log, "  %4d %16.9e %14.6f %16.3e\n", it, r, tmax, dr);
-		fflush(fp_log);
-		if ((it > 1) && (dr < ThermalTol) && (dt < ThermalTol)) {
-			conv = 1;
-			break;
-		}
-		// 熱暴走 : 定常解が無いと温度が増え続ける。物理的に意味の無い温度まで
-		// 追いかけずに打ち切る
-		if (tmax > 1e5) {
-			fprintf(fp_log, "*** thermal runaway : T_max exceeded 1e5 degC at iteration "
-				"%d (no steady state for this current)\n", it);
-			ierr = 1;
-			break;
-		}
-		rprev = r;
-		tmprev = tmax;
-	}
-	if (!ierr && !conv) {
-		fprintf(fp_log, "*** thermal : the coupling did not converge in %d iterations "
-			"(thermal runaway: no steady state for this current?)\n", ThermalMaxIter);
-		ierr = 1;
-	}
-
 	if (!ierr) {
-		// 体積加重の平均温度 (導電領域)
-		double vsum = 0, tsum = 0;
-		for (int i = 0; i < Nx; i++) {
-		for (int j = 0; j < Ny; j++) {
-		for (int k = 0; k < Nz; k++) {
-			const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
-			if (scell[c] <= 0) continue;
-			const double v = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]);
-			vsum += v;
-			tsum += v * tcell[c];
-		}
-		}
-		}
-		fprintf(fp_log, "  converged in %d iterations\n", it);
-		fprintf(fp_log, "  R = %.10e [ohm] at I = %.6e [A] (V = %.10e [V])\n",
-			r, ThermalCurrent, ThermalCurrent * r);
-		fprintf(fp_log, "  T_max = %.10e [degC], T_mean (conductor) = %.10e [degC]\n",
-			tmax, ((vsum > 0) ? (tsum / vsum) : Temperature));
-		fprintf(fp_log, "  joule power : I^2 R = %.12e, field integral = %.12e, "
-			"to heat sinks = %.12e, to convection = %.12e, to radiation = %.12e [W]\n",
-			pterm, ptot, qsink, qconv, qrad);
-		*gport = g;
-
-		if (FieldOut) {
-			field_add_node("phi_R_port1", phi);
-			field_add_grad("E_R_port1", phi, 0);
-			field_add_node("T", tn);
-		}
+		ierr = (TransientOn ? th_transient : th_steady)(fp_log, &A, &B, b0, kcell, tcell,
+			scell, fix, fixt, phi, work, diag, f, tn, rhs, u, gc, gr, q, gport);
 	}
 	fflush(fp_log);
 

@@ -234,6 +234,7 @@ int input_data(FILE *fp)
 		Material[m].bhtempco = 0;
 		Material[m].bhtemp0 = 20;
 		Material[m].kth = 0;
+		Material[m].cth = 0;
 		Material[m].eps6_given = 0;
 		Material[m].bhaniso = 0;
 		Material[m].ja.on = 0;
@@ -276,6 +277,10 @@ int input_data(FILE *fp)
 	ConvT = 20;
 	RadEps = 0;
 	RadT = 20;
+	TransientOn = 0;
+	TransientTime = 0;
+	TransientSteps = 0;
+	TransientTheta = 1;
 
 	MeshMode = 0;
 	strcpy(MeshFile, "");
@@ -422,6 +427,7 @@ int input_data(FILE *fp)
 			Material[NMaterial].bhtemp0 = 20;
 			Material[NMaterial].temp0 = 20;
 			Material[NMaterial].kth = 0;
+			Material[NMaterial].cth = 0;
 			Material[NMaterial].eps6_given = 0;
 			Material[NMaterial].bhaniso = 0;
 			Material[NMaterial].ja.on = 0;
@@ -794,6 +800,40 @@ int input_data(FILE *fp)
 				return 1;
 			}
 			Material[mid].kth = k;
+		}
+		else if (!strcmp(strkey, "heatcap")) {
+			// heatcap = <material_id> <ρc [J/(m^3 K)]>  : 体積熱容量 (密度 x 比熱)
+			//   熱連成の過渡解析 (transient) で使う。material 行より後に書くこと
+			if (nval != 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			const double c = atof(token[3]);
+			if ((mid < 0) || (mid >= NMaterial) || (c < 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			Material[mid].cth = c;
+		}
+		else if (!strcmp(strkey, "transient")) {
+			// transient = <t_end [s]> <nstep> [<theta>]  : 熱連成を過渡解析にする
+			//   t = 0 で電流 I を入れ、温度 temperature (一様) から θ 法で
+			//   時間発展させる。θ = 1 (既定) は後退 Euler、0.5 は Crank-Nicolson。
+			//   θ < 0.5 は条件付き安定なので受け付けない
+			if ((nval < 2) || (nval > 3)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			TransientOn = 1;
+			TransientTime = atof(token[2]);
+			TransientSteps = atoi(token[3]);
+			if (nval >= 3) TransientTheta = atof(token[4]);
+			if ((TransientTime <= 0) || (TransientSteps < 1)
+			 || (TransientTheta < 0.5) || (TransientTheta > 1)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
 		}
 		else if (!strcmp(strkey, "heatsink")) {
 			// heatsink = <conductor_id> <T [degC]>  : その導体の節点の温度を固定する
@@ -1330,8 +1370,9 @@ int input_data(FILE *fp)
 			nsink++;
 		}
 		// 熱の逃げ場が無いと、発熱し続けるのに温度が定まらない (純 Neumann で
-		// 右辺の和が 0 でない) ので定常解が存在しない。逃げ場はヒートシンクか対流
-		if ((nsink < 1) && (ConvH <= 0) && (RadEps <= 0)) {
+		// 右辺の和が 0 でない) ので定常解が存在しない。逃げ場はヒートシンクか対流。
+		// 過渡解析なら有限の時刻までは断熱でも解がある (熱容量が行列を正則にする)
+		if (!TransientOn && (nsink < 1) && (ConvH <= 0) && (RadEps <= 0)) {
 			printf("%s\n", "*** thermal needs a way for the heat to leave: at least "
 				"one heatsink (a conductor with a fixed temperature), convection or "
 				"radiation; otherwise there is no steady state");
@@ -1345,6 +1386,20 @@ int input_data(FILE *fp)
 				return 1;
 			}
 		}
+		// 過渡解析では熱を通す材料はすべて熱容量を持つこと (0 なら熱容量の無い
+		// 物体になり、物理的に意味が無い)
+		for (int m = 0; m < NMaterial; m++) {
+			if (TransientOn && (Material[m].kth > 0) && (Material[m].cth <= 0)) {
+				printf("*** transient : material %d conducts heat (kthermal) but has "
+					"no heat capacity (heatcap)\n", m);
+				return 1;
+			}
+		}
+	}
+	else if (TransientOn) {
+		printf("%s\n", "*** transient needs thermal (it is the time-dependent form "
+			"of the electro-thermal coupling)");
+		return 1;
 	}
 	else {
 		// 読む解析が無いのに指定されたキーを知らせる (黙って無視しない)
@@ -1370,6 +1425,17 @@ int input_data(FILE *fp)
 		if (RadEps > 0) {
 			input_warn("radiation has no effect without thermal (it is only read by "
 				"the electro-thermal coupling)");
+		}
+	}
+	// 熱容量は過渡解析だけが読む (定常の熱連成でも読まない)
+	if (!TransientOn) {
+		int haveC = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].cth > 0) haveC = 1;
+		}
+		if (haveC) {
+			input_warn("heatcap has no effect without transient (it is only read by "
+				"the time-dependent electro-thermal coupling)");
 		}
 	}
 

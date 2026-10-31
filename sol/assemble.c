@@ -207,6 +207,38 @@ void assemble_mass(crs_t *A)
 }
 
 
+// セルごとの係数の質量行列 ∫c N_i N_j dV (熱連成の過渡解析の熱容量 ρc)
+void assemble_mass_cell(crs_t *A, const double *coefcell)
+{
+	crs_zero(A);
+
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const double coef = coefcell[((int64_t)i * Ny + j) * Nz + k];
+		if (coef <= 0) continue;
+
+		double me[8][8];
+		element_mass(Xn[i + 1] - Xn[i], Yn[j + 1] - Yn[j], Zn[k + 1] - Zn[k], me);
+
+		for (int l = 0; l < 8; l++) {
+			const int li = LI(l), lj = LJ(l), lk = LK(l);
+			const int64_t row = node_index(i + li, j + lj, k + lk);
+			const int64_t rowstart = A->rowptr[row];
+			for (int mm = 0; mm < 8; mm++) {
+				const int di = LI(mm) - li;
+				const int dj = LJ(mm) - lj;
+				const int dk = LK(mm) - lk;
+				const int64_t p = crs_offset(rowstart, i + li, j + lj, k + lk, di, dj, dk);
+				A->val[p] += coef * me[l][mm];
+			}
+		}
+	}
+	}
+	}
+}
+
+
 // B-H 曲線から磁気抵抗率 ν = H(B)/B を求める
 //
 // 表は (H, B) の狭義単調増加な点列 (原点は含まない)。
