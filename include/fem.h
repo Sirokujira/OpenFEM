@@ -75,6 +75,8 @@ extern "C" {
 //   M_an(He) = Ms (coth(He/a) - a/He),  He = H + α M
 //   dM/dH = [ (1-c) δ_M (M_an-M)/(δk - α(M_an-M)) + c dM_an/dHe ]
 //         / [ 1 - α c dM_an/dHe ]
+#define MAXTEMPTAB (32)		// 温度係数の表の点数の上限
+
 typedef struct {
 	int    on;					// 1 : このモデルを使う
 	double ms;					// 飽和磁化 Ms [A/m]
@@ -131,6 +133,10 @@ typedef struct {
 	double epstempco, epstemp0;
 	double mutempco,  mutemp0;
 	double bhtempco,  bhtemp0;
+	// 温度係数の表 (epstemptable / mutemptable / bhtemptable)。[0] εr、[1] μr、[2] B-H。
+	// 点数 0 なら上の 1 次係数を使う。キュリー点近傍の非線形な落ち込みを折れ線で書く
+	int    ntemp[3];
+	double tempT[3][MAXTEMPTAB], tempF[3][MAXTEMPTAB];
 	// 熱伝導率 [W/(m K)] (熱連成 thermal で使う。0 : 熱を通さない)
 	double kth;
 	double cth;					// 体積熱容量 ρc [J/(m^3 K)] (熱連成の過渡解析 transient で使う)

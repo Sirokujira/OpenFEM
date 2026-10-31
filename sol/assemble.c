@@ -71,6 +71,29 @@ void element_matrix(double dx, double dy, double dz, const double c[6], double k
 //        = 1 : ε0              真空静電界 (TEM インダクタンス)
 //        = 2 : σ + ω ε0 εr tanδ  定常電流界 (導電損 + 誘電損)
 //        = 3 : 1 / (μ0 μr)     静磁場 (DC インダクタンス)
+// 温度 Temperature での材料係数の倍率。kind = 0 : εr、1 : μr、2 : B-H。
+// 表 (epstemptable 等) があれば (T, f) の折れ線 (範囲の外は端の値)、
+// 無ければ 1 次係数 1 + α (T - T0)
+double temp_factor(const material_t *mt, int kind)
+{
+	const int nt = mt->ntemp[kind];
+	if (nt > 0) {
+		const double *tt = mt->tempT[kind], *ff = mt->tempF[kind];
+		if (Temperature <= tt[0]) return ff[0];
+		for (int k = 0; k < (nt - 1); k++) {
+			if (Temperature <= tt[k + 1]) {
+				const double w = (Temperature - tt[k]) / (tt[k + 1] - tt[k]);
+				return ff[k] + (w * (ff[k + 1] - ff[k]));
+			}
+		}
+		return ff[nt - 1];
+	}
+	if (kind == 0) return 1 + (mt->epstempco * (Temperature - mt->epstemp0));
+	if (kind == 1) return 1 + (mt->mutempco  * (Temperature - mt->mutemp0));
+	return 1 + (mt->bhtempco * (Temperature - mt->bhtemp0));
+}
+
+
 void material_coef_pub(int m, int mode, double c[6])
 {
 	const material_t *mt = &Material[m];
@@ -79,8 +102,8 @@ void material_coef_pub(int m, int mode, double c[6])
 	// σ のように入力解釈で一度だけ掛ける方式は使えない : material_freq() が
 	// 分散材料の εr を毎回展開し直して上書きするので、周波数掃引で補正が消える。
 	// 読み出し時なら何度呼んでも累積しない
-	const double fe = 1 + (mt->epstempco * (Temperature - mt->epstemp0));
-	const double fm = 1 + (mt->mutempco  * (Temperature - mt->mutemp0));
+	const double fe = temp_factor(mt, 0);
+	const double fm = temp_factor(mt, 1);
 
 	for (int d = 0; d < 6; d++) c[d] = 0;
 

@@ -232,6 +232,7 @@ int input_data(FILE *fp)
 		Material[m].mutempco = 0;
 		Material[m].mutemp0 = 20;
 		Material[m].bhtempco = 0;
+		for (int d = 0; d < 3; d++) Material[m].ntemp[d] = 0;
 		Material[m].bhtemp0 = 20;
 		Material[m].kth = 0;
 		Material[m].cth = 0;
@@ -427,6 +428,7 @@ int input_data(FILE *fp)
 			Material[NMaterial].mutempco = 0;
 			Material[NMaterial].mutemp0 = 20;
 			Material[NMaterial].bhtempco = 0;
+			for (int d = 0; d < 3; d++) Material[NMaterial].ntemp[d] = 0;
 			Material[NMaterial].bhtemp0 = 20;
 			Material[NMaterial].temp0 = 20;
 			Material[NMaterial].kth = 0;
@@ -772,6 +774,36 @@ int input_data(FILE *fp)
 			if      (strkey[0] == 'e') { Material[mid].epstempco = al; Material[mid].epstemp0 = t0; }
 			else if (strkey[0] == 'm') { Material[mid].mutempco  = al; Material[mid].mutemp0  = t0; }
 			else                       { Material[mid].bhtempco  = al; Material[mid].bhtemp0  = t0; }
+		}
+		else if (!strcmp(strkey, "epstemptable") || !strcmp(strkey, "mutemptable")
+		      || !strcmp(strkey, "bhtemptable")) {
+			// epstemptable / mutemptable / bhtemptable = <material_id> <T1> <f1> <T2> <f2> ...
+			//   εr / μr / B-H 曲線に掛ける倍率 f(T) を (温度, 倍率) の折れ線で与える
+			//   (範囲の外は端の値)。1 次係数 (*tempco) の代わりに使い、キュリー点
+			//   近傍の非線形な落ち込みを書く (例 : Tc を越えたら μr -> 1)
+			const int kind = ((strkey[0] == 'e') ? 0 : (strkey[0] == 'm') ? 1 : 2);
+			if ((nval < 3) || ((nval % 2) == 0) || (((nval - 1) / 2) > MAXTEMPTAB)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			if ((mid < 0) || (mid >= NMaterial) || (Material[mid].ntemp[kind] > 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			material_t *mt = &Material[mid];
+			const int nt = (nval - 1) / 2;
+			for (int k = 0; k < nt; k++) {
+				mt->tempT[kind][k] = atof(token[3 + (2 * k)]);
+				mt->tempF[kind][k] = atof(token[4 + (2 * k)]);
+				// 温度は狭義単調増加、倍率は正 (0 以下は εr / μr / B が破綻する)
+				if ((mt->tempF[kind][k] <= 0)
+				 || ((k > 0) && (mt->tempT[kind][k] <= mt->tempT[kind][k - 1]))) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+			}
+			mt->ntemp[kind] = nt;
 		}
 		else if (!strcmp(strkey, "conductortempco")) {
 			// conductortempco = <conductor_id> <alpha> [<T0>]
@@ -1197,8 +1229,8 @@ int input_data(FILE *fp)
 	// 上書きするのでここでは掛けられず、読み出し時 (material_coef_pub) に掛ける
 	for (int m = 0; m < NMaterial; m++) {
 		material_t *mt = &Material[m];
-		if (mt->bhtempco == 0) continue;
-		const double fac = 1 + (mt->bhtempco * (Temperature - mt->bhtemp0));
+		if ((mt->bhtempco == 0) && (mt->ntemp[2] < 1)) continue;
+		const double fac = temp_factor(mt, 2);
 		if (fac <= 0) {
 			printf("*** bhtempco : material %d has a non-positive factor "
 				"(1 + alpha (T - T0) = %.4e) at T = %.4e degC\n", m, fac, Temperature);
@@ -1212,8 +1244,18 @@ int input_data(FILE *fp)
 	// εr / μr の係数はここでは掛けないが、符号が破綻していないかは見ておく
 	for (int m = 0; m < NMaterial; m++) {
 		const material_t *mt = &Material[m];
-		const double fe = 1 + (mt->epstempco * (Temperature - mt->epstemp0));
-		const double fm = 1 + (mt->mutempco  * (Temperature - mt->mutemp0));
+		const double fe = temp_factor(mt, 0);
+		const double fm = temp_factor(mt, 1);
+		// 1 次係数と表の両方は、どちらを使うかが曖昧なので受け付けない
+		static const char *tname[3] = {"epstempco and epstemptable",
+			"mutempco and mutemptable", "bhtempco and bhtemptable"};
+		const double tco[3] = {mt->epstempco, mt->mutempco, mt->bhtempco};
+		for (int d = 0; d < 3; d++) {
+			if ((mt->ntemp[d] > 0) && (tco[d] != 0)) {
+				printf("*** material %d has both %s; give only one\n", m, tname[d]);
+				return 1;
+			}
+		}
 		if ((mt->epstempco != 0) && (fe <= 0)) {
 			printf("*** epstempco : material %d has a non-positive factor (%.4e) "
 				"at T = %.4e degC\n", m, fe, Temperature);
@@ -1298,21 +1340,22 @@ int input_data(FILE *fp)
 			}
 			// 温度係数も「どの解析が読むか」を登録する (読まれない指定は無害に
 			// 見えて実は効いていないので、警告が唯一の防波堤になる)
-			if ((mt->epstempco != 0) && !use_eps) {
-				input_warn("epstempco (material %d) scales epsr, which only "
+			if (((mt->epstempco != 0) || (mt->ntemp[0] > 0)) && !use_eps) {
+				input_warn("epstempco / epstemptable (material %d) scales epsr, which only "
 					"analysis C / R read", m);
 			}
-			if ((mt->mutempco != 0) && !use_mu) {
-				input_warn("mutempco (material %d) scales mur, which only "
+			if (((mt->mutempco != 0) || (mt->ntemp[1] > 0)) && !use_mu) {
+				input_warn("mutempco / mutemptable (material %d) scales mur, which only "
 					"analysis M / F / A / E read", m);
 			}
-			if ((mt->bhtempco != 0) && (mt->nbh[0] <= 0) && !mt->ja.on) {
-				input_warn("bhtempco (material %d) has no effect because the material "
-					"has no bh curve and no ja model", m);
+			const int bht = ((mt->bhtempco != 0) || (mt->ntemp[2] > 0));
+			if (bht && (mt->nbh[0] <= 0) && !mt->ja.on) {
+				input_warn("bhtempco / bhtemptable (material %d) has no effect because the "
+					"material has no bh curve and no ja model", m);
 			}
-			if ((mt->bhtempco != 0) && !(Analysis & ANALYSIS_M)) {
-				input_warn("bhtempco (material %d) scales the B-H curve, which only "
-					"analysis M reads", m);
+			if (bht && !(Analysis & ANALYSIS_M)) {
+				input_warn("bhtempco / bhtemptable (material %d) scales the B-H curve, which "
+					"only analysis M reads", m);
 			}
 		}
 		for (int p = 0; p < MAXPORT; p++) {

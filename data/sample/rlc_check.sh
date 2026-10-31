@@ -1708,6 +1708,89 @@ compare "(L - L_int) ratio at T = 120 vs 20" \
 		li = mu0 * 2 * 0.05e-3 / (3 * 1e-3)
 		printf "%.10e", (a - li) / (b - li) }')" 0.8 1e-5
 
+# 温度係数の表 (epstemptable / mutemptable / bhtemptable = <mid> <T1> <f1> ...)。
+# 1 次係数の代わりに折れ線の倍率を使い、キュリー点近傍の非線形な落ち込みを書く。
+# 適用箇所は 1 次係数と同じ (εr / μr は読み出し時、B-H は入力時) で、temp_factor() に
+# 集約してある
+echo "[temptable] piecewise-linear temperature factors (Curie-point drop)"
+tt_run() {	# tt_run <dir> : $WORK/<dir>/x.ofe を解いて ofe_post まで
+	(cd "$WORK/$1" && "$OFE" -n 2 x.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1)
+}
+tt_val() { awk -F, -v name="$2" '$1 == name && NF == 2 { f = 1; next } f && $1 == "1" { print $2; exit }' "$WORK/$1/rlc.csv"; }
+#   (a) 1 次と同じ直線の表は 1 次係数と一致する (μr、T = 70 / 120)
+for t in 70 120; do
+	mkdir -p "$WORK/ttl$t" "$WORK/ttt$t"
+	sed "s/^temperature = .*/temperature = $t/" "$SRC/temp_mur.ofe" > "$WORK/ttl$t/x.ofe"
+	sed "s/^temperature = .*/temperature = $t/; s/^mutempco = .*/mutemptable = 2 20 1 120 0.7/" \
+		"$SRC/temp_mur.ofe" > "$WORK/ttt$t/x.ofe"
+	tt_run "ttl$t"; tt_run "ttt$t"
+	compare "mutemptable (a straight line) == mutempco, T = $t [H/m]" "$(tt_val ttt$t Ldc)" "$(tt_val ttl$t Ldc)" 1e-12
+done
+#   (b) キュリー点 : 100 degC まで 1、110 degC で 0.25 (μr0 = 4 なので μr = 1)。
+#       Tc を越えると**真空と同じ問題**になる : μr = 4 x 0.25 は浮動小数点でも厳密に 1
+#       なので、mur = 1 の入力と ofe.out がバイト一致する。表の外 (300 degC) は端の値
+#       のまま (バイト一致)、表の内側 (105 degC) は f = 0.625 -> μr = 2.5 の閉形式
+tt_curie() {	# tt_curie <dir> <T>
+	mkdir -p "$WORK/$1"
+	sed "s/^temperature = .*/temperature = $2/; s/^mutempco = .*/mutemptable = 2 20 1 100 1 110 0.25/" \
+		"$SRC/temp_mur.ofe" > "$WORK/$1/x.ofe"
+	tt_run "$1"
+}
+tt_curie ttc150 150
+tt_curie ttc300 300
+tt_curie ttc105 105
+tt_curie ttc0 0
+mkdir -p "$WORK/ttvac" "$WORK/tt20"
+sed "s/^temperature = .*/temperature = 150/; s/^mur = .*/mur = 2 1.0/; /^mutempco/d" "$SRC/temp_mur.ofe" > "$WORK/ttvac/x.ofe"
+sed "s/^temperature = .*/temperature = 20/; /^mutempco/d" "$SRC/temp_mur.ofe" > "$WORK/tt20/x.ofe"
+tt_run ttvac; tt_run tt20
+tt_same() {	# tt_same <ラベル> <dir1> <dir2>
+	if [ -s "$WORK/$2/ofe.out" ] && cmp -s "$WORK/$2/ofe.out" "$WORK/$3/ofe.out"; then echo "  $1 : byte-identical -> OK"
+	else echo "  $1 : differ -> NG" >&2; status=1; fi
+}
+tt_same "above Tc (150 degC) == mur = 1 (vacuum)" ttc150 ttvac
+tt_same "beyond the table (300 degC) == its last point (150 degC)" ttc300 ttc150
+tt_same "below the table (0 degC) == its first point (no temperature factor)" ttc0 tt20
+compare "inside the drop (105 degC, mur = 2.5) [H/m]" "$(tt_val ttc105 Ldc)" \
+	"$(awk 'BEGIN{ pi = 3.14159265358979324; mu0 = 4 * pi * 1e-7
+		printf "%.10e", mu0 * ((2.5 * 0.2e-3) + (2 * 0.05e-3 / 3)) / 1e-3 }')" 0.002
+#   (c) εr の表 (2 区間)。C は εr に厳密に比例する。T = 170 は折れ目の先の区間で
+#       f = 1.5 + 0.5 (1.2 - 1.5) = 1.35。T = 0 は表の手前で最初の点の値 1.1
+#       (**最初の点を 1 以外にしておかないと、手前を 1 にする誤りが等価になる**)
+for pair in "170 1.35" "0 1.1"; do
+	set -- $pair
+	mkdir -p "$WORK/tte$1"
+	sed "s/^temperature = .*/temperature = $1/; s/^epstempco = .*/epstemptable = 2 20 1.1 120 1.5 220 1.2/" \
+		"$SRC/temp_material.ofe" > "$WORK/tte$1/x.ofe"
+	tt_run "tte$1"
+	compare "epstemptable : C($1 degC) = $2 C0 [F]" "$(tt_val tte$1 C)" \
+		"$(awk -v f="$2" 'BEGIN { printf "%.10e", 1.7708375600e-13 * f }')" 1e-6
+done
+#   (d) B-H の表 : B 軸を 0.8 倍すると (L - L_int) がちょうど 0.8 倍
+for t in 20 120; do
+	mkdir -p "$WORK/ttb$t"
+	sed 's/^analysis = M/bhtemptable = 2 20 1 120 0.8\ntemperature = '"$t"'\nanalysis = M/' \
+	    "$SRC/plate_line_bh.ofe" > "$WORK/ttb$t/x.ofe"
+	tt_run "ttb$t"
+done
+compare "bhtemptable : (L - L_int) ratio at T = 120 vs 20" \
+	"$(awk -v a="$(tt_val ttb120 Ldc)" -v b="$(tt_val ttb20 Ldc)" 'BEGIN{ pi = 3.14159265358979324; mu0 = 4 * pi * 1e-7
+		li = mu0 * 2 * 0.05e-3 / (3 * 1e-3)
+		printf "%.10e", (a - li) / (b - li) }')" 0.8 1e-5
+#   (e) 弾く入力 (理由まで見る)
+tt_reject() {	# tt_reject <ラベル> <sed の置換> <理由>
+	sed "$2" "$SRC/temp_mur.ofe" > "$WORK/ttx.ofe"
+	mesh_reject "$1" ttx.ofe
+	if ! (cd "$WORK" && "$OFE" -n 2 ttx.ofe 2>&1 | grep -q "$3"); then
+		echo "  *** it was rejected for a different reason than: $3" >&2
+		status=1
+	fi
+}
+tt_reject "mutemptable with temperatures not increasing" "s/^mutempco = .*/mutemptable = 2 20 1 20 0.5/" "invalid mutemptable data"
+tt_reject "mutemptable with a non-positive factor" "s/^mutempco = .*/mutemptable = 2 20 1 120 0/" "invalid mutemptable data"
+tt_reject "mutemptable with an odd number of values" "s/^mutempco = .*/mutemptable = 2 20 1 120/" "invalid mutemptable data"
+tt_reject "mutempco and mutemptable together" "s/^mutempco = .*/mutempco = 2 -3e-3 20\nmutemptable = 2 20 1 120 0.7/" "both mutempco and mutemptable"
+
 # 鉄損 (Bertotti の損失分離)。板間を積層鉄心で埋めた平行平板線路で、
 # 磁束密度が厳密に 1 次元 (B = mu0 I/W) なので閉形式と機械精度で一致する
 echo "[bertotti_core] iron loss vs the closed form on a 1-D exact field"
@@ -2896,6 +2979,10 @@ lint_expect "radiation without thermal"    lint_rad.ofe       yes
 awk '/^thermal/{print "heatcap = 2 3.4e6"} {print}' \
     "$SRC/thermal_bar.ofe" > "$WORK/lint_heatcap.ofe"
 lint_expect "heatcap without transient"    lint_heatcap.ofe   yes
+sed "s/^epstempco = .*/mutemptable = 2 20 1 120 0.7/" "$SRC/temp_material.ofe" > "$WORK/lint_mutab.ofe"
+lint_expect "mutemptable + analysis=C"     lint_mutab.ofe     yes
+sed "s/^mutempco = .*/mutemptable = 2 20 1 120 0.7/" "$SRC/temp_mur.ofe" > "$WORK/lint_mutab_ok.ofe"
+lint_expect "mutemptable + analysis=M (clean)" lint_mutab_ok.ofe no
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
