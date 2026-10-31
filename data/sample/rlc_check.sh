@@ -1777,6 +1777,20 @@ compare "bhtemptable : (L - L_int) ratio at T = 120 vs 20" \
 	"$(awk -v a="$(tt_val ttb120 Ldc)" -v b="$(tt_val ttb20 Ldc)" 'BEGIN{ pi = 3.14159265358979324; mu0 = 4 * pi * 1e-7
 		li = mu0 * 2 * 0.05e-3 / (3 * 1e-3)
 		printf "%.10e", (a - li) / (b - li) }')" 0.8 1e-5
+#   (d2) 抵抗率の表 (tempcotable、σ(T) = σ0 / f(T))。R は抵抗率に厳密に比例する。
+#       temp_resistor.ofe (85 degC) : 直線の表は tempco と一致、折れ線の表は
+#       f(85) = 1.2 + (35/50) 0.8 = 1.76 で R = 1.76 R(20 degC, 補正なし)
+for c in lin tab ref; do mkdir -p "$WORK/tts_$c"; done
+cp "$SRC/temp_resistor.ofe" "$WORK/tts_lin/x.ofe"
+sed "s/^tempco = .*/tempcotable = 2 20 1 50 1.2 100 2.0/" "$SRC/temp_resistor.ofe" > "$WORK/tts_tab/x.ofe"
+sed "/^tempco/d; s/^temperature = .*/temperature = 20/" "$SRC/temp_resistor.ofe" > "$WORK/tts_ref/x.ofe"
+for c in lin tab ref; do tt_run "tts_$c"; done
+mkdir -p "$WORK/tts_line"
+sed "s/^tempco = .*/tempcotable = 2 20 1 220 1.786/" "$SRC/temp_resistor.ofe" > "$WORK/tts_line/x.ofe"
+tt_run tts_line
+compare "tempcotable (a straight line) == tempco, R(85 degC) [ohm]" "$(tt_val tts_line R)" "$(tt_val tts_lin R)" 1e-12
+compare "tempcotable : R(85 degC) = 1.76 R(20 degC) [ohm]" "$(tt_val tts_tab R)" \
+	"$(awk -v r="$(tt_val tts_ref R)" 'BEGIN { printf "%.12e", 1.76 * r }')" 1e-7
 #   (e) 弾く入力 (理由まで見る)
 tt_reject() {	# tt_reject <ラベル> <sed の置換> <理由>
 	sed "$2" "$SRC/temp_mur.ofe" > "$WORK/ttx.ofe"
@@ -1790,6 +1804,12 @@ tt_reject "mutemptable with temperatures not increasing" "s/^mutempco = .*/mutem
 tt_reject "mutemptable with a non-positive factor" "s/^mutempco = .*/mutemptable = 2 20 1 120 0/" "invalid mutemptable data"
 tt_reject "mutemptable with an odd number of values" "s/^mutempco = .*/mutemptable = 2 20 1 120/" "invalid mutemptable data"
 tt_reject "mutempco and mutemptable together" "s/^mutempco = .*/mutempco = 2 -3e-3 20\nmutemptable = 2 20 1 120 0.7/" "both mutempco and mutemptable"
+sed "s/^tempco = .*/tempco = 2 3.93e-3 20\ntempcotable = 2 20 1 100 1.3/" "$SRC/temp_resistor.ofe" > "$WORK/ttx.ofe"
+mesh_reject "tempco and tempcotable together" ttx.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 ttx.ofe 2>&1 | grep -q "both tempco and tempcotable"); then
+	echo "  *** it was rejected for a different reason than: both tempco and tempcotable" >&2
+	status=1
+fi
 
 # 鉄損 (Bertotti の損失分離)。板間を積層鉄心で埋めた平行平板線路で、
 # 磁束密度が厳密に 1 次元 (B = mu0 I/W) なので閉形式と機械精度で一致する
@@ -2867,6 +2887,28 @@ for kind in convection radiation; do
 	th_nface "$kind, half bar with the mirror face switched off (40 x 3 faces)" 120
 done
 
+echo "[thermal] tempcotable : a piecewise-linear resistivity in the coupling"
+# (15) 抵抗率の温度係数の表 (tempcotable) は熱連成の σ(T) も通る。対流で冷やす一様な棒 (thermal_conv.ofe) は
+#       温度が一様なので、釣り合い J² ρ0 f(T) A = hP (T - T_a) を二分法で解いた値と
+#       機械精度で一致する。表は 4 点で、解 (約 197 degC) は 2 区間目の途中
+awk '/^tempco/{print "tempcotable = 2 0 1 100 1.2 300 1.6 600 3"; next} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/tts_conv.ofe"
+th_run tts_conv.ofe
+set -- $(awk 'function f(T) { if (T <= 0) return 1; if (T <= 100) return 1 + 0.2 * T / 100
+		if (T <= 300) return 1.2 + 0.4 * (T - 100) / 200; if (T <= 600) return 1.6 + 1.4 * (T - 300) / 300; return 3 }
+	BEGIN { lo = 30; hi = 2000
+		for (it = 0; it < 300; it++) { T = (lo + hi) / 2; if (72 * f(T) - 0.6 * (T - 30) > 0) lo = T; else hi = T }
+		printf "%.12e %.12e", 0.02 * f(T), T }')
+compare "tempcotable in thermal (convection-cooled bar) : R == the equilibrium [ohm]" "$(th_r)" "$1" 1e-9
+compare "tempcotable in thermal (convection-cooled bar) : T == the equilibrium [degC]" "$(th_t)" "$2" 1e-9
+#       表の外だけを通る棒 (どの温度でも f = 2) は α = 0 で抵抗率 2ρ0 の棒と同じで、
+#       放物線が節点で厳密 : R = 2e-2、T_max = 20 + J² (2ρ0) L² / (8k) = 160.625
+awk '/^tempco/{print "tempcotable = 2 -100 1.5 -50 2"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/tts_flat.ofe"
+th_run tts_flat.ofe
+compare "tempcotable beyond its last point in thermal : R = 2 rho0 L / A [ohm]" "$(th_r)" 2e-2 1e-10
+compare "tempcotable beyond its last point in thermal : T_max (parabola) [degC]" "$(th_t)" 160.625 1e-10
+
+
 # (7) 弾くべき入力 (理由まで grep する)
 th_reject() {	# th_reject <ラベル> <ofe> <理由の文字列>
 	mesh_reject "$1" "$2"
@@ -2983,6 +3025,8 @@ sed "s/^epstempco = .*/mutemptable = 2 20 1 120 0.7/" "$SRC/temp_material.ofe" >
 lint_expect "mutemptable + analysis=C"     lint_mutab.ofe     yes
 sed "s/^mutempco = .*/mutemptable = 2 20 1 120 0.7/" "$SRC/temp_mur.ofe" > "$WORK/lint_mutab_ok.ofe"
 lint_expect "mutemptable + analysis=M (clean)" lint_mutab_ok.ofe no
+sed "s/^epstempco = .*/tempcotable = 2 20 1 120 1.3/" "$SRC/temp_material.ofe" > "$WORK/lint_sigtab.ofe"
+lint_expect "tempcotable + analysis=C"     lint_sigtab.ofe    yes
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \

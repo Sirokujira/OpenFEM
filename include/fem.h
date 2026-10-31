@@ -133,10 +133,11 @@ typedef struct {
 	double epstempco, epstemp0;
 	double mutempco,  mutemp0;
 	double bhtempco,  bhtemp0;
-	// 温度係数の表 (epstemptable / mutemptable / bhtemptable)。[0] εr、[1] μr、[2] B-H。
-	// 点数 0 なら上の 1 次係数を使う。キュリー点近傍の非線形な落ち込みを折れ線で書く
-	int    ntemp[3];
-	double tempT[3][MAXTEMPTAB], tempF[3][MAXTEMPTAB];
+	// 温度係数の表 (epstemptable / mutemptable / bhtemptable / tempcotable)。
+	// [0] εr、[1] μr、[2] B-H の倍率、[3] 抵抗率の倍率 ρ(T)/ρ0 (σ = σ0 / f)。
+	// 点数 0 なら 1 次係数を使う。キュリー点近傍の非線形な落ち込みを折れ線で書く
+	int    ntemp[4];
+	double tempT[4][MAXTEMPTAB], tempF[4][MAXTEMPTAB];
 	// 熱伝導率 [W/(m K)] (熱連成 thermal で使う。0 : 熱を通さない)
 	double kth;
 	double cth;					// 体積熱容量 ρc [J/(m^3 K)] (熱連成の過渡解析 transient で使う)

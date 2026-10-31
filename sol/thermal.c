@@ -4,7 +4,8 @@ thermal.c
 電気-熱連成 (定常、構造格子の analysis = R)。
 
 ポートに電流 I を流したときの Joule 発熱 q = σ|∇φ|² で温度分布を解き、
-導電率を要素ごとに σ(T) = σ0 / (1 + α (T - T0)) (tempco) で更新して、
+導電率を要素ごとに σ(T) = σ0 / (1 + α (T - T0)) (tempco、または tempcotable の
+折れ線 σ0 / f(T)) で更新して、
 抵抗 R と最高温度が動かなくなるまで繰り返す (Picard 反復):
 
 	∇・(σ(T) ∇φ) = 0           φ = V (ポート), 0 (基準導体)
@@ -232,8 +233,8 @@ static int th_sigma(FILE *fp_log, int64_t nc, const double *tcell, double *scell
 			scell[c] = 0;
 			continue;
 		}
-		const double num = 1 + (mt->tempco * (Temperature - mt->temp0));
-		const double den = 1 + (mt->tempco * (tcell[c] - mt->temp0));
+		const double num = temp_factor_at(mt, 3, Temperature);
+		const double den = temp_factor_at(mt, 3, tcell[c]);
 		if (den <= 0) {
 			// α < 0 で温度が上がりすぎると抵抗率が負になる (モデルの適用範囲外)
 			fprintf(fp_log, "*** thermal : the resistivity factor 1 + alpha (T - T0) "

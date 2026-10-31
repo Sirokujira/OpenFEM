@@ -232,7 +232,7 @@ int input_data(FILE *fp)
 		Material[m].mutempco = 0;
 		Material[m].mutemp0 = 20;
 		Material[m].bhtempco = 0;
-		for (int d = 0; d < 3; d++) Material[m].ntemp[d] = 0;
+		for (int d = 0; d < 4; d++) Material[m].ntemp[d] = 0;
 		Material[m].bhtemp0 = 20;
 		Material[m].kth = 0;
 		Material[m].cth = 0;
@@ -428,7 +428,7 @@ int input_data(FILE *fp)
 			Material[NMaterial].mutempco = 0;
 			Material[NMaterial].mutemp0 = 20;
 			Material[NMaterial].bhtempco = 0;
-			for (int d = 0; d < 3; d++) Material[NMaterial].ntemp[d] = 0;
+			for (int d = 0; d < 4; d++) Material[NMaterial].ntemp[d] = 0;
 			Material[NMaterial].bhtemp0 = 20;
 			Material[NMaterial].temp0 = 20;
 			Material[NMaterial].kth = 0;
@@ -776,12 +776,15 @@ int input_data(FILE *fp)
 			else                       { Material[mid].bhtempco  = al; Material[mid].bhtemp0  = t0; }
 		}
 		else if (!strcmp(strkey, "epstemptable") || !strcmp(strkey, "mutemptable")
-		      || !strcmp(strkey, "bhtemptable")) {
+		      || !strcmp(strkey, "bhtemptable") || !strcmp(strkey, "tempcotable")) {
 			// epstemptable / mutemptable / bhtemptable = <material_id> <T1> <f1> <T2> <f2> ...
 			//   εr / μr / B-H 曲線に掛ける倍率 f(T) を (温度, 倍率) の折れ線で与える
 			//   (範囲の外は端の値)。1 次係数 (*tempco) の代わりに使い、キュリー点
 			//   近傍の非線形な落ち込みを書く (例 : Tc を越えたら μr -> 1)
-			const int kind = ((strkey[0] == 'e') ? 0 : (strkey[0] == 'm') ? 1 : 2);
+			// tempcotable = <material_id> <T1> <f1> ...  : 抵抗率の倍率 ρ(T)/ρ0 の折れ線
+			//   (σ(T) = σ0 / f(T)、tempco の 1 + α(T - T0) の代わり)
+			const int kind = ((strkey[0] == 'e') ? 0 : (strkey[0] == 'm') ? 1
+				: (strkey[0] == 'b') ? 2 : 3);
 			if ((nval < 3) || ((nval % 2) == 0) || (((nval - 1) / 2) > MAXTEMPTAB)) {
 				printf(errfmt2, strkey);
 				return 1;
@@ -1215,8 +1218,8 @@ int input_data(FILE *fp)
 	// 補正し忘れる箇所が原理的に出ない。α = 0 (既定) なら何も変わらない。
 	for (int m = 0; m < NMaterial; m++) {
 		material_t *mt = &Material[m];
-		if (mt->tempco == 0) continue;
-		const double den = 1 + (mt->tempco * (Temperature - mt->temp0));
+		if ((mt->tempco == 0) && (mt->ntemp[3] < 1)) continue;
+		const double den = temp_factor(mt, 3);
 		if (den <= 0) {
 			printf("*** tempco : material %d has a non-positive resistivity factor "
 				"(1 + alpha (T - T0) = %.4e) at T = %.4e degC\n", m, den, Temperature);
@@ -1247,10 +1250,10 @@ int input_data(FILE *fp)
 		const double fe = temp_factor(mt, 0);
 		const double fm = temp_factor(mt, 1);
 		// 1 次係数と表の両方は、どちらを使うかが曖昧なので受け付けない
-		static const char *tname[3] = {"epstempco and epstemptable",
-			"mutempco and mutemptable", "bhtempco and bhtemptable"};
-		const double tco[3] = {mt->epstempco, mt->mutempco, mt->bhtempco};
-		for (int d = 0; d < 3; d++) {
+		static const char *tname[4] = {"epstempco and epstemptable",
+			"mutempco and mutemptable", "bhtempco and bhtemptable", "tempco and tempcotable"};
+		const double tco[4] = {mt->epstempco, mt->mutempco, mt->bhtempco, mt->tempco};
+		for (int d = 0; d < 4; d++) {
 			if ((mt->ntemp[d] > 0) && (tco[d] != 0)) {
 				printf("*** material %d has both %s; give only one\n", m, tname[d]);
 				return 1;
@@ -1310,8 +1313,8 @@ int input_data(FILE *fp)
 
 		for (int m = 0; m < NMaterial; m++) {
 			const material_t *mt = &Material[m];
-			if ((mt->tempco != 0) && !use_matsig) {
-				input_warn("tempco (material %d) scales Material.sigma, which only "
+			if (((mt->tempco != 0) || (mt->ntemp[3] > 0)) && !use_matsig) {
+				input_warn("tempco / tempcotable (material %d) scales Material.sigma, which only "
 					"analysis R / A / E reads; for Rs and analysis F use "
 					"conductortempco instead", m);
 			}

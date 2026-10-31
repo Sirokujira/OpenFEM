@@ -71,26 +71,34 @@ void element_matrix(double dx, double dy, double dz, const double c[6], double k
 //        = 1 : ε0              真空静電界 (TEM インダクタンス)
 //        = 2 : σ + ω ε0 εr tanδ  定常電流界 (導電損 + 誘電損)
 //        = 3 : 1 / (μ0 μr)     静磁場 (DC インダクタンス)
-// 温度 Temperature での材料係数の倍率。kind = 0 : εr、1 : μr、2 : B-H。
+// 温度 T での材料係数の倍率。kind = 0 : εr、1 : μr、2 : B-H、3 : 抵抗率 (σ = σ0 / f)。
 // 表 (epstemptable 等) があれば (T, f) の折れ線 (範囲の外は端の値)、
 // 無ければ 1 次係数 1 + α (T - T0)
-double temp_factor(const material_t *mt, int kind)
+double temp_factor_at(const material_t *mt, int kind, double t)
 {
 	const int nt = mt->ntemp[kind];
 	if (nt > 0) {
 		const double *tt = mt->tempT[kind], *ff = mt->tempF[kind];
-		if (Temperature <= tt[0]) return ff[0];
+		if (t <= tt[0]) return ff[0];
 		for (int k = 0; k < (nt - 1); k++) {
-			if (Temperature <= tt[k + 1]) {
-				const double w = (Temperature - tt[k]) / (tt[k + 1] - tt[k]);
+			if (t <= tt[k + 1]) {
+				const double w = (t - tt[k]) / (tt[k + 1] - tt[k]);
 				return ff[k] + (w * (ff[k + 1] - ff[k]));
 			}
 		}
 		return ff[nt - 1];
 	}
-	if (kind == 0) return 1 + (mt->epstempco * (Temperature - mt->epstemp0));
-	if (kind == 1) return 1 + (mt->mutempco  * (Temperature - mt->mutemp0));
-	return 1 + (mt->bhtempco * (Temperature - mt->bhtemp0));
+	if (kind == 0) return 1 + (mt->epstempco * (t - mt->epstemp0));
+	if (kind == 1) return 1 + (mt->mutempco  * (t - mt->mutemp0));
+	if (kind == 2) return 1 + (mt->bhtempco * (t - mt->bhtemp0));
+	return 1 + (mt->tempco * (t - mt->temp0));
+}
+
+
+// 動作温度 Temperature での倍率
+double temp_factor(const material_t *mt, int kind)
+{
+	return temp_factor_at(mt, kind, Temperature);
 }
 
 
