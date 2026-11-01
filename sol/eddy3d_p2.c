@@ -667,6 +667,180 @@ int solve_eddy3d_p2(FILE *fp_log)
 損失 ½σ|e|²、e = jωA + ∇φ を**組み立てと同じ積分点**で節点の形状関数に掛けて節点荷重にする
 (f_a = ∫ ½σ|e|² N_a dV)。Σ_a N_a = 1 なので Σ f = ½ eᴴ T e = ½|I|²R が厳密 (1 次の Q_e と同じ恒等式)。
 */
+// 過渡解析 (analysis = A + transient、後退 Euler、電圧駆動、線形) の行列。1 次 (eddy3d.c の
+// assemble_eddy3d_tr) と同じ形で χ = Δt φ を未知数にする : K = [S + T/Δt, TG/Δt; GᵀT/Δt, GᵀTG/Δt]、
+// M は K から S を除いたもの (どちらも実対称)。K は P2.Kr、M は P2.Ki に入れる
+static int p2_assemble_tr(FILE *fp_log, double dt)
+{
+	const int ne = P2.ne, nf = P2.nf, nn = P2.nn, nt = NTet;
+	crs_zero(&P2.Kr);
+	crs_zero(&P2.Ki);
+	for (int e = 0; e < nt; e++) {
+		const int m = elem3d_mat(e);
+		double nu[6];
+		material_coef_pub(m, 3, nu);
+		const double sig = Material[m].sigma;
+		int32_t dof[P2_NDOF];
+		double sgn[P2_NDOF];
+		p2_dofs(e, P2.fe, ne, nf, nn, dof, sgn);
+		double se[20][20], te[20][20], ce[20][10], pe[10][10];
+		memset(se, 0, sizeof(se)); memset(te, 0, sizeof(te));
+		memset(ce, 0, sizeof(ce)); memset(pe, 0, sizeof(pe));
+		const int nq = elem3d_nip(e);
+		for (int q = 0; q < nq; q++) {
+			double wv[20][3], wc[20][3], pn[10], pg[10][3], w;
+			if (p2_basis(e, q, wv, wc, pn, pg, &w)) {
+				fprintf(fp_log, "*** the second-order A-phi solver : a degenerate element\n");
+				return 1;
+			}
+			double nc[20][3];
+			for (int k = 0; k < 20; k++) nu_mul(nu, wc[k], nc[k]);
+			for (int k = 0; k < 20; k++) {
+				for (int l = 0; l < 20; l++) {
+					se[k][l] += w * dot3(nc[k], wc[l]);
+					te[k][l] += w * sig * dot3(wv[k], wv[l]);
+				}
+				for (int a = 0; a < 10; a++) ce[k][a] += w * sig * dot3(wv[k], pg[a]);
+			}
+			for (int a = 0; a < 10; a++) {
+				for (int b = 0; b < 10; b++) pe[a][b] += w * sig * dot3(pg[a], pg[b]);
+			}
+		}
+		for (int k = 0; k < 20; k++) {
+			for (int l = 0; l < 20; l++) {
+				const int64_t p = p2_find(&P2.Kr, dof[k], dof[l]);
+				const double s = sgn[k] * sgn[l];
+				P2.Kr.val[p] += s * (se[k][l] + (te[k][l] / dt));
+				P2.Ki.val[p] += s * te[k][l] / dt;
+			}
+			for (int a = 0; a < 10; a++) {
+				const double v = sgn[k] * ce[k][a] / dt;
+				const int64_t p1 = p2_find(&P2.Kr, dof[k], dof[20 + a]);
+				const int64_t p2 = p2_find(&P2.Kr, dof[20 + a], dof[k]);
+				P2.Kr.val[p1] += v;
+				P2.Kr.val[p2] += v;
+				P2.Ki.val[p1] += v;
+				P2.Ki.val[p2] += v;
+			}
+		}
+		for (int a = 0; a < 10; a++) {
+			for (int b = 0; b < 10; b++) {
+				const int64_t p = p2_find(&P2.Kr, dof[20 + a], dof[20 + b]);
+				P2.Kr.val[p] += pe[a][b] / dt;
+				P2.Ki.val[p] += pe[a][b] / dt;
+			}
+		}
+	}
+	return 0;
+}
+
+
+// 刻みの終わり t の電圧の倍率 (waveform の折れ線の左極限、無ければ 1。1 次と同じ)
+static double p2_wave(double t)
+{
+	if (WaveN < 1) return 1;
+	int k = -1;
+	for (int m = 0; m < WaveN; m++) {
+		if (WaveT[m] < t) k = m;
+	}
+	if (k < 0) return WaveF[0];
+	if (k == (WaveN - 1)) return WaveF[k];
+	const double w = (t - WaveT[k]) / (WaveT[k + 1] - WaveT[k]);
+	return WaveF[k] + (w * (WaveF[k + 1] - WaveF[k]));
+}
+
+
+/*
+3 次元渦電流の過渡解析の 2 次の要素 (10 節点四面体)。手順と出力は 1 次 (solve_eddy3d_transient) と同じ :
+ポート 1 の電極の頂点を χ = Δt V(t^{n+1}) (泡は 0)、右辺 M [A^n; 0]、端子電流は電極の頂点の行の
+反作用 Kx − M[A^n; 0]。仕事の恒等式 V I Δt = (ΔA)ᵀ S A^{n+1} + zᵀMz をログに出す。
+*/
+int solve_eddy3d_p2_transient(FILE *fp_log)
+{
+	int ierr = 0;
+	fprintf(fp_log, "\n=== 3D eddy current, transient (A-phi, second-order Nedelec / nodal elements, backward Euler) ===\n");
+	if (NPort != 1) {
+		fprintf(fp_log, "*** analysis A + transient needs exactly one port\n");
+		return 1;
+	}
+	const double fsave = Freq;
+	if (Freq <= 0) Freq = 1;		// p2_open の検査を通すだけ (過渡解析は ω を使わない)
+	const int oe = p2_open(fp_log);
+	Freq = fsave;
+	if (oe) return 1;
+	const int n = P2.n, nn = P2.nn, oV = P2.oV, oF = P2.oF;
+	const double dt = TransientTime / TransientSteps;
+	fprintf(fp_log, "  t_end = %.6e [s], %d steps (dt = %.6e [s]), voltage = %.6e [V]%s\n",
+		TransientTime, TransientSteps, dt, Volt, ((WaveN > 0) ? " x waveform" : " (step)"));
+	if (p2_assemble_tr(fp_log, dt)) {
+		p2_close();
+		return 1;
+	}
+	crs_t *K = &P2.Kr, *M = &P2.Ki;
+	double *x = (double *)calloc((size_t)n, sizeof(double));
+	double *xo = (double *)calloc((size_t)n, sizeof(double));
+	double *xd = (double *)calloc((size_t)n, sizeof(double));
+	double *rhs = (double *)malloc((size_t)n * sizeof(double));
+	double *b = (double *)malloc((size_t)n * sizeof(double));
+	double *w1 = (double *)malloc((size_t)n * sizeof(double));
+	double *u = (double *)calloc((size_t)n, sizeof(double));
+	double *z = (double *)malloc((size_t)n * sizeof(double));
+	FILE *fcsv = mpi_fopen_out("ofe_transient.csv", "w");
+	if (fcsv) fprintf(fcsv, "t [s],V [V],I [A],W_in [J],W_mag [J],W_joule [J],iter\n");
+	double win = 0, wmag = 0, wjou = 0;
+	fprintf(fp_log, "  %6s %13s %13s %13s %6s\n", "step", "t [s]", "V [V]", "I [A]", "iter");
+	for (int st = 1; (st <= TransientSteps) && !ierr; st++) {
+		const double t = st * dt;
+		const double v = Volt * p2_wave(t);
+		// A の自由度 (φ の欄より前) だけを残した [A^n; 0]
+		for (int i = 0; i < n; i++) xo[i] = ((i < oV) ? x[i] : 0);
+		crs_spmv(M, xo, rhs, NULL);
+		for (int i = 0; i < n; i++) xd[i] = 0;
+		for (int i = 0; i < nn; i++) {
+			if (P2.fix[oV + i] && P2.cond[i] && P2.vert[i] && (NodeConductor[i] == 1)) xd[oV + i] = dt * v;
+		}
+		crs_spmv(K, xd, w1, NULL);
+		for (int i = 0; i < n; i++) b[i] = (P2.fix[i] ? 0 : (rhs[i] - w1[i]));
+		for (int i = 0; i < n; i++) u[i] = (P2.fix[i] ? 0 : x[i]);
+		const int it = solver_cg(K, b, u, P2.fix, Solver.maxiter, Solver.nout, Solver.converg, NULL, "a3t2");
+		if (it < 0) {
+			fprintf(fp_log, "*** linear solver did not converge (step %d)\n", st);
+			ierr = 1;
+			break;
+		}
+		for (int i = 0; i < n; i++) x[i] = u[i] + xd[i];
+		crs_spmv(K, x, w1, NULL);
+		double cur = 0;
+		for (int i = 0; i < nn; i++) {
+			if (P2.fix[oV + i] && P2.cond[i] && P2.vert[i] && (NodeConductor[i] == 1)) cur += w1[oV + i] - rhs[oV + i];
+		}
+		// 仕事 : 端子 V I Δt、Joule zᵀ M z、磁気 (ΔA)ᵀ S A^{n+1} = zᵀ (K − M) x の A の部分
+		for (int i = 0; i < n; i++) z[i] = x[i] - xo[i];
+		double zmz = 0, zkx = 0, zmx = 0;
+		crs_spmv(M, z, w1, NULL);
+		for (int i = 0; i < n; i++) zmz += z[i] * w1[i];
+		crs_spmv(M, x, w1, NULL);
+		for (int i = 0; i < oV; i++) zmx += z[i] * w1[i];
+		crs_spmv(K, x, w1, NULL);
+		for (int i = 0; i < oV; i++) zkx += z[i] * w1[i];
+		win += v * cur * dt;
+		wjou += zmz;
+		wmag += zkx - zmx;
+		if (fcsv) fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%.8e,%d\n", t, v, cur, win, wmag, wjou, it);
+		if ((st == TransientSteps) || ((st % ((TransientSteps >= 20) ? (TransientSteps / 20) : 1)) == 0)) {
+			fprintf(fp_log, "  %6d %13.6e %13.6e %13.6e %6d\n", st, t, v, cur, it);
+		}
+	}
+	(void)oF;
+	if (fcsv) fclose(fcsv);
+	fprintf(fp_log, "  energy : terminals = %.12e, magnetic work = %.12e, joule = %.12e [J] "
+		"(terminals - magnetic - joule = %.3e)\n", win, wmag, wjou, win - wmag - wjou);
+	free(x); free(xo); free(xd); free(rhs); free(b); free(w1); free(u); free(z);
+	p2_close();
+	return ierr;
+}
+
+
 int eddy3d_p2_heat_open(FILE *fp_log)
 {
 	fprintf(fp_log, "  AC heating (analysis = A, second-order Nedelec) : frequency = %.6e [Hz]\n", Freq);

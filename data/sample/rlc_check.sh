@@ -5221,8 +5221,8 @@ compare "order 2, field output : mean J_x (signed) [A/m^2]" "$(vtk mean0 J_A_re)
 pf=$(awk -v r="$(vtk int2 J_A_re)" -v m="$(vtk int2 J_A_im)" 'BEGIN{ printf "%.10e", (r + m) / (2 * 5.8e7) }')
 pt=$(awk '/port 1 : I =/{ printf "%.10e", 0.5 * $6 }' "$WORK/ofe.log")
 compare "order 2, field output : ohmic loss from the field == 1/2 Re(V I) [W]" "$pf" "$pt" 1e-6
-awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_t.ofe"
-th_reject "order-2 A with transient" p2x_t.ofe "supports the frequency domain"
+awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_t.ofe"
+th_reject "order-2 A with transient and ja" p2x_t.ofe "supports linear materials"
 awk '/^analysis/{print "analysis = E"; next} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_e.ofe"
 th_reject "analysis E on a 10-node mesh" p2x_e.ofe "need a first-order mesh"
 
@@ -5281,6 +5281,39 @@ case "$res" in NG*) status=1 ;; esac
 # (d) 弾くべき入力
 grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 10 0.5"} {print}' > "$WORK/a3tx_cn.ofe"
 th_reject "A + transient with theta = 0.5" a3tx_cn.ofe "theta = 1 (backward Euler) only"
+# (e) 10 節点四面体 (bar_tet2.msh) : 2 次の Nedelec の過渡解析 (eddy3d_p2.c の solve_eddy3d_p2_transient)。
+#     同じ 3 つの検査 : 段差を保つと I = G_dc V (G = 7250 S、1e-9)、仕事の恒等式、10 kHz の正弦波の
+#     2 周期目が 2 次の周波数領域の Y に 1 次で近づく (1 周期 16 -> 32 点で比 1.7〜2.3、Richardson 1e-2 以内、
+#     実測 6.3e-2 -> 3.3e-2、比 1.93、Richardson 3.5e-3。CI の時間のため 1 次より刻みを粗く周期を短くした)
+cp "$SRC/bar_tet2.msh" "$WORK/"
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2.msh"; next} {print}' > "$WORK/a3t2_base.ofe"
+awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 50"} {print}' "$WORK/a3t2_base.ofe" > "$WORK/a3t2_step.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3t2_step.ofe > /dev/null 2>&1) || { echo "  a3t2_step : the run failed -> NG" >&2; status=1; }
+a3_energy "order 2, voltage step"
+compare "order 2, voltage step held : I(t_end) == G_dc V [A]" "$(awk -F, 'NR > 1 { i = $3 } END { print i }' "$WORK/ofe_transient.csv")" 7250 1e-9
+awk '/^frequency/{print "frequency = 1e4"; next} {print}' "$WORK/a3t2_base.ofe" > "$WORK/a3t2_fd.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3t2_fd.ofe > /dev/null 2>&1) || { echo "  a3t2_fd : the run failed -> NG" >&2; status=1; }
+set -- $(awk '/port 1 : I =/ { print $6, $7; exit }' "$WORK/ofe.log")
+yre=$1; yim=$2
+for N in 16 32; do
+	awk -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4; T = 1 / f; s = "waveform ="
+		for (k = 0; k <= 2 * N; k++) { t = k * T / N; s = s sprintf(" %.12e %.15g", t, sin(2 * pi * f * t)) } print s }' > "$WORK/a3t2_wf.txt"
+	awk -v wf="$WORK/a3t2_wf.txt" -v ns=$((2 * N)) '/^frequency/{next}
+		/^analysis/{ while ((getline l < wf) > 0) print l; print "transient = 2e-4 " ns } {print}' "$WORK/a3t2_base.ofe" > "$WORK/a3t2_sin.ofe"
+	(cd "$WORK" && "$OFE" -n 2 a3t2_sin.ofe > /dev/null 2>&1) || { echo "  a3t2_sin ($N) : the run failed -> NG" >&2; status=1; }
+	[ "$N" = 32 ] && a3_energy "order 2, sine, 32 steps per period"
+	set -- $(awk -F, -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4 } NR > 1 { k = NR - 1
+		if (k > N) { a += $3 * sin(2 * pi * f * $1); b += $3 * cos(2 * pi * f * $1) } } END { printf "%.12e %.12e", 2 * a / N, 2 * b / N }' "$WORK/ofe_transient.csv")
+	eval "br$N=\$1; bi$N=\$2"
+done
+res=$(awk -v gr="$yre" -v gi="$yim" -v a1="$br16" -v b1="$bi16" -v a2="$br32" -v b2="$bi32" 'BEGIN {
+	y = sqrt(gr * gr + gi * gi)
+	e1 = sqrt((a1 - gr) ^ 2 + (b1 - gi) ^ 2) / y; e2 = sqrt((a2 - gr) ^ 2 + (b2 - gi) ^ 2) / y
+	ra = 2 * a2 - a1; rb = 2 * b2 - b1; er = sqrt((ra - gr) ^ 2 + (rb - gi) ^ 2) / y
+	q = (e2 > 0) ? e1 / e2 : 0; ok = "NG"; if ((q >= 1.7) && (q <= 2.3) && (er <= 1e-2)) ok = "OK"
+	printf "%s (16 steps %.2e, 32 steps %.2e, ratio %.2f; Richardson %.2e)", ok, e1, e2, q, er }')
+echo "  order 2, sine at 10 kHz : steady state -> frequency-domain Y (backward Euler, first order) : $res"
+case "$res" in NG*) status=1 ;; esac
 
 # ---- 3 次元渦電流 + ヒステリシスの過渡解析 (analysis = A + transient + ja、ベクトル J-A、四面体) ----
 #

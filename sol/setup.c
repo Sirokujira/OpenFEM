@@ -214,7 +214,6 @@ static int setup_unstruct(void)
 		}
 		const char *why = NULL;
 		if ((NHex + NPrism + NPyr) > 0) why = "a pure tetrahedral mesh";
-		else if (TransientOn && !ThermalOn) why = "the frequency domain (no transient)";
 		else if (nl) why = "linear materials (no bh / ja)";
 		else if (GaugeTree || Direct) why = "gauge = 0 and the iterative solver (no gauge / direct)";
 		else if (Hdf5Out) why = "no hdf5 series";
