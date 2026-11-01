@@ -56,7 +56,7 @@ thermal.c
 */
 static int64_t th_nelem(void)
 {
-	return (MeshMode ? (int64_t)NTet : ((int64_t)Nx * Ny * Nz));
+	return (MeshMode ? (int64_t)elem3d_count() : ((int64_t)Nx * Ny * Nz));
 }
 
 
@@ -147,55 +147,108 @@ static void th_extent(void)
 }
 
 
-// 四面体の露出面 [3*TFaceN] (熱を通す四面体の境界の三角形、電極の面を除く)
+// 非構造格子の露出面 [4*TFaceN] (熱を通す要素の境界の三角形・四角形、電極の面を除く)。
+// 三角形は昇順の 3 節点 + -1 (四面体だけの格子では従来と同じ並び)、四角形は要素の局所の
+// 巡回順 (双 1 次の写像に使う)
 static int32_t *TFace;
 static int TFaceN;
 
+// 面の記録 : 昇順の鍵 4 個 (三角形は -1 埋め) + 巡回順の節点 4 個
 static int tface_cmp(const void *a, const void *b)
 {
 	const int32_t *p = (const int32_t *)a, *q = (const int32_t *)b;
-	for (int d = 0; d < 3; d++) {
+	for (int d = 0; d < 4; d++) {
 		if (p[d] != q[d]) return ((p[d] < q[d]) ? -1 : 1);
 	}
 	return 0;
 }
 
+// 要素の局所の面 (Gmsh の節点の並び)。nv = 3 / 4
+static int elem_faces(int e, int fv[6][4], int nfv[6])
+{
+	static const int tf[4][3] = {{1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {0, 1, 2}};
+	static const int hf[6][4] = {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+	                             {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+	static const int pf[5][4] = {{0, 2, 1, -1}, {3, 4, 5, -1}, {0, 1, 4, 3},
+	                             {1, 2, 5, 4}, {2, 0, 3, 5}};
+	static const int yf[5][4] = {{0, 3, 2, 1}, {0, 1, 4, -1}, {1, 2, 4, -1},
+	                             {2, 3, 4, -1}, {3, 0, 4, -1}};
+	const int kind = elem3d_kind(e);
+	int nf = 0;
+	if (kind == MESHELEM_TET) {
+		nf = 4;
+		for (int f = 0; f < 4; f++) {
+			nfv[f] = 3;
+			for (int l = 0; l < 3; l++) fv[f][l] = tf[f][l];
+		}
+	}
+	else if (kind == MESHELEM_HEX) {
+		nf = 6;
+		for (int f = 0; f < 6; f++) {
+			nfv[f] = 4;
+			for (int l = 0; l < 4; l++) fv[f][l] = hf[f][l];
+		}
+	}
+	else {
+		nf = 5;
+		for (int f = 0; f < 5; f++) {
+			const int *src = ((kind == MESHELEM_PRISM) ? pf[f] : yf[f]);
+			nfv[f] = ((src[3] < 0) ? 3 : 4);
+			for (int l = 0; l < 4; l++) fv[f][l] = src[l];
+		}
+	}
+	return nf;
+}
+
 static void tet_faces_build(const double *kcell)
 {
-	static const int fl[4][3] = {{1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {0, 1, 2}};
+	const int ne = elem3d_count();
 	int nf = 0;
-	for (int e = 0; e < NTet; e++) {
-		if (kcell[e] > 0) nf += 4;
-	}
-	int32_t *all = (int32_t *)malloc(((size_t)nf * 3 + 1) * sizeof(int32_t));
-	int m = 0;
-	for (int e = 0; e < NTet; e++) {
+	for (int e = 0; e < ne; e++) {
 		if (kcell[e] <= 0) continue;
-		for (int f = 0; f < 4; f++) {
-			int32_t v[3];
-			for (int l = 0; l < 3; l++) v[l] = Tet[(e * 4) + fl[f][l]];
-			// 昇順に並べて面の鍵にする
-			for (int a = 0; a < 2; a++) {
-				for (int b = a + 1; b < 3; b++) {
+		int fv[6][4], nfv[6];
+		nf += elem_faces(e, fv, nfv);
+	}
+	int32_t *all = (int32_t *)malloc(((size_t)nf * 8 + 1) * sizeof(int32_t));
+	int m = 0;
+	for (int e = 0; e < ne; e++) {
+		if (kcell[e] <= 0) continue;
+		int32_t nd[27];
+		elem3d_nodes(e, nd);
+		int fv[6][4], nfv[6];
+		const int nfe = elem_faces(e, fv, nfv);
+		for (int f = 0; f < nfe; f++) {
+			int32_t v[4] = {-1, -1, -1, -1};
+			for (int l = 0; l < nfv[f]; l++) v[l] = nd[fv[f][l]];
+			int32_t *r = &all[m * 8];
+			for (int l = 0; l < 4; l++) r[4 + l] = v[l];
+			// 昇順に並べて面の鍵にする (三角形は 3 個、4 個目は -1)
+			const int k = nfv[f];
+			for (int a = 0; a < (k - 1); a++) {
+				for (int b = a + 1; b < k; b++) {
 					if (v[b] < v[a]) { const int32_t w = v[a]; v[a] = v[b]; v[b] = w; }
 				}
 			}
-			for (int l = 0; l < 3; l++) all[(m * 3) + l] = v[l];
+			for (int l = 0; l < 4; l++) r[l] = v[l];
 			m++;
 		}
 	}
-	qsort(all, (size_t)nf, 3 * sizeof(int32_t), tface_cmp);
-	TFace = (int32_t *)malloc(((size_t)nf * 3 + 1) * sizeof(int32_t));
+	qsort(all, (size_t)nf, 8 * sizeof(int32_t), tface_cmp);
+	TFace = (int32_t *)malloc(((size_t)nf * 4 + 1) * sizeof(int32_t));
 	TFaceN = 0;
 	for (int i = 0; i < nf; ) {
 		int j = i + 1;
-		while ((j < nf) && !tface_cmp(&all[i * 3], &all[j * 3])) j++;
+		while ((j < nf) && !tface_cmp(&all[i * 8], &all[j * 8])) j++;
 		if ((j - i) == 1) {
-			const int32_t *v = &all[i * 3];
-			const int ncond = (NodeConductor[v[0]] >= 0) + (NodeConductor[v[1]] >= 0)
-			                + (NodeConductor[v[2]] >= 0);
-			if (ncond < 3) {
-				for (int l = 0; l < 3; l++) TFace[(TFaceN * 3) + l] = v[l];
+			const int32_t *v = &all[i * 8];
+			const int k = ((v[3] < 0) ? 3 : 4);
+			int ncond = 0;
+			for (int l = 0; l < k; l++) ncond += (NodeConductor[v[l]] >= 0);
+			if (ncond < k) {
+				// 三角形は昇順 (従来の並び)、四角形は巡回順
+				for (int l = 0; l < 4; l++) {
+					TFace[(TFaceN * 4) + l] = ((k == 3) ? v[l] : v[4 + l]);
+				}
 				TFaceN++;
 			}
 		}
@@ -449,6 +502,81 @@ static double surf_faces_grid(crs_t *B, double *g, const double *t, const double
 }
 
 
+// 四角形の露出面 1 枚 (節点は巡回順 nd[0..3]) : 双 1 次の写像 x(ξ, η) = Σ N_a x_a
+// ((ξ, η) ∈ [0,1]²) の 2x2 Gauss で、対流の面の質量・右辺・熱、輻射・h(T) の Newton
+// 線形化を組む (積分点は熱と行列と右辺で同じ)。戻り値は出ていく熱 (t があるとき)
+static double surf_quad(crs_t *B, double *g, const double *t, int rad, const int32_t *nd,
+	int *bad, int64_t *nface)
+{
+	const double xc = (Xp[nd[0]] + Xp[nd[1]] + Xp[nd[2]] + Xp[nd[3]]) / 4;
+	const double yc = (Yp[nd[0]] + Yp[nd[1]] + Yp[nd[2]] + Yp[nd[3]]) / 4;
+	const double zc = (Zp[nd[0]] + Zp[nd[1]] + Zp[nd[2]] + Zp[nd[3]]) / 4;
+	const surfbc_t *bc = surf_bc(((rad == 3) ? 0 : rad), xc, yc, zc, NULL);
+	if ((bc == NULL) || (bc->c <= 0)) return 0;
+	(*nface)++;
+	const double hc = bc->c, ta = bc->t;
+	const double gp[2] = {0.5 - 0.5 / sqrt(3.0), 0.5 + 0.5 / sqrt(3.0)};
+	double me[4][4], ge[4] = {0, 0, 0, 0}, qsum = 0;
+	for (int m = 0; m < 4; m++) {
+		for (int mm = 0; mm < 4; mm++) me[m][mm] = 0;
+	}
+	for (int ga = 0; ga < 2; ga++) {
+	for (int gb = 0; gb < 2; gb++) {
+		const double x = gp[ga], y = gp[gb];
+		const double nn[4] = {(1 - x) * (1 - y), x * (1 - y), x * y, (1 - x) * y};
+		const double dx[4] = {-(1 - y), (1 - y), y, -y};
+		const double dy[4] = {-(1 - x), -x, x, (1 - x)};
+		double a[3] = {0, 0, 0}, b[3] = {0, 0, 0};
+		for (int m = 0; m < 4; m++) {
+			const double p[3] = {Xp[nd[m]], Yp[nd[m]], Zp[nd[m]]};
+			for (int c = 0; c < 3; c++) {
+				a[c] += dx[m] * p[c];
+				b[c] += dy[m] * p[c];
+			}
+		}
+		const double cx = (a[1] * b[2]) - (a[2] * b[1]);
+		const double cy = (a[2] * b[0]) - (a[0] * b[2]);
+		const double cz = (a[0] * b[1]) - (a[1] * b[0]);
+		const double w = sqrt((cx * cx) + (cy * cy) + (cz * cz)) / 4;	// 重み 1/4 x |J|
+		if (!rad) {
+			for (int m = 0; m < 4; m++) {
+				for (int mm = 0; mm < 4; mm++) me[m][mm] += hc * w * nn[m] * nn[mm];
+				ge[m] += hc * ta * w * nn[m];
+			}
+			if (t) {
+				double tg = 0;
+				for (int m = 0; m < 4; m++) tg += nn[m] * t[nd[m]];
+				qsum += hc * w * (tg - ta);
+			}
+		}
+		else {
+			double tg = 0;
+			for (int m = 0; m < 4; m++) tg += nn[m] * t[nd[m]];
+			double qv, dq;
+			surf_q(rad, hc, ta, tg, &qv, &dq, bad);
+			qsum += w * qv;
+			for (int m = 0; m < 4; m++) {
+				ge[m] += w * (dq * tg - qv) * nn[m];
+				for (int mm = 0; mm < 4; mm++) me[m][mm] += w * dq * nn[m] * nn[mm];
+			}
+		}
+	}
+	}
+	if (B) {
+		for (int m = 0; m < 4; m++) {
+			for (int mm = 0; mm < 4; mm++) {
+				const int64_t pos = crs_find_tri(B, nd[m], nd[mm]);
+				if (pos >= 0) B->val[pos] += me[m][mm];
+			}
+		}
+	}
+	if (g) {
+		for (int m = 0; m < 4; m++) g[nd[m]] += ge[m];
+	}
+	return qsum;
+}
+
+
 // surf_faces_grid の四面体版 (露出面は tet_faces_build で作った三角形)。
 // 対流の面の質量は h A (1 + δ_ij) / 12、右辺は h T_amb A / 3、熱は
 // h A (3 節点の平均 - T_amb) (いずれも 1 次の三角形で厳密)。
@@ -461,7 +589,28 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 	int bad = 0;
 
 	for (int f = 0; f < TFaceN; f++) {
-		const int32_t *nd = &TFace[f * 3];
+		const int32_t *nd = &TFace[f * 4];
+		if (nd[3] >= 0) {
+			// 四角形の面 (六面体・角柱・ピラミッド)
+			if (rad == 2) {
+				const double xq = (Xp[nd[0]] + Xp[nd[1]] + Xp[nd[2]] + Xp[nd[3]]) / 4;
+				const double yq = (Yp[nd[0]] + Yp[nd[1]] + Yp[nd[2]] + Yp[nd[3]]) / 4;
+				const double zq = (Zp[nd[0]] + Zp[nd[1]] + Zp[nd[2]] + Zp[nd[3]]) / 4;
+				const surfbc_t *cb = surf_bc(0, xq, yq, zq, NULL);
+				const surfbc_t *rb = surf_bc(1, xq, yq, zq, NULL);
+				if ((cb && (cb->c > 0)) || (rb && (rb->c > 0))) nface++;
+				if (hits) {
+					for (int e = 0; e < (NConv + NRad); e++) {
+						const surfbc_t *bc = ((e < NConv) ? &ConvBC[e] : &RadBC[e - NConv]);
+						if (surf_in(bc, xq, yq, zq)) hits[e]++;
+					}
+				}
+				continue;
+			}
+			const double qv = surf_quad(B, g, t, rad, nd, &bad, &nface);
+			qsum += qv;
+			continue;
+		}
 		const double xc = (Xp[nd[0]] + Xp[nd[1]] + Xp[nd[2]]) / 3;
 		const double yc = (Yp[nd[0]] + Yp[nd[1]] + Yp[nd[2]]) / 3;
 		const double zc = (Zp[nd[0]] + Zp[nd[1]] + Zp[nd[2]]) / 3;
@@ -867,9 +1016,93 @@ static void rx_update(const double *tn, const double *kcell)
 
 // ---- 要素ごとの係数の組み立て・発熱・質量 (四面体) ----
 
+// 四面体以外の 1 次要素 (六面体・角柱・ピラミッド) : 剛性と同じ積分点 (elem3d_ip) で
+// K_ij = Σ w c ∇N_i・∇N_j、発熱 f_i = Σ w σ|∇φ|² N_i、質量 M_ij = Σ w c N_i N_j、
+// 要素の温度 = Σ w N_i T_i / Σ w (1 次補間の体積平均)
+static void gen_assemble(crs_t *A, const double *coef, int mass)
+{
+	const int ne = elem3d_count();
+	for (int e = NTet; e < ne; e++) {
+		const double c = coef[e];
+		if (c <= 0) continue;
+		int32_t nd[27];
+		const int nen = elem3d_nodes(e, nd);
+		const int nq = elem3d_nip(e);
+		double ke[8][8];
+		for (int l = 0; l < nen; l++) {
+			for (int m = 0; m < nen; m++) ke[l][m] = 0;
+		}
+		int bad = 0;
+		for (int q = 0; q < nq; q++) {
+			double nv[8], g[8][3], w;
+			if (elem3d_ip(e, q, nv, g, &w)) { bad = 1; break; }
+			for (int l = 0; l < nen; l++) {
+				for (int m = 0; m < nen; m++) {
+					ke[l][m] += (mass ? (w * c * nv[l] * nv[m])
+					           : (w * c * ((g[l][0] * g[m][0]) + (g[l][1] * g[m][1]) + (g[l][2] * g[m][2]))));
+				}
+			}
+		}
+		if (bad) continue;
+		for (int l = 0; l < nen; l++) {
+			for (int m = 0; m < nen; m++) {
+				const int64_t p = crs_find_tri(A, nd[l], nd[m]);
+				if (p >= 0) A->val[p] += ke[l][m];
+			}
+		}
+	}
+}
+
+
+static void gen_joule(const double *phi, const double *sig, double *f)
+{
+	const int ne = elem3d_count();
+	for (int e = NTet; e < ne; e++) {
+		const double sg = sig[e];
+		if (sg <= 0) continue;
+		int32_t nd[27];
+		const int nen = elem3d_nodes(e, nd);
+		const int nq = elem3d_nip(e);
+		for (int q = 0; q < nq; q++) {
+			double nv[8], g[8][3], w;
+			if (elem3d_ip(e, q, nv, g, &w)) break;
+			double ex = 0, ey = 0, ez = 0;
+			for (int l = 0; l < nen; l++) {
+				ex += phi[nd[l]] * g[l][0];
+				ey += phi[nd[l]] * g[l][1];
+				ez += phi[nd[l]] * g[l][2];
+			}
+			const double qg = sg * ((ex * ex) + (ey * ey) + (ez * ez)) * w;
+			for (int l = 0; l < nen; l++) f[nd[l]] += qg * nv[l];
+		}
+	}
+}
+
+
+// 要素 e (四面体以外) の体積と、温度場 tn の要素平均
+static double gen_mean(int e, const double *tn, double *vol)
+{
+	int32_t nd[27];
+	const int nen = elem3d_nodes(e, nd);
+	const int nq = elem3d_nip(e);
+	double v = 0, ts = 0;
+	for (int q = 0; q < nq; q++) {
+		double nv[8], g[8][3], w;
+		if (elem3d_ip(e, q, nv, g, &w)) break;
+		v += w;
+		if (tn) {
+			for (int l = 0; l < nen; l++) ts += w * nv[l] * tn[nd[l]];
+		}
+	}
+	*vol = v;
+	return ((v > 0) ? (ts / v) : 0);
+}
+
+
 static void tet_assemble(crs_t *A, const double *coef)
 {
 	crs_zero(A);
+	gen_assemble(A, coef, 0);
 	for (int e = 0; e < NTet; e++) {
 		const double c = coef[e];
 		if (c <= 0) continue;
@@ -893,6 +1126,7 @@ static void tet_assemble(crs_t *A, const double *coef)
 static void tet_joule(const double *phi, const double *sig, double *f)
 {
 	for (int i = 0; i < NNode; i++) f[i] = 0;
+	gen_joule(phi, sig, f);
 	for (int e = 0; e < NTet; e++) {
 		const double sg = sig[e];
 		if (sg <= 0) continue;
@@ -914,6 +1148,7 @@ static void tet_joule(const double *phi, const double *sig, double *f)
 static void tet_mass(crs_t *A, const double *coef)
 {
 	crs_zero(A);
+	gen_assemble(A, coef, 1);
 	for (int e = 0; e < NTet; e++) {
 		const double c = coef[e];
 		if (c <= 0) continue;
@@ -1070,6 +1305,17 @@ static double th_celltemp(const double *tn, const double *kcell, double *tcell)
 			}
 			tcell[e] = t;
 		}
+		const int ne = elem3d_count();
+		for (int e = NTet; e < ne; e++) {
+			if (kcell[e] <= 0) continue;
+			double v;
+			tcell[e] = gen_mean(e, tn, &v);
+			int32_t nd[27];
+			const int nen = elem3d_nodes(e, nd);
+			for (int l = 0; l < nen; l++) {
+				if (tn[nd[l]] > tmax) tmax = tn[nd[l]];
+			}
+		}
 		return tmax;
 	}
 	for (int i = 0; i < Nx; i++) {
@@ -1100,6 +1346,14 @@ static double th_tmean(const double *tcell, const double *scell)
 			if (scell[e] <= 0) continue;
 			double gr[4][3], v;
 			if (tet_grad_pub(&Tet[e * 4], gr, &v)) continue;
+			vsum += v;
+			tsum += v * tcell[e];
+		}
+		const int ne = elem3d_count();
+		for (int e = NTet; e < ne; e++) {
+			if (scell[e] <= 0) continue;
+			double v;
+			gen_mean(e, NULL, &v);
 			vsum += v;
 			tsum += v * tcell[e];
 		}
@@ -1517,12 +1771,18 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	int ierr = 0;
 
 	fprintf(fp_log, "\n=== electro-thermal analysis ===\n");
-	// 非構造格子は 1 次四面体だけ (発熱・質量・露出面を四面体でしか組んでいない)。
-	// 他の種別は黙って誤答にせず入力エラーにする
-	if (MeshMode && ((NTet < 1) || (NHex > 0) || (NPrism > 0) || (NPyr > 0) || (TetOrder >= 2))) {
-		fprintf(fp_log, "*** thermal on an unstructured mesh supports linear tetrahedra "
-			"only (this mesh has %d tetrahedra (order %d), %d hexahedra, %d prisms, "
-			"%d pyramids)\n", NTet, TetOrder, NHex, NPrism, NPyr);
+	// 非構造格子は 1 次の 3 次元要素 (四面体・六面体・角柱・ピラミッド、混在可)。
+	// 2 次以上と断面 2 次元は黙って誤答にせず入力エラー。交流の発熱 (A) は四面体だけ
+	if (MeshMode && ((MeshDim != 3) || (TetOrder >= 2) || (HexNen > 8) || (PrismNen > 6))) {
+		fprintf(fp_log, "*** thermal on an unstructured mesh supports first-order 3-D elements "
+			"only (tetrahedra, hexahedra, prisms, pyramids; this mesh is %d-D, element "
+			"order %d, %d-node hexahedra, %d-node prisms)\n",
+			MeshDim, TetOrder, HexNen, PrismNen);
+		return 1;
+	}
+	if (MeshMode && th_ac() && ((NHex > 0) || (NPrism > 0) || (NPyr > 0))) {
+		fprintf(fp_log, "*** AC heating (thermal + analysis A) supports linear tetrahedra only "
+			"(this mesh has %d hexahedra, %d prisms, %d pyramids)\n", NHex, NPrism, NPyr);
 		return 1;
 	}
 	th_extent();

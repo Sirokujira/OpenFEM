@@ -1146,6 +1146,95 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0, mix=
     return nodes, cells
 
 
+def make_neck_hex(split=0, pyrneck=0, bar=0, nx=40, grade=0):
+    """首のある導体 (thermal_neck.ofe と同じ形・同じ格子) の六面体 / 角柱 / ピラミッド版
+    (熱連成の非構造格子の検証)
+
+    構造格子の thermal_neck.ofe の導体のセル (首の外の空気のセルは除く) をそのまま
+    要素にする。split = 0 で六面体、1 で角柱 ((x,y) を対角線で割って z に押し出す)、
+    2 で各セルを体心に節点を足した 6 つのピラミッド (底面がセルの面なので隣のセルと
+    四角形面で接する)。bar = 1 は首の代わりに thermal_bar.ofe の真っ直ぐな棒
+    (10mm x 1mm x 1mm、x に nx 分割、断面 1 x 1 セル)。grade = 1 で x を不等間隔に
+    する (x < 4mm に nx/4、残りに 3nx/4。構造格子の xmesh = 0 nx/4 4e-3 3nx/4 0.01 と
+    同じ格子点で、要素の体積が揃わないので体積の重みの誤りが見える)。pyrneck = 1 は六面体 (首の外) + ピラミッド (首) の混在
+    (界面は四角形面で適合)。六面体の版は構造格子と同じ離散問題になる
+    (要素行列・発熱・要素の温度がすべて同じ 2x2x2 Gauss)。
+
+    物理タグ : 1 = 首の外の要素、2 = 首の要素 (種別に依らない。別の材料を当てて
+               要素番号から材料を引く経路を効かせる)、
+               10 = x=0 面 (電極 0)、11 = x の上端の面 (電極 1)
+    """
+    def axis(spec):
+        xs = [spec[0]]
+        for n, b in spec[1:]:
+            a = xs[-1]
+            for i in range(1, n + 1):
+                xs.append(a + (b - a) * i / n)
+        return xs
+    if bar:
+        xs = (axis([0.0, (nx // 4, 4e-3), (nx - (nx // 4), 0.01)]) if grade
+              else axis([0.0, (nx, 0.01)]))
+        ys = axis([0.0, (1, 1e-3)])
+        zs = axis([0.0, (1, 1e-3)])
+    else:
+        xs = axis([0.0, (6, 1e-3), (6, 2e-3), (6, 3e-3)])
+        ys = axis([0.0, (6, 0.75e-3), (4, 1.25e-3), (6, 2e-3)])
+        zs = axis([0.0, (2, 0.5e-3)])
+    nx, ny, nz = len(xs) - 1, len(ys) - 1, len(zs) - 1
+
+    def inside(i, j):
+        xc = 0.5 * (xs[i] + xs[i + 1])
+        yc = 0.5 * (ys[j] + ys[j + 1])
+        return bool(bar) or (xc < 1e-3) or (xc > 2e-3) or (0.75e-3 < yc < 1.25e-3)
+
+    def neck(i):
+        return (not bar) and (1e-3 < 0.5 * (xs[i] + xs[i + 1]) < 2e-3)
+
+    nodes = []
+    idx = {}
+    def node(i, j, k):
+        if (i, j, k) not in idx:
+            idx[(i, j, k)] = len(nodes)
+            nodes.append((xs[i], ys[j], zs[k]))
+        return idx[(i, j, k)]
+
+    cells = []
+    tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
+    for i in range(nx):
+        for j in range(ny):
+            if not inside(i, j):
+                continue
+            for k in range(nz):
+                c = [node(i, j, k), node(i + 1, j, k), node(i + 1, j + 1, k), node(i, j + 1, k),
+                     node(i, j, k + 1), node(i + 1, j, k + 1), node(i + 1, j + 1, k + 1),
+                     node(i, j + 1, k + 1)]
+                pyr = (split == 2) or (pyrneck and neck(i))
+                tag = (2 if neck(i) else 1)
+                if pyr:
+                    ctr = len(nodes)
+                    nodes.append((0.5 * (xs[i] + xs[i + 1]), 0.5 * (ys[j] + ys[j + 1]),
+                                  0.5 * (zs[k] + zs[k + 1])))
+                    # 底面は頂点 (体心) から見て反時計回り (Gmsh の並び、det J > 0)。
+                    # 下の面の並びはどれも法線がセルの内側 (体心) を向く
+                    for f in ((0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1),
+                              (1, 5, 6, 2), (2, 6, 7, 3), (3, 7, 4, 0)):
+                        b = [c[f[0]], c[f[1]], c[f[2]], c[f[3]]]
+                        cells.append((tag, 7, b + [ctr]))
+                elif split == 1:
+                    for tri in tris:
+                        b = [node(i + a, j + d, k) for a, d in tri]
+                        t = [node(i + a, j + d, k + 1) for a, d in tri]
+                        cells.append((tag, 6, b + t))
+                else:
+                    cells.append((tag, 5, c))
+    for j in range(ny):
+        for k in range(nz):
+            for i, tag in ((0, 10), (nx, 11)):
+                cells.append((tag, 3, [node(i, j, k), node(i, j + 1, k),
+                                       node(i, j + 1, k + 1), node(i, j, k + 1)]))
+    return nodes, cells
+
+
 def make_bar_air(nx=24, ny=2, nz=24, nza=4,
                  lx=2e-3, ly=0.25e-3, lz=1e-3, gz=0.5e-3):
     """導体棒 + 非導電層 (3 次元渦電流 A-φ で空気を含む系の検証)
@@ -1250,6 +1339,11 @@ def main():
                         else make_box_hexpyrtet(**opt))
         write_msh_cells(path, nodes, cells)
         print("%s : pyramids, %d nodes, %d cells" % (path, len(nodes), len(cells)))
+        return 0
+    elif kind == "neck_hex":
+        nodes, cells = make_neck_hex(**opt)
+        write_msh_cells(path, nodes, cells)
+        print("%s : neck, %d nodes, %d cells" % (path, len(nodes), len(cells)))
         return 0
     elif kind == "bar_hex":
         nodes, cells = make_bar_hex(**opt)

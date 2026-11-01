@@ -3180,20 +3180,14 @@ awk '/^thermal/{print "frequency = 1e3"} {print}' "$SRC/thermal_bar.ofe" > "$WOR
 th_reject "thermal with frequency" thx_freq.ofe "DC coupling"
 awk '/^heatsink = 1/{print "heatsink = 3 20"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thx_badsink.ofe"
 th_reject "heatsink on a conductor that does not exist" thx_badsink.ofe "does not exist"
-#     非構造格子は 1 次四面体だけ (発熱・質量・露出面を四面体でしか組んでいない)。
-#     六面体・2 次四面体は黙って誤答にせず解く段で弾く (理由はログ)
-sed 's/^mesh = .*/mesh = bar_hex.msh/' "$SRC/thermal_tet.ofe" > "$WORK/thx_hex.ofe"
-cp "$SRC/bar_hex.msh" "$SRC/box_p2.msh" "$WORK/"
-mesh_reject "thermal on a hexahedral mesh" thx_hex.ofe
-if ! grep -q "linear tetrahedra only" "$WORK/ofe.log"; then
-	echo "  *** it was rejected for a different reason than the element kind" >&2
-	status=1
-fi
+#     非構造格子は 1 次の 3 次元要素だけ (2 次以上は黙って誤答にせず解く段で弾く。
+#     理由はログ。六面体・角柱・ピラミッドは [thermal 3-D elements] で検証する)
+cp "$SRC/box_p2.msh" "$WORK/"
 awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
 	/^analysis/{print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next}
 	{print}' "$SRC/box_p2.ofe" > "$WORK/thx_p2.ofe"
 mesh_reject "thermal on a second-order tetrahedral mesh" thx_p2.ofe
-if ! grep -q "linear tetrahedra only" "$WORK/ofe.log"; then
+if ! grep -q "first-order 3-D elements only" "$WORK/ofe.log"; then
 	echo "  *** it was rejected for a different reason than the element order" >&2
 	status=1
 fi
@@ -3390,6 +3384,169 @@ compare "tet : bar + air (k = 0) == bar alone : R [ohm]" "$(th_r)" "$rb" 1e-9
 compare "tet : bar + air (k = 0) == bar alone : T_max [degC]" "$(th_t)" "$tb" 1e-9
 th_nface "tet : bar + air, the conductor-air interface is exposed" 2496
 th_energy "tet : bar + air"
+
+# ---- 熱連成の六面体・角柱・ピラミッド (1 次、混在可) ----
+#
+# 剛性・発熱・質量・要素の温度を 1 つの積分点 API (unstruct.c の elem3d_ip) で組む
+# (thermal.c の gen_assemble の注釈)。六面体は構造格子と同じ 2x2x2 Gauss なので、
+# **同じ格子を六面体で書いたものは構造格子と同じ離散問題**になり全桁一致する
+# (閉形式も許容誤差も要らない恒等式)。角柱・ピラミッドは閉形式・誤差の次数・
+# エネルギーの恒等式・露出面の数で見る。
+echo "[thermal 3-D elements] hexahedra / prisms / pyramids (mixed) in the electro-thermal coupling"
+for m in thermal_hex40 thermal_pri20 thermal_pri40 thermal_pyr80 thermal_pyr160 \
+	thermal_neck_hex thermal_neck_pri thermal_neck_pyr thermal_neck_mix; do
+	cp "$SRC/$m.msh" "$WORK/"
+done
+cp "$SRC/thermal_hex.ofe" "$SRC/thermal_neck_mix.ofe" "$SRC/thermal_bar.ofe" "$SRC/thermal_conv.ofe" \
+	"$SRC/thermal_rad.ofe" "$SRC/thermal_transient.ofe" "$SRC/thermal_neck.ofe" "$WORK/"
+t3_mesh() {	# t3_mesh <格子> <入力> <出力> : mesh の行を差し替える
+	awk -v m="$1" '/^mesh/{print "mesh = " m ".msh"; next} {print}' "$WORK/$2" > "$WORK/$3"
+}
+t3_tm() { awk '/^  T_max = / { print $(NF-1); exit }' "$WORK/ofe.log"; }
+t3_same() {	# t3_same <ラベル> <構造格子の入力> <六面体の入力> : R / T_max / T_mean が全桁一致
+	th_run "$2"; r0=$(th_r); t0=$(th_t); m0=$(t3_tm)
+	th_run "$3"
+	compare "$1 : hexahedra == structured grid : R [ohm]" "$(th_r)" "$r0" 1e-10
+	compare "$1 : hexahedra == structured grid : T_max [degC]" "$(th_t)" "$t0" 1e-10
+	compare "$1 : hexahedra == structured grid : T_mean [degC]" "$(t3_tm)" "$m0" 1e-10
+}
+t3_iter() {	# t3_iter <ラベル> <上限> : Newton の反復回数
+	nit=$(awk '/converged in/ { print $3; exit }' "$WORK/ofe.log")
+	if [ -n "$nit" ] && [ "$nit" -le "$2" ]; then
+		echo "  $1 : converged in $nit iterations (<= $2) -> OK"
+	else
+		echo "  $1 : ${nit:-?} iterations (> $2) -> NG" >&2
+		status=1
+	fi
+}
+# (1) 六面体 == 構造格子 (同じ 40 x 1 x 1 の不等間隔の棒) : 両端ヒートシンク、側面の
+#     対流だけ、ヒートシンク + 輻射、過渡 (CN)。対流・輻射は四角形の露出面 (2x2 Gauss)
+#     を通る。不等間隔なのは要素の体積を揃えないため (T_mean を体積でなく要素の数で
+#     平均する誤りは等間隔の格子では等価)
+t3_grid() {	# t3_grid <入力> <出力> : 構造格子の x を thermal_hex40.msh と同じ不等間隔に
+	awk '/^xmesh/{print "xmesh = 0 10 4e-3 30 0.01"; next} {print}' "$WORK/$1" > "$WORK/$2"
+}
+t3_grid thermal_bar.ofe t3g_bar.ofe
+t3_same "bar, heat sinks" t3g_bar.ofe thermal_hex.ofe
+th_energy "hex : thermal_hex"
+awk '{ gsub(/0\.5e-3/, "1e-3"); print }' "$SRC/thermal_conv.ofe" > "$WORK/t3g_conv0.ofe"
+t3_grid t3g_conv0.ofe t3g_conv.ofe
+awk '/^heatsink/{next} /^thermal/{print "convection = 200 30"; print "thermal = 6"; next} {print}' \
+	"$SRC/thermal_hex.ofe" > "$WORK/t3h_conv.ofe"
+t3_same "bar, convection only" t3g_conv.ofe t3h_conv.ofe
+th_nface "hex : convection, sides only (not the electrode faces)" 160
+th_energy "hex : convection only"
+awk '/^kthermal/{print "kthermal = 2 1"; next} /^thermal/{print "radiation = 1 10"; print "thermal = 2.5"; next} {print}' \
+	"$SRC/thermal_hex.ofe" > "$WORK/t3h_rad.ofe"
+t3_grid thermal_rad.ofe t3g_rad.ofe
+t3_same "bar, heat sinks + radiation" t3g_rad.ofe t3h_rad.ofe
+th_energy "hex : heat sinks + radiation"
+awk '/^tempco/{print "tempco = 2 0 0"; next} /^temperature/{print "temperature = 20"; next}
+	/^thermal/{print; print "heatcap = 2 3.4e6"; print "transient = 2 200 0.5"; next} {print}' \
+	"$SRC/thermal_hex.ofe" > "$WORK/t3h_tr.ofe"
+t3_grid thermal_transient.ofe t3g_tr.ofe
+t3_same "bar, transient (CN)" t3g_tr.ofe t3h_tr.ofe
+th_balance "hex : transient (CN)"
+# (2) 首のある導体 (∇φ が要素内で変わる) を 2 材料で : 六面体は構造格子と全桁一致、
+#     角柱・ピラミッド・混在 (六面体 + 首のピラミッド) はエネルギーの恒等式
+#     (発熱を剛性と同じ積分点で組んだことの検査。1 点で取ると落ちる)
+awk '/^material/{print; print "material = 1.0 2e6"; next}
+	/^kthermal/{print; print "kthermal = 3 25"; print "tempco = 3 2e-3 0"; next}
+	/^geometry = 2 1 1e-3/{print "geometry = 3 1 1e-3 2e-3 0.75e-3 1.25e-3 0 0.5e-3"; next}
+	/^fieldout/{next} {print}' "$SRC/thermal_neck.ofe" > "$WORK/t3g_neck.ofe"
+t3_mesh thermal_neck_hex thermal_neck_mix.ofe t3h_neck.ofe
+t3_same "neck, two materials" t3g_neck.ofe t3h_neck.ofe
+for k in pri pyr mix; do
+	t3_mesh "thermal_neck_$k" thermal_neck_mix.ofe "t3_neck_$k.ofe"
+	th_run "t3_neck_$k.ofe"
+	th_energy "neck, two materials, $k"
+done
+#     場の出力の温度の最大 = ログの T_max (混在格子のセル)
+awk '/^thermal/{print "fieldout = 1"} {print}' "$SRC/thermal_neck_mix.ofe" > "$WORK/t3_fo.ofe"
+th_run t3_fo.ofe
+tvtk=$(awk '/^SCALARS T / { f = 1; next } f && /^LOOKUP/ { next }
+	f && (NF == 1) { if (($1 + 0) > m) m = $1 + 0; next } f { f = 0 }
+	END { printf "%.9e", m }' "$WORK/ofe_field.vtk")
+compare "mixed : max of the T field == T_max in the log [degC]" "$tvtk" "$(th_t)" 1e-8
+# (3) 角柱・ピラミッドの棒 : 閉形式と h² の誤差比。α = 0 では φ が 1 次で厳密
+#     (ピラミッドの求積の重み 1/2 を落とすと R が倍になる)。ピラミッドは h⁴ の項が
+#     大きく、40 -> 80 で比 4.53、80 -> 160 で 4.15 と上から 4 に近づく (実測) ので
+#     80 -> 160 で見て上限を 4.3 にする
+set -- $(th_exact 7.5 4e-3)
+rex=$1; tex=$2
+t3_mesh thermal_pri40 thermal_hex.ofe t3p40.ofe
+th_run t3p40.ofe
+compare "prism : R(I = 7.5 A, mL = 1.5) [ohm]" "$(th_r)" "$rex" 0.001
+compare "prism : T_max(I = 7.5 A) [degC]" "$(th_t)" "$tex" 0.001
+th_energy "prism : bar"
+r40=$(th_r)
+t3_mesh thermal_pri20 thermal_hex.ofe t3p20.ofe
+th_run t3p20.ofe
+tt_order "prism : second-order convergence of R" "$(th_r)" "$r40" "$rex"
+t3_mesh thermal_pyr160 thermal_hex.ofe t3y160.ofe
+th_run t3y160.ofe
+r160=$(th_r)
+compare "pyramid : R(I = 7.5 A, mL = 1.5) [ohm]" "$r160" "$rex" 0.001
+compare "pyramid : T_max(I = 7.5 A) [degC]" "$(th_t)" "$tex" 0.001
+th_energy "pyramid : bar"
+t3_mesh thermal_pyr80 thermal_hex.ofe t3y80.ofe
+th_run t3y80.ofe
+res=$(awk -v a="$(th_r)" -v b="$r160" -v e="$rex" 'BEGIN {
+	e1 = (a - e) / e; if (e1 < 0) e1 = -e1
+	e2 = (b - e) / e; if (e2 < 0) e2 = -e2
+	q = (e2 > 0) ? e1 / e2 : 0
+	printf "%s (err %.2e -> %.2e, ratio %.3f)", ((q > 3.8) && (q < 4.3)) ? "OK" : "NG", e1, e2, q }')
+echo "  pyramid : second-order convergence of R (80 -> 160 cells) : $res"
+case "$res" in NG*) status=1 ;; esac
+set -- $(th_exact 7.5 0)
+for k in pri40 pyr80; do
+	t3_mesh "thermal_$k" thermal_hex.ofe t3_a0.ofe
+	awk '/^tempco/{print "tempco = 2 0 0"; next} {print}' "$WORK/t3_a0.ofe" > "$WORK/t3_a0b.ofe"
+	th_run t3_a0b.ofe
+	compare "$k : R(alpha = 0) == the uncoupled value [ohm]" "$(th_r)" "$1" 1e-10
+done
+# (4) 側面の対流 : 露出面の数 (角柱は y 側面の四角形 2 x 40 + z 側面の三角形 2 x 2 x 40
+#     = 240、ピラミッドは 4 側面の四角形 4 x 80 = 320) とエネルギーの恒等式。
+#     輻射の Newton (α = 0) は四角形・三角形の面の接線の検査 (反復回数の上限)
+for k in pri40:240 pyr80:320; do
+	m=${k%%:*}; n=${k##*:}
+	t3_mesh "thermal_$m" t3h_conv.ofe t3_c.ofe
+	th_run t3_c.ofe
+	th_nface "$m : convection, sides only" "$n"
+	th_energy "$m : convection only"
+	t3_mesh "thermal_$m" t3h_rad.ofe t3_r.ofe
+	awk '/^tempco/{print "tempco = 2 0 0"; next} {print}' "$WORK/t3_r.ofe" > "$WORK/t3_r0.ofe"
+	th_run t3_r0.ofe
+	th_energy "$m : heat sinks + radiation, alpha = 0"
+	t3_iter "$m : Newton on radiation (alpha = 0)" 5
+done
+# (5) 断熱の棒の過渡 (CN) : 発熱と質量の行和が同じ節点の重み ∫N_i なので温度は一様の
+#     まま進み、θ 法の漸化式に機械精度で一致する (質量を積分点で組んだことの検査)
+for m in pri40 pyr80; do
+	awk -v m="$m" '/^mesh/{print "mesh = thermal_" m ".msh"; next} /^heatsink/{next}
+		/^thermal/{print "heatcap = 2 3.4e6"; print "transient = 10 100 0.5"} {print}' \
+		"$SRC/thermal_hex.ofe" > "$WORK/t3_ad.ofe"
+	th_run t3_ad.ofe
+	set -- $(th_adia 100 0.5)
+	compare "$m : adiabatic bar, CN : R == the discrete recurrence [ohm]" "$(th_r)" "$1" 1e-9
+	compare "$m : adiabatic bar, CN : T == the discrete recurrence [degC]" "$(th_t)" "$2" 1e-9
+	th_balance "$m : adiabatic bar, CN"
+done
+# (6) 弾くべき入力 (解く段で弾くので理由はログを見る)
+t3_reject() {	# t3_reject <ラベル> <ofe> <理由の文字列>
+	mesh_reject "$1" "$2"
+	if ! grep -q "$3" "$WORK/ofe.log"; then
+		echo "  *** it was rejected for a different reason than: $3" >&2
+		status=1
+	fi
+}
+cp "$SRC/bar_hex.msh" "$SRC/box_hex2.msh" "$WORK/"
+awk '/^mesh/{print "mesh = bar_hex.msh"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/t3x_ac.ofe"
+t3_reject "AC heating (thermal + A) on a hexahedral mesh" t3x_ac.ofe "AC heating (thermal + analysis A) supports linear tetrahedra only"
+awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
+	/^analysis/{print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next}
+	{print}' "$SRC/box_hex2.ofe" > "$WORK/t3x_hex2.ofe"
+t3_reject "thermal on a 20-node hexahedral mesh" t3x_hex2.ofe "first-order 3-D elements only"
 
 # ---- 交流の発熱 (thermal + analysis = A) ----
 #
@@ -3825,7 +3982,7 @@ awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
 	/^analysis/{print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next} {print}' \
 	"$SRC/box_p3.ofe" > "$WORK/p3x_th.ofe"
 mesh_reject "thermal on a 20-node tetrahedral mesh" p3x_th.ofe
-if ! grep -q "linear tetrahedra only" "$WORK/ofe.log"; then
+if ! grep -q "first-order 3-D elements only" "$WORK/ofe.log"; then
 	echo "  *** it was rejected for a different reason than the element order" >&2
 	status=1
 fi

@@ -41,6 +41,8 @@ int elem3d_kind(int);
 int elem3d_nodes(int, int32_t [27]);
 int elem3d_mat(int);
 int elem3d_tag(int);
+int elem3d_nip(int);
+int elem3d_ip(int, int, double [8], double [8][3], double *);
 void assemble_hex(crs_t *, int);
 int hex_grad_center(int, double [8][3]);
 int hex2_grad_center(int, double [27][3], int *);

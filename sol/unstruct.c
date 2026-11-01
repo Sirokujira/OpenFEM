@@ -2967,6 +2967,84 @@ static int pyr_shape(const int32_t *nd, int q, double g[5][3], double *det)
 }
 
 
+// ---- 1 次の 3 次元要素の積分点 (熱連成の発熱・質量・要素の温度で使う) ----
+//
+// 剛性と**同じ積分点・同じ重み**で N・∇N・重み w を返す (そうすると Σ_i ∫σ|∇φ|²N_i =
+// φᵀKφ が丸めを除いて厳密になる)。四面体 1 点 (重心、∇N は一定)、六面体 2x2x2、
+// 角柱 6 点、ピラミッド 2x2x2 (立方体座標)。2 次要素は扱わない (戻り値 1)。
+int elem3d_nip(int e)
+{
+	const int kind = elem3d_kind(e);
+	if (kind == MESHELEM_TET) return 1;
+	if (kind == MESHELEM_HEX) return 8;
+	if (kind == MESHELEM_PRISM) return 6;
+	return 8;
+}
+
+
+int elem3d_ip(int e, int q, double nv[8], double g[8][3], double *w)
+{
+	const int kind = elem3d_kind(e);
+	if (kind == MESHELEM_TET) {
+		if (TetOrder >= 2) return 1;
+		double gg[4][3], vol;
+		if (tet_grad_pub(&Tet[e * 4], gg, &vol)) return 1;
+		for (int a = 0; a < 4; a++) {
+			nv[a] = 0.25;
+			for (int c = 0; c < 3; c++) g[a][c] = gg[a][c];
+		}
+		*w = vol;
+		return 0;
+	}
+	if (kind == MESHELEM_HEX) {
+		if (HexNen > 8) return 1;
+		const int32_t *nd = &Hex[(e - NTet) * 8];
+		double det;
+		if (hex_shape(nd, q, g, &det)) return 1;
+		const double gp = 1.0 / sqrt(3.0);
+		const double xi = gp * HEX_SGN[q][0], eta = gp * HEX_SGN[q][1], ze = gp * HEX_SGN[q][2];
+		for (int a = 0; a < 8; a++) {
+			nv[a] = (1 + (HEX_SGN[a][0] * xi)) * (1 + (HEX_SGN[a][1] * eta))
+			      * (1 + (HEX_SGN[a][2] * ze)) / 8;
+		}
+		*w = fabs(det);
+		return 0;
+	}
+	if (kind == MESHELEM_PRISM) {
+		if (PrismNen > 6) return 1;
+		const int32_t *nd = &Prism[(e - NTet - NHex) * 6];
+		double gg[6][3], det;
+		if (prism_shape(nd, q, gg, &det)) return 1;
+		const double gp = 1.0 / sqrt(3.0);
+		const double u = PRISM_TU[q % 3], v = PRISM_TV[q % 3], ze = ((q < 3) ? -gp : gp);
+		const double lam[3] = {1 - u - v, u, v};
+		for (int a = 0; a < 6; a++) {
+			nv[a] = lam[PRISM_TRI[a]] * (1 + (PRISM_SGN[a] * ze)) / 2;
+			for (int c = 0; c < 3; c++) g[a][c] = gg[a][c];
+		}
+		*w = fabs(det) / 6;
+		return 0;
+	}
+	{
+		const int32_t *nd = &Pyr[(e - NTet - NHex - NPrism) * 5];
+		double gg[5][3], det;
+		if (pyr_shape(nd, q, gg, &det)) return 1;
+		const double gp = 1.0 / sqrt(3.0);
+		const double u = gp * PYR_SGN[q % 4][0], v = gp * PYR_SGN[q % 4][1];
+		const double ze = ((q < 4) ? (0.5 - (0.5 * gp)) : (0.5 + (0.5 * gp)));
+		for (int a = 0; a < 4; a++) {
+			nv[a] = (1 + (PYR_SGN[a][0] * u)) * (1 + (PYR_SGN[a][1] * v)) * (1 - ze) / 4;
+		}
+		nv[4] = ze;
+		for (int a = 0; a < 5; a++) {
+			for (int c = 0; c < 3; c++) g[a][c] = gg[a][c];
+		}
+		*w = 0.5 * fabs(det);
+		return 0;
+	}
+}
+
+
 // 3x3x3 Gauss で積分した体積 (2x2x2 則の検算に使う独立な計算)
 static double pyr_volume_hi(const int32_t *nd)
 {
