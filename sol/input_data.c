@@ -1772,14 +1772,24 @@ int input_data(FILE *fp)
 	}
 
 	if (nonlinear) {
-		if (!(Analysis & ANALYSIS_M)) {
-			printf("%s\n", "*** the bh key needs analysis M (magnetostatic)");
+		// M (静磁場) は Newton、F (渦電流) は実効磁気抵抗率法 (波高値 |B| での ν)
+		if (!(Analysis & (ANALYSIS_M | ANALYSIS_F))) {
+			printf("%s\n", "*** the bh key needs analysis M (magnetostatic) or F (eddy current)");
 			return 1;
 		}
 		if (Analysis & ANALYSIS_F) {
-			printf("%s\n", "*** the bh key cannot be combined with analysis F "
-				"(time-harmonic eddy current assumes a linear material)");
-			return 1;
+			for (int m = 0; m < NMaterial; m++) {
+				if (Material[m].bhaniso) {
+					printf("%s\n", "*** analysis F supports isotropic bh curves only "
+						"(not per-axis curves)");
+					return 1;
+				}
+			}
+			if (NFreqSweep > 0) {
+				printf("%s\n", "*** a nonlinear (bh) analysis F cannot be combined with "
+					"frequencysweep (solve each frequency separately)");
+				return 1;
+			}
 		}
 		if (NPort != 1) {
 			printf("%s\n", "*** a nonlinear (bh) model requires exactly one port "

@@ -634,6 +634,8 @@ static int solve_magnetostatic(FILE *fp_log)
 // 正味電流を 0 にする条件、すなわち「帰路電流はモデル内の導体を流れる」
 // という伝送線路の前提そのものなので、基準導体が自動的に帰路になる。
 // K + jωM は K が特異でも σ>0 の質量項があるため正則になる。
+#define AAM (5)		// 非線形渦電流の Anderson 加速の深さ
+
 static int solve_eddy(FILE *fp_log)
 {
 	const int n = (int)num_node();
@@ -705,13 +707,43 @@ static int solve_eddy(FILE *fp_log)
 	crs_t K, M;
 	crs_alloc(&K);
 	crs_alloc(&M);
-	if (tri2d) {
-		assemble_nu_tri(&K, NULL);	// ν = 1/(μ0 μr)
-		assemble_mass_tri(&M);		// σ
+	if (tri2d) assemble_mass_tri(&M);		// σ
+	else       assemble_mass(&M);
+
+	// 非線形 (B-H) の磁性体があれば**実効磁気抵抗率法**: 要素毎の ν = H(|B|)/|B| を
+	// 波高値 |B| = sqrt(|Bx|² + |By|²) (複素振幅の大きさ) で評価して反復で更新する。
+	// 単一ポート・与えた電流振幅 (current) での R(f) / L(f)。各回は線形の複素系なので
+	// V' = 1 で解いて電流が current になるよう複素数倍し、その場で ν を作り直す
+	// (時間調和の場では |B| が解析的でないので Newton は使わず、緩和付きの固定点反復)
+	const int64_t nelc = elem_count();
+	int nlf = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh[0] > 0) nlf = 1;
 	}
-	else {
-		assemble(&K, 4);			// ν を ∇Az の基底で使う
-		assemble_mass(&M);
+	double *nucell = NULL, *bvr = NULL, *bvi = NULL;
+	double *aay = NULL, *aaf = NULL, *aayp = NULL, *aafp = NULL, *aady = NULL, *aadf = NULL;
+	int aan = 0;			// 履歴の数
+	if (nlf) {
+		nucell = (double *)malloc((size_t)nelc * sizeof(double));
+		bvr = (double *)malloc((size_t)nelc * 3 * sizeof(double));
+		bvi = (double *)malloc((size_t)nelc * 3 * sizeof(double));
+		for (int64_t c = 0; c < nelc; c++) {
+			elem_t el;
+			elem_get(c, &el);
+			const material_t *mt = &Material[el.mat];
+			nucell[c] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0)
+				: (1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1))));
+		}
+		// Anderson 加速の履歴 (ln ν の差分を最大 AAM 個)
+		aay  = (double *)malloc((size_t)nelc * sizeof(double));
+		aaf  = (double *)malloc((size_t)nelc * sizeof(double));
+		aayp = (double *)malloc((size_t)nelc * sizeof(double));
+		aafp = (double *)malloc((size_t)nelc * sizeof(double));
+		aady = (double *)malloc((size_t)nelc * AAM * sizeof(double));
+		aadf = (double *)malloc((size_t)nelc * AAM * sizeof(double));
+		fprintf(fp_log, "  nonlinear (B-H) : effective reluctivity at current amplitude "
+			"%.6e [A], maxiter = %d, tol = %.1e, relax = %.2f\n", Curr, NlMaxiter, NlTol, NlRelax);
+		fprintf(fp_log, "  %-6s %16s %16s %12s\n", "nl-it", "R(f) [ohm/m]", "L(f) [H/m]", "max dnu/nu");
 	}
 
 	// 自然境界条件 (磁気壁) なので固定節点は無い
@@ -736,6 +768,14 @@ static int solve_eddy(FILE *fp_log)
 	double *yi = (double *)calloc((size_t)np * np, sizeof(double));
 	const double tlen = TlineLength;
 
+	// 線形なら 1 回で終わり。非線形は ν が収束するまで回し、最後にもう 1 回
+	// (場の出力つき) 解いて Z を作る
+	int final = !nlf, nlconv = 0;
+	for (int nlit = 1; !ierr; nlit++) {
+	if (tri2d) assemble_nu_tri(&K, nlf ? nucell : NULL);	// ν = 1/(μ0 μr)
+	else if (nlf) assemble_nu(&K, nucell);
+	else       assemble(&K, 4);			// ν を ∇Az の基底で使う
+
 	// 基準導体は V'=0。ポート 1..np を順に V'=1 [V/m] で励振する
 	for (int jc = 1; jc <= np; jc++) {
 		// b_i = ∫ σ N_i V' dV  (V' = 1 [V/m] を導体 jc にのみ与える)
@@ -754,46 +794,10 @@ static int solve_eddy(FILE *fp_log)
 		char label[BUFSIZ];
 		sprintf(label, "cond%d", jc);
 		const int iter = solver_cocg(&K, &M, omega, br, bi, ar, ai, fix,
-			Solver.maxiter, Solver.nout, Solver.converg, fp_log, label);
+			Solver.maxiter, Solver.nout, Solver.converg, (final ? fp_log : NULL), label);
 		if (iter < 0) {
 			fprintf(fp_log, "*** solver did not converge (conductor %d)\n", jc);
 			ierr = 1;
-		}
-
-		// 場の出力 : 複素 Az と、そこから作る B = ∇×(Az ẑ_t) と J_z。
-		// J_z = σ (V'_k - jω Az)、V' は励振した導体のセルだけ 1 [V/m]
-		if (FieldOut) {
-			char nm[BUFSIZ];
-			sprintf(nm, "Az_F_re_port%d", jc);  field_add_node(nm, ar);
-			sprintf(nm, "Az_F_im_port%d", jc);  field_add_node(nm, ai);
-			sprintf(nm, "B_F_re_port%d", jc);   field_add_grad(nm, ar, 1);
-			sprintf(nm, "B_F_im_port%d", jc);   field_add_grad(nm, ai, 1);
-
-			const int64_t ncell = num_cell();
-			const int taxis = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
-			double *jvr = (double *)calloc((size_t)ncell * 3, sizeof(double));
-			double *jvi = (double *)calloc((size_t)ncell * 3, sizeof(double));
-			for (int64_t c = 0; c < ncell; c++) {
-				elem_t el;
-				elem_get(c, &el);
-				if (el.cond < 0) continue;
-				// 要素中心の Az。形状関数の重心での値で重みづける
-				// (2 次三角形は単純平均ではない)
-				double zr8 = 0, zi8 = 0;
-				for (int l = 0; l < el.nen; l++) {
-					zr8 += el.wc[l] * ar[el.nd[l]];
-					zi8 += el.wc[l] * ai[el.nd[l]];
-				}
-				const double sg = CondSigma[el.cond];
-				const double vp = ((el.cond == jc) ? 1.0 : 0.0);
-				// -jω(zr8 + j zi8) = ω zi8 - j ω zr8
-				jvr[(c * 3) + taxis] = sg * (vp + (omega * zi8));
-				jvi[(c * 3) + taxis] = sg * (-omega * zr8);
-			}
-			sprintf(nm, "J_F_re_port%d", jc);  field_add_cellvec(nm, jvr);
-			sprintf(nm, "J_F_im_port%d", jc);  field_add_cellvec(nm, jvi);
-			free(jvr);
-			free(jvi);
 		}
 
 		// I_k = (1/t) [ V'_k ∫_k σ dV - jω ∫_k σ Az dV ]
@@ -816,7 +820,167 @@ static int solve_eddy(FILE *fp_log)
 		}
 		free(qr);
 		free(qi);
+
+		// 非線形 : 電流が current になるよう Az を s = I / I_V 倍する (V'_k も s 倍)。
+		// 場の出力も与えた電流での物理的な場にする
+		double vr = 1, vi = 0;
+		if (nlf) {
+			const double ivr = yr[0], ivi = yi[0];		// 端子電流 [A] (V' = 1 [V/m])
+			const double den = (ivr * ivr) + (ivi * ivi);
+			vr = Curr * ivr / den;					// s = Curr / I_V = Curr conj(I_V) / |I_V|²
+			vi = -Curr * ivi / den;
+			for (int i = 0; i < n; i++) {
+				const double xr = ar[i], xi = ai[i];
+				ar[i] = (vr * xr) - (vi * xi);
+				ai[i] = (vr * xi) + (vi * xr);
+			}
+		}
+
+		// 場の出力 : 複素 Az と、そこから作る B = ∇×(Az ẑ_t) と J_z。
+		// J_z = σ (V'_k - jω Az)、V' は励振した導体のセルだけ 1 [V/m] (非線形では s)
+		if (FieldOut && final) {
+			char nm[BUFSIZ];
+			sprintf(nm, "Az_F_re_port%d", jc);  field_add_node(nm, ar);
+			sprintf(nm, "Az_F_im_port%d", jc);  field_add_node(nm, ai);
+			sprintf(nm, "B_F_re_port%d", jc);   field_add_grad(nm, ar, 1);
+			sprintf(nm, "B_F_im_port%d", jc);   field_add_grad(nm, ai, 1);
+
+			const int64_t ncell = num_cell();
+			const int taxis = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
+			double *jvr = (double *)calloc((size_t)ncell * 3, sizeof(double));
+			double *jvi = (double *)calloc((size_t)ncell * 3, sizeof(double));
+			for (int64_t c = 0; c < ncell; c++) {
+				elem_t el;
+				elem_get(c, &el);
+				if (el.cond < 0) continue;
+				// 要素中心の Az。形状関数の重心での値で重みづける
+				// (2 次三角形は単純平均ではない)
+				double zr8 = 0, zi8 = 0;
+				for (int l = 0; l < el.nen; l++) {
+					zr8 += el.wc[l] * ar[el.nd[l]];
+					zi8 += el.wc[l] * ai[el.nd[l]];
+				}
+				const double sg = CondSigma[el.cond];
+				const double vpr = ((el.cond == jc) ? vr : 0.0);
+				const double vpi = ((el.cond == jc) ? vi : 0.0);
+				// -jω(zr8 + j zi8) = ω zi8 - j ω zr8
+				jvr[(c * 3) + taxis] = sg * (vpr + (omega * zi8));
+				jvi[(c * 3) + taxis] = (nlf ? (sg * (vpi - (omega * zr8))) : (sg * (-omega * zr8)));
+			}
+			sprintf(nm, "J_F_re_port%d", jc);  field_add_cellvec(nm, jvr);
+			sprintf(nm, "J_F_im_port%d", jc);  field_add_cellvec(nm, jvi);
+			free(jvr);
+			free(jvi);
+		}
 	}
+	if (final || ierr) break;
+
+	// ν の更新 : |B|² = |Re B|² + |Im B|²。**H を独立変数にして曲線を辿る**:
+	// 要素の |H| = ν |B| (いまの線形解の H) に対して ν_new = |H| / B(|H|)。
+	// B を独立変数にした ν_new = H(|B|)/|B| の逐次代入は電流で駆動する問題では
+	// 振動して収束しない (実測: 1 次元の板間で 2 値を往復した)。電流駆動では
+	// H の方がほぼ決まっているので、こちらは 1 次元では 1 回で厳密に収束する。
+	// 緩和 ν += w (ν_new - ν)
+	field_cell_grad(ar, 1, bvr);
+	field_cell_grad(ai, 1, bvi);
+	double dmax = 0;
+	for (int64_t c = 0; c < nelc; c++) {
+		elem_t el;
+		elem_get(c, &el);
+		const material_t *mt = &Material[el.mat];
+		aay[c] = log(nucell[c]);
+		if (mt->nbh[0] <= 0) {
+			aaf[c] = 0;
+			continue;
+		}
+		double b2 = 0;
+		for (int d = 0; d < 3; d++) {
+			b2 += (bvr[(c * 3) + d] * bvr[(c * 3) + d]) + (bvi[(c * 3) + d] * bvi[(c * 3) + d]);
+		}
+		const double hm = nucell[c] * sqrt(b2);
+		const double nun = ((hm > 0) ? (hm / bh_b_of_h(mt, 0, hm)) : bh_nu(mt, 0, 0));
+		const double dn = fabs(nun - nucell[c]) / nun;
+		if (dn > dmax) dmax = dn;
+		aaf[c] = log(nun) - aay[c];		// 固定点写像の残差 (ln ν で)
+	}
+	// Anderson 加速 (深さ AAM)。ln ν を変数にする (ν は桁で動き、正でなければならない)。
+	// 残差の差分 ΔF の最小二乗 min |f - ΔF γ| で次の点を作る:
+	//   y_new = y + w f - Σ γ_j (ΔY_j + w ΔF_j)
+	// 線形収束の固定点反復 (2 次元の格子で 77 回、実測) を数回に縮める
+	if (aan > 0) {
+		const int slot = (aan - 1) % AAM;
+		for (int64_t c = 0; c < nelc; c++) {
+			aady[(slot * nelc) + c] = aay[c] - aayp[c];
+			aadf[(slot * nelc) + c] = aaf[c] - aafp[c];
+		}
+	}
+	for (int64_t c = 0; c < nelc; c++) {
+		aayp[c] = aay[c];
+		aafp[c] = aaf[c];
+	}
+	const int mh = ((aan < AAM) ? aan : AAM);
+	double gam[AAM];
+	for (int j = 0; j < AAM; j++) gam[j] = 0;
+	if (mh > 0) {
+		double am[AAM][AAM + 1];
+		double tr = 0;
+		for (int i = 0; i < mh; i++) {
+			for (int j = 0; j < mh; j++) {
+				double sum = 0;
+				for (int64_t c = 0; c < nelc; c++) sum += aadf[(i * nelc) + c] * aadf[(j * nelc) + c];
+				am[i][j] = sum;
+			}
+			double sum = 0;
+			for (int64_t c = 0; c < nelc; c++) sum += aadf[(i * nelc) + c] * aaf[c];
+			am[i][mh] = sum;
+			tr += am[i][i];
+		}
+		// 正則化 (履歴がほぼ線形従属のとき)。消去は部分ピボットなしで十分 (正定値)
+		for (int i = 0; i < mh; i++) am[i][i] += 1e-12 * tr + 1e-300;
+		int sing = 0;
+		for (int k = 0; k < mh; k++) {
+			if (am[k][k] <= 0) { sing = 1; break; }
+			for (int i = k + 1; i < mh; i++) {
+				const double r = am[i][k] / am[k][k];
+				for (int j = k; j <= mh; j++) am[i][j] -= r * am[k][j];
+			}
+		}
+		for (int k = mh - 1; !sing && (k >= 0); k--) {
+			double sum = am[k][mh];
+			for (int j = k + 1; j < mh; j++) sum -= am[k][j] * gam[j];
+			gam[k] = sum / am[k][k];
+		}
+		if (sing) for (int j = 0; j < AAM; j++) gam[j] = 0;
+	}
+	for (int64_t c = 0; c < nelc; c++) {
+		double y = aay[c] + (NlRelax * aaf[c]);
+		for (int j = 0; j < mh; j++) {
+			y -= gam[j] * (aady[(j * nelc) + c] + (NlRelax * aadf[(j * nelc) + c]));
+		}
+		nucell[c] = exp(y);
+	}
+	aan++;
+	{
+		// Z = 1 / Y (単一ポート) を反復の経過としてログに出す
+		const double y2 = (yr[0] * yr[0]) + (yi[0] * yi[0]);
+		fprintf(fp_log, "  %6d %16.9e %16.9e %12.3e\n", nlit, yr[0] / y2, (-yi[0] / y2) / omega, dmax);
+		fflush(fp_log);
+	}
+	if (dmax < NlTol) {
+		nlconv = 1;
+		final = 1;
+	}
+	else if (nlit >= NlMaxiter) {
+		fprintf(fp_log, "*** nonlinear (B-H) eddy current : the effective reluctivity did not "
+			"converge in %d iterations (max dnu/nu = %.3e)\n", NlMaxiter, dmax);
+		ierr = 1;
+	}
+	}
+	if (nlf && nlconv && !ierr) {
+		fprintf(fp_log, "  nonlinear (B-H) : converged\n");
+	}
+	free(nucell); free(bvr); free(bvi);
+	free(aay); free(aaf); free(aayp); free(aafp); free(aady); free(aadf);
 
 	// Z_loop = inv(Y)
 	double *zr = (double *)malloc((size_t)np * np * sizeof(double));

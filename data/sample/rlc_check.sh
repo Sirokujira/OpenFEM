@@ -1886,6 +1886,123 @@ if ! (cd "$WORK" && "$OFE" -n 2 ttx.ofe 2>&1 | grep -q "both tempco and tempcota
 	status=1
 fi
 
+# 非線形 (B-H) と渦電流 (F) の同時解析 (実効磁気抵抗率法)。
+echo "[plate_line_bh_ac] nonlinear B-H with eddy currents (effective reluctivity)"
+nf_run() {	# nf_run <dir> : $WORK/<dir>/x.ofe を解いて ofe_post まで。非 0 なら NG
+	if ! (cd "$WORK/$1" && "$OFE" -n 2 x.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1); then
+		echo "  $1 : the run failed -> NG" >&2; status=1
+	fi
+}
+nf_val() { awk -F, -v name="$2" '$1 == name && NF == 2 { f = 1; next } f && $1 == "1" { print $2; exit }' "$WORK/$1/rlc.csv"; }
+nf_iters() { awk '/nl-it/ { f = 1; next } f && ($1 ~ /^[0-9]+$/) && (NF == 4) { n = $1 } END { print n + 0 }' "$WORK/$1/ofe.log"; }
+#   (a) 1 次元の板間 (data/sample/plate_line_bh_ac.ofe)。板間の H = I/W は周波数にも
+#       μ にも依らないので、空気の板間との差は磁性体の磁束だけ:
+#         R_nl = R_air、L_nl = L_air + (B(I/W) - mu0 I/W) d / I (どの周波数でも厳密)
+#       H が固定されているので H を独立変数にした更新は 2 回で収束する
+#       (**B を独立変数にした逐次代入は 2 値を往復して収束しない**、実測)
+for f in 1e3 1e5; do
+	mkdir -p "$WORK/nfair$f"
+	awk -v f="$f" '/^material|^bh|^geometry|^current|^nlsolver/{next} /^frequency/{print "frequency = " f; next} {print}' \
+		"$SRC/plate_line_bh_ac.ofe" > "$WORK/nfair$f/x.ofe"
+	nf_run "nfair$f"
+	# 1e3 Hz では B-H 曲線の最初の点の手前 (0.05 A、初期透磁率の直線) と最後の点の先
+	# (20 A、最終区間の傾きで外挿) も通す (逆関数 B(H) の 3 つの枝を全部見る)
+	pairs="1.0 1.0|0.5 0.72222222222222|5.0 1.0888888888889"
+	[ "$f" = 1e3 ] && pairs="$pairs|0.05 0.25|20.0 1.4222222222222"
+	old_ifs=$IFS; IFS='|'; set -- $pairs; IFS=$old_ifs
+	for pair in "$@"; do
+		set -- $pair
+		d="nf$f-$1"
+		mkdir -p "$WORK/$d"
+		awk -v f="$f" -v cur="$1" '/^frequency/{print "frequency = " f; next} /^current/{print "current = " cur; next} {print}' \
+			"$SRC/plate_line_bh_ac.ofe" > "$WORK/$d/x.ofe"
+		nf_run "$d"
+		compare "f = $f, I = $1 : L = L_air + (B(I/W) - mu0 I/W) d/I [H/m]" "$(nf_val $d Lf)" \
+			"$(awk -v la="$(nf_val nfair$f Lf)" -v I="$1" -v B="$2" 'BEGIN { pi = 3.14159265358979324; mu0 = 4 * pi * 1e-7
+				printf "%.12e", la + (B - mu0 * I / 1e-3) * 0.2e-3 / I }')" 1e-7
+		compare "f = $f, I = $1 : R == R_air (the core carries no current) [ohm/m]" "$(nf_val $d Rf)" "$(nf_val nfair$f Rf)" 1e-8
+		it=$(nf_iters "$d")
+		if [ "$it" -ge 1 ] && [ "$it" -le 3 ]; then echo "  f = $f, I = $1 : converged in $it nonlinear iterations (<= 3) -> OK"
+		else echo "  f = $f, I = $1 : $it nonlinear iterations (expected <= 3) -> NG" >&2; status=1; fi
+	done
+done
+#   (b) 直線の B-H 曲線 (初期透磁率と同じ傾きの 2 点) は線形の μr = 3979 と一致する
+mkdir -p "$WORK/nflin" "$WORK/nfmur"
+awk '/^bh = 2 10000 /{next} /^bh = 2 1000 /{print "bh = 2 1000 5.0"; next} {print}' "$SRC/plate_line_bh_ac.ofe" > "$WORK/nflin/x.ofe"
+awk '/^bh = 2 100 /{print "mur = 2 3978.873577297384"; next} /^bh/{next} /^current|^nlsolver/{next} {print}' "$SRC/plate_line_bh_ac.ofe" > "$WORK/nfmur/x.ofe"
+nf_run nflin; nf_run nfmur
+compare "a straight-line B-H curve == linear mur, L(f) [H/m]" "$(nf_val nflin Lf)" "$(nf_val nfmur Lf)" 1e-9
+#   R は μr ~ 4000 の板間で系が悪条件になり 1e-9 程度で頭打ち (COCG の判定 1e-11)
+compare "a straight-line B-H curve == linear mur, R(f) [ohm/m]" "$(nf_val nflin Rf)" "$(nf_val nfmur Rf)" 1e-8
+#   (c) 場の出力は与えた電流での物理的な場 : 板間の |B| = B(I/W) = 1.0 T (I = 1 A)
+mkdir -p "$WORK/nfvtk"
+awk '/^analysis/{print "fieldout = 1"} {print}' "$SRC/plate_line_bh_ac.ofe" > "$WORK/nfvtk/x.ofe"
+nf_run nfvtk
+bcore=$(awk '/^VECTORS B_F_re_port1 / { f = 1; g = 0; c = 0; next } /^VECTORS B_F_im_port1 / { g = 1; f = 0; c = 0; next }
+	f && (NF == 3) && ($1 ~ /^-?[0-9]/) { br[c++] = ($1 * $1) + ($2 * $2) + ($3 * $3); next } f { f = 0 }
+	g && (NF == 3) && ($1 ~ /^-?[0-9]/) { bi[c++] = ($1 * $1) + ($2 * $2) + ($3 * $3); next } g { g = 0 }
+	END { for (k in br) { b = sqrt(br[k] + bi[k]); if (b > m) m = b } printf "%.9e", m }' "$WORK/nfvtk/ofe_field.vtk")
+compare "field output : max |B| in the core == B(I/W) = 1.0 T" "$bcore" 1.0 1e-6
+#       電流密度 J_z = σ (s V' - jω Az) も与えた電流での値 : 導体 1 のセルの J_z x 面積の和が
+#       current (実部 1 A、虚部 0)。V' に s を掛け忘れると実部がずれる
+jsum=$(awk '/^SCALARS conductor / { sc = 1; c = 0; next } sc && /^LOOKUP/ { next }
+	sc && (NF == 1) && ($1 ~ /^-?[0-9]/) { cd[c++] = $1; next } sc { sc = 0 }
+	/^VECTORS J_F_re_port1 / { fr = 1; fi = 0; c = 0; next } /^VECTORS J_F_im_port1 / { fi = 1; fr = 0; c = 0; next }
+	fr && (NF == 3) && ($1 ~ /^-?[0-9]/) { jr[c++] = $3; next } fr { fr = 0 }
+	fi && (NF == 3) && ($1 ~ /^-?[0-9]/) { ji[c++] = $3; next } fi { fi = 0 }
+	END { a = 0.25e-3 * 2.5e-6; for (k in cd) if (cd[k] == 1) { sr += jr[k] * a; si += ji[k] * a }
+	      printf "%.9e %.9e", sr, si }' "$WORK/nfvtk/ofe_field.vtk")
+set -- $jsum
+compare "field output : sum of J_z over conductor 1 == current (real part) [A]" "$1" 1.0 1e-6
+res=$(awk -v v="$2" 'BEGIN { a = (v < 0) ? -v : v; printf "%s (%.1e)", (a < 1e-9) ? "OK" : "NG", v }')
+echo "  field output : sum of J_z over conductor 1, imaginary part == 0 : $res"
+case "$res" in NG*) status=1 ;; esac
+#   (d) 2 次元 (板が磁性体より狭く、縁で磁界が広がる)。F (100 Hz、渦電流はほぼ効かない)
+#       は M (Newton) の非線形解と一致する。線形域 (0.2 A) は 1e-5 で一致。飽和域 (5 A)
+#       では ν の評価点が違う (F は要素中心、M は Gauss 点) ので h² の差が残り、格子を
+#       半分にすると差が 1/4 になる (実測 3.89)。低い周波数ほど F の系は悪条件になる
+#       (Az の定数分が 1/ω で大きくなる) ので 1 Hz では比べない (実測 0.18% ずれる)
+nf_2d() {	# nf_2d <dir> <F|M> <current> <xdiv> <ydiv-per-region>
+	mkdir -p "$WORK/$1"
+	awk -v an="$2" -v cur="$3" -v nx="$4" -v ny="$5" '
+		/^xmesh/{print "xmesh = 0 " nx " 1e-3"; next}
+		/^ymesh/{print "ymesh = 0 " ny " 0.05e-3 " ny " 0.25e-3 " ny " 0.30e-3"; next}
+		/^conductor = 0/{print "conductor = 0 1 0.25e-3 0.75e-3 0 0.05e-3 0 1e-4"; next}
+		/^conductor = 1/{print "conductor = 1 1 0.25e-3 0.75e-3 0.25e-3 0.30e-3 0 1e-4"; next}
+		/^frequency/{ if (an == "F") print "frequency = 100"; next}
+		/^current/{print "current = " cur; next}
+		/^nlsolver/{print "nlsolver = 100 1e-10 1.0"; next}
+		/^analysis/{print "analysis = " an; next} {print}' "$SRC/plate_line_bh_ac.ofe" > "$WORK/$1/x.ofe"
+	nf_run "$1"
+}
+nf_2d nf2F02 F 0.2 8 20; nf_2d nf2M02 M 0.2 8 20
+compare "2-D, 0.2 A (initial permeability) : F(100 Hz) == M [H/m]" "$(nf_val nf2F02 Lf)" "$(nf_val nf2M02 Ldc)" 1e-5
+nf_2d nf2F5 F 5 8 20; nf_2d nf2M5 M 5 8 20
+nf_2d nf2F5h F 5 16 40; nf_2d nf2M5h M 5 16 40
+res=$(awk -v a="$(nf_val nf2F5 Lf)" -v b="$(nf_val nf2M5 Ldc)" -v c="$(nf_val nf2F5h Lf)" -v d="$(nf_val nf2M5h Ldc)" 'BEGIN {
+	e1 = (a - b) / b; if (e1 < 0) e1 = -e1
+	e2 = (c - d) / d; if (e2 < 0) e2 = -e2
+	q = (e2 > 0) ? e1 / e2 : 0
+	printf "%s (diff %.2e -> %.2e, ratio %.2f)", ((e1 < 1e-3) && (q > 3.5) && (q < 4.5)) ? "OK" : "NG", e1, e2, q }')
+echo "  2-D, 5 A (saturated) : F(100 Hz) - M shrinks as h^2 : $res"
+case "$res" in NG*) status=1 ;; esac
+#      Anderson 加速 : 2 次元の飽和域でも 40 回以内 (加速なしの固定点は 0.2 A で 77 回、
+#      1 A / 5 A は 100 回で収束しなかった、実測)
+it=$(nf_iters nf2F5)
+if [ "$it" -ge 1 ] && [ "$it" -le 40 ]; then echo "  2-D, 5 A : converged in $it nonlinear iterations (<= 40, Anderson) -> OK"
+else echo "  2-D, 5 A : $it nonlinear iterations (expected <= 40) -> NG" >&2; status=1; fi
+#   (e) 弾く入力
+nf_reject() {	# nf_reject <ラベル> <awk の置換> <理由>
+	awk "$2" "$SRC/plate_line_bh_ac.ofe" > "$WORK/nfx.ofe"
+	mesh_reject "$1" nfx.ofe
+	if ! (cd "$WORK" && "$OFE" -n 2 nfx.ofe 2>&1 | grep -q "$3"); then
+		echo "  *** it was rejected for a different reason than: $3" >&2; status=1
+	fi
+}
+nf_reject "nonlinear F with two ports" '/^conductor = 1/{print; print "conductor = 2 1 0.4e-3 0.6e-3 0.12e-3 0.18e-3 0 1e-4"; print "conductorsigma = 2 5.8e7"; next} {print}' "exactly one port"
+nf_reject "nonlinear F with a frequency sweep" '/^frequency/{print "frequencysweep = 1e3 1e4"; next} {print}' "cannot be combined with frequencysweep"
+nf_reject "nonlinear F with per-axis B-H curves" '/^bh = 2 100 /{print "bh = 2 x 100 0.5"; print "bh = 2 y 100 0.5"; print "bh = 2 z 100 0.5"; next} /^bh/{next} {print}' "isotropic bh curves only"
+
 # 鉄損 (Bertotti の損失分離)。板間を積層鉄心で埋めた平行平板線路で、
 # 磁束密度が厳密に 1 次元 (B = mu0 I/W) なので閉形式と機械精度で一致する
 echo "[bertotti_core] iron loss vs the closed form on a 1-D exact field"
@@ -3112,7 +3229,8 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
-         thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate; do
+         thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
+         plate_line_bh_ac; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

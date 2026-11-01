@@ -310,6 +310,26 @@ static void bh_h_dh(const material_t *mt, int ax, double b, double *h, double *d
 }
 
 
+// bh_h_dh の逆関数 B(|h|)。H(B) が区分線形 (節点は表の点、最初は原点からの直線、
+// 最後は最終区間の傾きで外挿) なので、その逆も同じ節点で区分線形になる
+double bh_b_of_h(const material_t *mt, int ax, double h)
+{
+	const int n = mt->nbh[ax];
+	const double *hh = mt->bh_h[ax];
+	const double *bb = mt->bh_b[ax];
+
+	if (h <= hh[0]) return h * bb[0] / hh[0];
+	if (h >= hh[n - 1]) {
+		const double slope = (n >= 2)
+			? ((hh[n - 1] - hh[n - 2]) / (bb[n - 1] - bb[n - 2])) : (hh[0] / bb[0]);
+		return bb[n - 1] + ((h - hh[n - 1]) / slope);
+	}
+	int i = 0;
+	while ((i < n - 2) && (h > hh[i + 1])) i++;
+	return bb[i] + ((h - hh[i]) * (bb[i + 1] - bb[i]) / (hh[i + 1] - hh[i]));
+}
+
+
 double bh_nu(const material_t *mt, int ax, double b)
 {
 	if (b <= 0) return mt->bh_h[ax][0] / mt->bh_b[ax][0];

@@ -137,6 +137,7 @@ double table_interp(int, const double *, const double *, double);
 void joule_load(const double *, const double *, double *);
 void assemble_mass(crs_t *);
 double bh_nu(const material_t *, int, double);
+double bh_b_of_h(const material_t *, int, double);
 void assemble_newton(crs_t *, const double *, double *);
 void assemble_ja(const double *, double *, double *);
 void ja_eval(const ja_t *, double, double, double, double, double *, double *, double *);
