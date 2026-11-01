@@ -4982,6 +4982,62 @@ th_reject "currentsweep2 with a different number of points" jvx_n.ofe "as many p
 awk '/^ja =/{next} /^currentsweep =/{next} /^javector/{next} /^japrobe/{next} /^jasub/{next} {print}' "$SRC/ja_rotating.ofe" > "$WORK/jvx_noja.ofe"
 th_reject "currentsweep2 without a hysteretic material" jvx_noja.ofe "currentsweep2 needs a hysteretic"
 
+# ---- 3 次元渦電流の過渡解析 (analysis = A + transient、後退 Euler、電圧駆動) ----
+#
+# χ = Δt φ を未知数にすると係数行列が実対称・半正定値になる (eddy3d.c の solve_eddy3d_transient)。
+#   (a) 電圧の段差を十分長く保つと I -> V / R_dc。DC の極限の節点の式は analysis R の導電行列
+#       そのもの (Whitney の恒等式) なので、R の G に反復の打ち切りの範囲で一致する
+#   (b) 刻みの仕事の恒等式 : Σ V I Δt = 磁気の仕事 Σ (ΔA)ᵀ S A^{n+1} + Joule 損 Σ zᵀ M z (厳密)
+#   (c) 正弦波の定常 : 最後の周期の I の sin / cos 成分が周波数領域 (analysis A) の Y = G + jB に
+#       後退 Euler の 1 次で近づく (1 周期 32 -> 64 点で誤差の比 1.9〜2.0)。Richardson 補外
+#       2 I_64 - I_32 は |Y| の 1e-3 以内 (実測 9.5e-4)
+echo "[A transient] 3-D eddy current in the time domain (backward Euler, voltage drive)"
+cp "$SRC/bar_eddy.ofe" "$SRC/bar_tet.msh" "$WORK/"
+a3_energy() {	# a3_energy <ラベル>
+	res=$(awk '/^  energy : terminals/ { a = $5 + 0; b = $9 + 0; c = $12 + 0 }
+		END { if (a == 0) { printf "NG (no energy line)"; exit }
+		      d = (a - b - c) / a; if (d < 0) d = -d
+		      printf "%s (terminals %.6e, magnetic %.6e, joule %.6e, %.1e)", (d < 1e-8) ? "OK" : "NG", a, b, c, d }' "$WORK/ofe.log")
+	echo "  $1 : terminal work = magnetic work + joule loss : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+# (a) (b)
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 100"} {print}' > "$WORK/a3t_step.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3t_step.ofe > /dev/null 2>&1) || { echo "  a3t_step : the run failed -> NG" >&2; status=1; }
+a3_energy "voltage step"
+ilast=$(awk -F, 'NR > 1 { i = $3 } END { print i }' "$WORK/ofe_transient.csv")
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^awall/{next} /^analysis/{print "analysis = R"; next} {print}' > "$WORK/a3t_r.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3t_r.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  a3t_r : the run failed -> NG" >&2; status=1; }
+gdc=$(awk -F, '$1 == "G" { f = 1; next } f && $1 == "1" { print $2; exit }' "$WORK/rlc.csv")
+compare "voltage step held : I(t_end) == G_dc V (analysis R on the same mesh) [A]" "$ilast" "$gdc" 1e-9
+# (c) 10 kHz の正弦波、4 周期
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{print "frequency = 1e4"; next} {print}' > "$WORK/a3t_fd.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3t_fd.ofe > /dev/null 2>&1) || { echo "  a3t_fd : the run failed -> NG" >&2; status=1; }
+set -- $(awk '/port 1 : I =/ { print $6, $7; exit }' "$WORK/ofe.log")
+yre=$1; yim=$2
+for N in 32 64; do
+	awk -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4; T = 1 / f; s = "waveform ="
+		for (k = 0; k <= 4 * N; k++) { t = k * T / N; s = s sprintf(" %.12e %.15g", t, sin(2 * pi * f * t)) } print s }' > "$WORK/a3t_wf.txt"
+	grep -v '^#' "$SRC/bar_eddy.ofe" | awk -v wf="$WORK/a3t_wf.txt" -v ns=$((4 * N)) '/^frequency/{next}
+		/^analysis/{ while ((getline l < wf) > 0) print l; print "transient = 4e-4 " ns } {print}' > "$WORK/a3t_sin.ofe"
+	(cd "$WORK" && "$OFE" -n 2 a3t_sin.ofe > /dev/null 2>&1) || { echo "  a3t_sin ($N) : the run failed -> NG" >&2; status=1; }
+	[ "$N" = 64 ] && a3_energy "sine, 64 steps per period"
+	set -- $(awk -F, -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4 } NR > 1 { k = NR - 1
+		if (k > 3 * N) { a += $3 * sin(2 * pi * f * $1); b += $3 * cos(2 * pi * f * $1) } } END { printf "%.12e %.12e", 2 * a / N, 2 * b / N }' "$WORK/ofe_transient.csv")
+	eval "ar$N=\$1; ai$N=\$2"
+done
+res=$(awk -v gr="$yre" -v gi="$yim" -v a1="$ar32" -v b1="$ai32" -v a2="$ar64" -v b2="$ai64" 'BEGIN {
+	y = sqrt(gr * gr + gi * gi)
+	e1 = sqrt((a1 - gr) ^ 2 + (b1 - gi) ^ 2) / y; e2 = sqrt((a2 - gr) ^ 2 + (b2 - gi) ^ 2) / y
+	ra = 2 * a2 - a1; rb = 2 * b2 - b1; er = sqrt((ra - gr) ^ 2 + (rb - gi) ^ 2) / y
+	q = (e2 > 0) ? e1 / e2 : 0; ok = (q >= 1.7) && (q <= 2.3) && (er <= 2e-3)
+	printf "%s (32 steps %.2e, 64 steps %.2e, ratio %.2f; Richardson %.2e)", ok ? "OK" : "NG", e1, e2, q, er }')
+echo "  sine at 10 kHz : steady state -> frequency-domain Y (backward Euler, first order) : $res"
+case "$res" in NG*) status=1 ;; esac
+# (d) 弾くべき入力
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 10 0.5"} {print}' > "$WORK/a3tx_cn.ofe"
+th_reject "A + transient with theta = 0.5" a3tx_cn.ofe "theta = 1 (backward Euler) only"
+
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
 # 警告が (a) 罠のケースで必ず出て (b) 正しいケースでは 1 件も出ないことを両方見る

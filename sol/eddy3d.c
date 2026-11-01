@@ -931,6 +931,227 @@ static struct {
 } EH;
 
 
+/*
+3 次元渦電流の過渡解析 (analysis = A + transient、後退 Euler、電圧駆動)。
+
+時間領域の A-φ 式  ∇×ν∇×A + σ(∂A/∂t + ∇φ) = 0,  ∇・σ(∂A/∂t + ∇φ) = 0  を後退 Euler で
+離散化し、φ の代わりに χ = Δt φ を未知数にすると係数行列が**実対称・半正定値**になる:
+
+	[ S + T/Δt     TG/Δt    ] [A^{n+1}]   [ T A^n / Δt   ]
+	[ GᵀT/Δt     GᵀTG/Δt    ] [ χ      ] = [ GᵀT A^n / Δt ]
+
+(周波数領域で節点の式を jω で割ったのと同じ形。jω → 1/Δt)。系は (A, χ) -> (A + Gψ, χ - ψ) で
+不変なので特異だが、右辺は値域に入るので CG で解ける (周波数領域と同じくゲージ固定しない)。
+ポート 1 の電極を χ = Δt V(t^{n+1})、基準導体を 0 に固定し (V(t) = voltage x waveform)、電極の
+節点の反作用から端子電流を取る。
+
+**刻みの仕事の恒等式**: z = (A^{n+1} - A^n, χ) とすると zᵀ(Kx - M[A^n;0]) = zᵀ r で、
+	V I Δt = (ΔA)ᵀ S A^{n+1} + zᵀ M z
+(左辺は端子の仕事、右辺の第 1 項は磁気の仕事、第 2 項は Δt eᵀTe = Joule 損、e = (ΔA + Gχ)/Δt)。
+反復の打ち切りを除いて厳密 (ログに出す)。DC の極限 (V 一定で十分長い時間) では ΔA = 0 になり、
+節点の式は GᵀTG φ = 0 そのもの (= analysis R の導電行列、Whitney の恒等式) なので I = V / R_dc。
+*/
+static void assemble_eddy3d_tr(crs_t *K, crs_t *M, double dt)
+{
+	crs_zero(K);
+	crs_zero(M);
+	const int ne = NEdge;
+	const int nelem = edge_elem_count();
+	for (int e = 0; e < nelem; e++) {
+		const int m = edge_elem_mat(e);
+		const int nedge = edge_elem_nedge(e);
+		const int nen = edge_elem_nen(e);
+		const int (*tab)[2] = edge_elem_table(e);
+		double nu[6];
+		material_coef_pub(m, 3, nu);
+		const double sig = Material[m].sigma;
+		double se[12][12], te[12][12];
+		edge_elem_matrices(e, nu, sig, se, te);
+		double gl[12][8];
+		for (int k = 0; k < nedge; k++) {
+			for (int a = 0; a < nen; a++) gl[k][a] = 0;
+			gl[k][tab[k][0]] = -1;
+			gl[k][tab[k][1]] = +1;
+		}
+		double tg[12][8], gtg[8][8];
+		for (int k = 0; k < nedge; k++) {
+			for (int a = 0; a < nen; a++) {
+				double v = 0;
+				for (int l = 0; l < nedge; l++) v += te[k][l] * gl[l][a];
+				tg[k][a] = v;
+			}
+		}
+		for (int a = 0; a < nen; a++) {
+			for (int b = 0; b < nen; b++) {
+				double v = 0;
+				for (int k = 0; k < nedge; k++) v += gl[k][a] * tg[k][b];
+				gtg[a][b] = v;
+			}
+		}
+		const int32_t *ed = &TetEdge[EdgeOff[e]];
+		const signed char *sg = &TetEdgeSgn[EdgeOff[e]];
+		const int32_t *nd = edge_elem_nodes(e);
+		for (int k = 0; k < nedge; k++) {
+			for (int l = 0; l < nedge; l++) {
+				const int64_t p = crs_find_en(K, ed[k], ed[l]);
+				const double w = sg[k] * sg[l];
+				K->val[p] += w * (se[k][l] + (te[k][l] / dt));
+				M->val[p] += w * te[k][l] / dt;
+			}
+		}
+		for (int k = 0; k < nedge; k++) {
+			for (int a = 0; a < nen; a++) {
+				const double w = sg[k] * tg[k][a] / dt;
+				const int64_t p1 = crs_find_en(K, ed[k], (int32_t)ne + nd[a]);
+				const int64_t p2 = crs_find_en(K, (int32_t)ne + nd[a], ed[k]);
+				K->val[p1] += w;
+				K->val[p2] += w;
+				M->val[p1] += w;
+				M->val[p2] += w;
+			}
+		}
+		for (int a = 0; a < nen; a++) {
+			for (int b = 0; b < nen; b++) {
+				const int64_t p = crs_find_en(K, (int32_t)ne + nd[a], (int32_t)ne + nd[b]);
+				K->val[p] += gtg[a][b] / dt;
+				M->val[p] += gtg[a][b] / dt;
+			}
+		}
+	}
+}
+
+
+// 刻みの終わり t の電圧の倍率 (waveform の折れ線の左極限、無ければ 1。静磁場の過渡解析と同じ)
+static double ed_wave(double t)
+{
+	if (WaveN < 1) return 1;
+	int k = -1;
+	for (int m = 0; m < WaveN; m++) {
+		if (WaveT[m] < t) k = m;
+	}
+	if (k < 0) return WaveF[0];
+	if (k == (WaveN - 1)) return WaveF[k];
+	const double w = (t - WaveT[k]) / (WaveT[k + 1] - WaveT[k]);
+	return WaveF[k] + (w * (WaveF[k + 1] - WaveF[k]));
+}
+
+
+int solve_eddy3d_transient(FILE *fp_log)
+{
+	int ierr = 0;
+	fprintf(fp_log, "\n=== 3D eddy current, transient (A-phi, edge elements, backward Euler) ===\n");
+	if (!MeshMode || (NPort != 1)) {
+		fprintf(fp_log, "*** analysis A + transient needs an unstructured mesh and exactly one port\n");
+		return 1;
+	}
+	edge_build();
+	const int ne = NEdge, nn = NNode, n = ne + nn;
+	const int nelem = edge_elem_count();
+	const double dt = TransientTime / TransientSteps;
+	fprintf(fp_log, "  nodes = %d, elements = %d, edges = %d, unknowns = %d\n", nn, nelem, ne, n);
+	fprintf(fp_log, "  t_end = %.6e [s], %d steps (dt = %.6e [s]), voltage = %.6e [V]%s\n",
+		TransientTime, TransientSteps, dt, Volt, ((WaveN > 0) ? " x waveform" : " (step)"));
+
+	crs_t K, M;
+	crs_alloc_edge_node(&K);
+	crs_alloc_edge_node(&M);
+	assemble_eddy3d_tr(&K, &M, dt);
+
+	unsigned char *fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));
+	unsigned char *wall = (unsigned char *)calloc((size_t)ne, sizeof(unsigned char));
+	awall_mark(wall);
+	int nwall = 0;
+	for (int i = 0; i < ne; i++) {
+		fix[i] = wall[i];
+		nwall += wall[i];
+	}
+	unsigned char *cond = (unsigned char *)calloc((size_t)nn, sizeof(unsigned char));
+	for (int e = 0; e < nelem; e++) {
+		if (Material[edge_elem_mat(e)].sigma <= 0) continue;
+		const int32_t *nd = edge_elem_nodes(e);
+		const int nen2 = edge_elem_nen(e);
+		for (int l = 0; l < nen2; l++) cond[nd[l]] = 1;
+	}
+	int nelec = 0;
+	for (int i = 0; i < nn; i++) {
+		if (!cond[i]) fix[ne + i] = 1;
+		else if (NodeConductor[i] >= 0) {
+			fix[ne + i] = 1;
+			nelec++;
+		}
+	}
+	fprintf(fp_log, "  fixed : %d wall edges (A_t = 0), %d electrode nodes\n", nwall, nelec);
+
+	double *x = (double *)calloc((size_t)n, sizeof(double));		// [A^{n+1}; χ]
+	double *xo = (double *)calloc((size_t)n, sizeof(double));	// [A^n; 0]
+	double *xd = (double *)calloc((size_t)n, sizeof(double));
+	double *rhs = (double *)malloc((size_t)n * sizeof(double));
+	double *b = (double *)malloc((size_t)n * sizeof(double));
+	double *w1 = (double *)malloc((size_t)n * sizeof(double));
+	double *u = (double *)calloc((size_t)n, sizeof(double));
+	double *z = (double *)malloc((size_t)n * sizeof(double));
+
+	FILE *fcsv = fopen("ofe_transient.csv", "w");
+	if (fcsv) fprintf(fcsv, "t [s],V [V],I [A],W_in [J],W_mag [J],W_joule [J],iter\n");
+	double win = 0, wmag = 0, wjou = 0;
+	fprintf(fp_log, "  %6s %13s %13s %13s %6s\n", "step", "t [s]", "V [V]", "I [A]", "iter");
+	for (int st = 1; (st <= TransientSteps) && !ierr; st++) {
+		const double t = st * dt;
+		const double v = Volt * ed_wave(t);
+		// 右辺 M [A^n; 0] と Dirichlet の持ち上げ
+		for (int i = 0; i < n; i++) xo[i] = ((i < ne) ? x[i] : 0);
+		crs_spmv(&M, xo, rhs, NULL);
+		for (int i = 0; i < n; i++) xd[i] = 0;
+		for (int i = 0; i < nn; i++) {
+			if (fix[ne + i] && cond[i] && (NodeConductor[i] == 1)) xd[ne + i] = dt * v;
+		}
+		crs_spmv(&K, xd, w1, NULL);
+		for (int i = 0; i < n; i++) b[i] = (fix[i] ? 0 : (rhs[i] - w1[i]));
+		// 初期値は前の刻みの解 (固定の行は 0)
+		for (int i = 0; i < n; i++) u[i] = (fix[i] ? 0 : x[i]);
+		const int it = solver_cg(&K, b, u, fix, Solver.maxiter, Solver.nout, Solver.converg, NULL, "a3t");
+		if (it < 0) {
+			fprintf(fp_log, "*** linear solver did not converge (step %d)\n", st);
+			ierr = 1;
+			break;
+		}
+		for (int i = 0; i < n; i++) x[i] = u[i] + xd[i];
+		// 端子電流 : 電極の節点の反作用 (K x - M [A^n; 0])
+		crs_spmv(&K, x, w1, NULL);
+		double cur = 0;
+		for (int i = 0; i < nn; i++) {
+			if (fix[ne + i] && cond[i] && (NodeConductor[i] == 1)) cur += w1[ne + i] - rhs[ne + i];
+		}
+		// 仕事 : 端子 V I Δt、Joule zᵀ M z、磁気 (ΔA)ᵀ S A^{n+1} = zᵀ (K - M) x の A 部分
+		for (int i = 0; i < n; i++) z[i] = x[i] - xo[i];
+		double zmz = 0, zkx = 0;
+		crs_spmv(&M, z, w1, NULL);
+		for (int i = 0; i < n; i++) zmz += z[i] * w1[i];
+		double zmx = 0;
+		crs_spmv(&M, x, w1, NULL);
+		for (int i = 0; i < ne; i++) zmx += z[i] * w1[i];
+		crs_spmv(&K, x, w1, NULL);
+		for (int i = 0; i < ne; i++) zkx += z[i] * w1[i];
+		win += v * cur * dt;
+		wjou += zmz;
+		wmag += zkx - zmx;
+		if (fcsv) fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%.8e,%d\n", t, v, cur, win, wmag, wjou, it);
+		if ((st == TransientSteps) || ((st % ((TransientSteps >= 20) ? (TransientSteps / 20) : 1)) == 0)) {
+			fprintf(fp_log, "  %6d %13.6e %13.6e %13.6e %6d\n", st, t, v, cur, it);
+		}
+	}
+	if (fcsv) fclose(fcsv);
+	fprintf(fp_log, "  energy : terminals = %.12e, magnetic work = %.12e, joule = %.12e [J] "
+		"(terminals - magnetic - joule = %.3e)\n", win, wmag, wjou, win - wmag - wjou);
+	free(x); free(xo); free(xd); free(rhs); free(b); free(w1); free(u); free(z);
+	free(fix); free(wall); free(cond);
+	crs_free(&K);
+	crs_free(&M);
+	edge_free();
+	return ierr;
+}
+
+
 int eddy3d_heat_open(FILE *fp_log)
 {
 	edge_build();

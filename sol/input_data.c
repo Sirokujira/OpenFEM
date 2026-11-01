@@ -1687,6 +1687,28 @@ int input_data(FILE *fp)
 			}
 		}
 	}
+	else if (TransientOn && (Analysis == ANALYSIS_A)) {
+		// 3 次元渦電流の過渡解析 (A-φ、後退 Euler、ポート 1 を voltage x waveform で電圧駆動)。
+		// 線形の材料だけ (B-H / J-A は未対応)、周波数掃引とは併用しない
+		if (NPort != 1) {
+			printf("%s\n", "*** transient with analysis A needs exactly one port");
+			return 1;
+		}
+		if (TransientTheta != 1) {
+			printf("%s\n", "*** transient with analysis A supports theta = 1 (backward Euler) only");
+			return 1;
+		}
+		if (NFreqSweep > 0) {
+			printf("%s\n", "*** transient with analysis A cannot be combined with frequencysweep");
+			return 1;
+		}
+		for (int m = 0; m < NMaterial; m++) {
+			if ((Material[m].nbh[0] > 0) || Material[m].ja.on) {
+				printf("%s\n", "*** transient with analysis A supports linear materials only (no bh / ja)");
+				return 1;
+			}
+		}
+	}
 	else if (TransientOn && (Analysis == ANALYSIS_M)) {
 		// 静磁場の過渡解析 (渦電流 σ∂A/∂t + ヒステリシス)。断面 2 次元の構造格子・
 		// 単一ポート・後退 Euler に限る (J-A の履歴は刻みの終わりの状態で確定させる)
@@ -1717,8 +1739,8 @@ int input_data(FILE *fp)
 		}
 	}
 	else if (TransientOn) {
-		printf("%s\n", "*** transient needs thermal or analysis M (it is the time-dependent form "
-			"of the electro-thermal coupling or of the magnetostatic analysis)");
+		printf("%s\n", "*** transient needs thermal or analysis M / A (it is the time-dependent form "
+			"of the electro-thermal coupling, of the magnetostatic analysis or of the 3-D eddy current)");
 		return 1;
 	}
 	else {
@@ -1820,8 +1842,8 @@ int input_data(FILE *fp)
 		}
 		// A 解析 (3 次元渦電流) は周波数と導電材料が要る
 		if (Analysis & ANALYSIS_A) {
-			if (Freq <= 0) {
-				printf("%s\n", "*** analysis A requires the frequency key");
+			if ((Freq <= 0) && !TransientOn) {
+				printf("%s\n", "*** analysis A requires the frequency key (or transient)");
 				return 1;
 			}
 			int haveSigma = 0;

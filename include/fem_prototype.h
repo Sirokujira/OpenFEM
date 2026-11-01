@@ -101,6 +101,7 @@ int tet_grad_pub(const int32_t [4], double [4][3], double *);
 void crs_alloc_edge_node(crs_t *);
 void assemble_eddy3d(crs_t *, crs_t *, double, const double *);
 int solve_eddy3d(FILE *);
+int solve_eddy3d_transient(FILE *);
 
 // assemble.c (公開した材料係数)
 void material_coef_pub(int, int, double [6]);

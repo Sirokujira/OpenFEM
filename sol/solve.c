@@ -1627,6 +1627,9 @@ static int solve_one(FILE *fp_log)
 				HaveF = 1;
 			}
 		}
+		else if (TransientOn) {
+			ierr |= solve_eddy3d_transient(fp_log);
+		}
 		else {
 			ierr |= solve_eddy3d(fp_log);
 		}
