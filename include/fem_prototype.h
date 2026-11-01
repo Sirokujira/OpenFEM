@@ -220,4 +220,8 @@ void comline(int, char *[], int *, int *, char *);
 #define ANDERSON_MAX (8)
 void anderson_step(int64_t, double *, const double *, double *, double *, double *, double *, int, int *, double);
 
+// expr.c
+int expr_compile(const char *, expr_t *);
+double expr_eval(const expr_t *, double, double, double);
+
 #endif		// _FEM_PROTOTYPE_H_

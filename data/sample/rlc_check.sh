@@ -4564,6 +4564,72 @@ th_reject "radiationprofile with an emissivity above 1" thpfx_eps.ofe "exceeds 1
 awk '/^convection/{print; print "convectionprofile = x 0 0 1 0"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thpfx_zero.ofe"
 th_reject "convectionprofile with all factors zero" thpfx_zero.ofe "all factors are zero"
 
+# ---- 位置の式の h / ε (convectionexpr / radiationexpr、sol/expr.c) ----
+#
+# 面の中心 (x, y, z) で式 f を評価して h (ε) に掛ける (折れ線もあれば両方の積)。
+#   (a) f = 1 と「折れ線 2 x 式 0.5」は式なしと同じ演算 -> ofe.out がバイト一致
+#   (b) step() の式は 2 進で正確な倍率 (0.5 / 1.25 / 2) になるので、直方体の行とバイト一致
+#       (x の段差 : 構造格子・六面体・四面体、y の 3 段、輻射、演算子の意味)。変数の取り違えはここで落ちる
+#   (c) 滑らかな式 1 + 0.5 sin(300x + 0.3) を、面の中心 (x = (i + 1/2) dx) を節点にして awk で同じ式の値を
+#       入れた折れ線と比べる。節点では折れ線が値そのものなので R・T_max が丸めの範囲で一致
+#   (d) 構文の誤り (入力エラー) と、面で負になる式・ε f > 1 (実行時のエラー)
+echo "[thermal h(r) expression] arbitrary position-dependent convection / emissivity (convectionexpr / radiationexpr)"
+awk '/^convection/{print; print "convectionexpr = 1"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thex_1.ofe"
+pf_same "expression f = 1 == no expression" thermal_conv.ofe thex_1.ofe
+awk '/^convection/{print; print "convectionprofile = x 0 2 1 2"; print "convectionexpr = 0.5"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thex_pe.ofe"
+pf_same "profile 2 x expression 0.5 == no profile / expression" thermal_conv.ofe thex_pe.ofe
+# (b)
+awk '/^convection/{print "convection = 400 30"; print "convectionexpr = 0.5 + 1.5 * step(x - 0.005)"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thex_s.ofe"
+pf_same "step(x) expression == two boxes (structured grid, convection)" thex_s.ofe thpf_b.ofe
+#     演算子の意味 (^ は右結合 : 2^3^2 = 2^9 = 512、左結合なら 64)・単項の負号・min / max / abs・割り算を
+#     2 進で正確に同じ倍率になる形で : 2^3^2/1024 = 0.5、max(min(3/2, 7) step, -abs(-1)) = 1.5 step
+awk '/^convection/{print "convection = 400 30"; print "convectionexpr = 2^3^2 / 1024 + max(min(3 / 2, 7) * step(x - 0.005), -abs(-1))"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thex_op.ofe"
+pf_same "operators (right-associative ^, unary minus, min / max / abs) == two boxes" thex_op.ofe thpf_b.ofe
+awk '/^convection/{print "radiation = 0.8 30"; print "radiationexpr = 0.5 + 0.5*step(x-0.005)"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thex_rs.ofe"
+pf_same "step(x) expression == two boxes (structured grid, radiation)" thex_rs.ofe thpf_rb.ofe
+awk '/^convection/{print "convection = 400 30"; print "convectionexpr = 0.5 + 0.75 * step(y - 0.4e-3) + 0.75 * step(y - 0.6e-3)"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thex_y.ofe"
+pf_same "y expression (three levels) == three boxes" thex_y.ofe thpf_yb.ofe
+for m in thermal_hex thermal_tet; do
+	awk '/^heatsink = 1/{next} /^thermal/{print "convection = 400 30"; print "convectionexpr = 0.5 + 1.5 * step(x - 0.005)"} {print}' \
+		"$SRC/$m.ofe" > "$WORK/thex_${m}_s.ofe"
+	pf_same "step(x) expression == two boxes ($m)" "thex_${m}_s.ofe" "thpf_${m}_b.ofe"
+done
+# (c) x を 20 セルにして面の中心を 20 点 (折れ線の上限 32 点に収める)
+awk '/^xmesh/{print "xmesh = 0 20 0.01"; next} /^convection/{print; print "convectionexpr = 1 + 0.5 * sin(300 * x + 0.3)"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thex_c.ofe"
+awk 'BEGIN { s = "convectionprofile = x"; for (i = 0; i < 20; i++) { x = (i + 0.5) * (0.01 / 20); s = s sprintf(" %.17g %.17g", x, 1 + 0.5 * sin(300 * x + 0.3)) } print s }' > "$WORK/thex_pf.txt"
+awk -v pf="$WORK/thex_pf.txt" '/^xmesh/{print "xmesh = 0 20 0.01"; next} /^convection/{print; while ((getline l < pf) > 0) print l; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thex_cp.ofe"
+th_run thex_cp.ofe; r1=$(th_r); t1=$(th_t)
+th_run thex_c.ofe
+compare "smooth expression == profile through the face centres : R [ohm]" "$(th_r)" "$r1" 1e-12
+compare "smooth expression == profile through the face centres : T_max [degC]" "$(th_t)" "$t1" 1e-12
+th_energy "smooth expression"
+grep -q "convection h(r) = h x f(x, y, z), f = 1 + 0.5 \* sin(300 \* x + 0.3) (at the face centre)" "$WORK/ofe.log" \
+	&& echo "  the expression is echoed to the log -> OK" || { echo "  the expression is not in the log -> NG" >&2; status=1; }
+th_run thermal_conv.ofe
+res=$(awk -v a="$t1" -v b="$(th_t)" 'BEGIN { d = (a - b) / b; if (d < 0) d = -d; printf "%s (%.2e)", (d > 1e-3) ? "OK" : "NG", d }')
+echo "  the smooth expression changes T_max against a constant h (control) : $res"
+case "$res" in NG*) status=1 ;; esac
+# (d)
+for bad in "1 +" "sin(x" "foo(x)" "x y" "min(x)" "2 * (x + 1))"; do
+	awk -v e="$bad" '/^convection/{print; print "convectionexpr = " e; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thexx.ofe"
+	th_reject "convectionexpr '$bad'" thexx.ofe "invalid convectionexpr"
+done
+awk '/^convection/{print; print "convectionexpr = 1"; print "convectionexpr = 2"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thexx2.ofe"
+th_reject "convectionexpr given twice" thexx2.ofe "invalid convectionexpr"
+ex_runerr() {	# ex_runerr <ラベル> <ofe> <ログの文字列> : 実行時に止まり、ログに理由が出ること
+	if (cd "$WORK" && "$OFE" -n 2 "$2" > /dev/null 2>&1); then
+		echo "  $1 : not rejected -> NG"; status=1
+	elif grep -q "$3" "$WORK/ofe.log"; then
+		echo "  $1 : rejected -> OK"
+	else
+		echo "  $1 : rejected for a different reason -> NG"; status=1
+	fi
+}
+awk '/^convection/{print; print "convectionexpr = x - 0.005"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thexx_neg.ofe"
+ex_runerr "convectionexpr negative on some faces" thexx_neg.ofe "is negative or not finite on 80 exposed faces"
+awk '/^convection/{print "radiation = 0.8 30"; print "radiationexpr = 1 + 100 * x"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thexx_eps.ofe"
+ex_runerr "radiationexpr with e f > 1" thexx_eps.ofe "radiationexpr = 1 + 100 \* x is negative or not finite (or e f > 1)"
+
 # ---- 面どうしの相互放射 (radiationexchange、構造格子) ----
 #
 # 形態係数は閉形式 (周回積分 A_i F_ij = (1/2π) ∮∮ ln r dl_i・dl_j の平行な辺の対)、
@@ -5062,7 +5128,7 @@ grep -v '^#' "$SRC/bar_eddy.ofe" | awk -v ms="$jms" '/^frequency/{next} /^voltag
 	/^analysis/{print "transient = 2e-4 50"; print "ja = 2 " ms " 1e8 0 1e6 0.999999"; print "nlsolver = 50 1e-9 1"} {print}' > "$WORK/aja_nl.ofe"
 (cd "$WORK" && "$OFE" -n 2 aja_nl.ofe > /dev/null 2>&1) || { echo "  aja_nl : the run failed -> NG" >&2; status=1; }
 res=$(paste -d, "$WORK/aja_lin.csv" "$WORK/ofe_transient.csv" | awk -F, 'NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
-	END { printf "%s (%d steps, max %.1e)", ((n == 50) && (m < 1e-7)) ? "OK" : "NG", n, m }')
+	END { ok = "NG"; if ((n == 50) && (m < 1e-7)) ok = "OK"; printf "%s (%d steps, max %.1e)", ok, n, m + 0 }')
 echo "  near-linear J-A (c = 1 - 1e-6, |He| < 1e-4 a) == linear mur = 1 + c Ms/(3a) : I(t) : $res"
 case "$res" in NG*) status=1 ;; esac
 nfp=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
@@ -5121,7 +5187,7 @@ nfp0=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/aja_dc.log")
 sed 's/^mesh = .*/mesh = bar_tet_rot.msh/' "$WORK/aja_dc.ofe" > "$WORK/aja_dcr.ofe"
 (cd "$WORK" && "$OFE" -n 2 aja_dcr.ofe > /dev/null 2>&1) || { echo "  aja_dcr : the run failed -> NG" >&2; status=1; }
 res=$(paste -d, "$WORK/aja_dc.csv" "$WORK/ofe_transient.csv" | awk -F, 'NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
-	END { printf "%s (%d steps, max %.1e)", ((n == 20) && (m < 1e-6)) ? "OK" : "NG", n, m }')
+	END { ok = "NG"; if ((n == 20) && (m < 1e-6)) ok = "OK"; printf "%s (%d steps, max %.1e)", ok, n, m + 0 }')
 echo "  rigidly rotated mesh (hysteresis, voltage step) : I(t) == axis-aligned mesh : $res"
 case "$res" in NG*) status=1 ;; esac
 nfp=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
@@ -5153,7 +5219,7 @@ grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^voltage/{print "vol
 	/^analysis/{print "transient = 2e-4 50"; printf "bh = 2 100 %.17g\n", 100 * 4e-7 * atan2(0, -1) * 50; print "nlsolver = 50 1e-9 1"} {print}' > "$WORK/abh_lin.ofe"
 (cd "$WORK" && "$OFE" -n 2 abh_lin.ofe > /dev/null 2>&1) || { echo "  abh_lin : the run failed -> NG" >&2; status=1; }
 res=$(paste -d, "$WORK/aja_lin.csv" "$WORK/ofe_transient.csv" | awk -F, 'NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
-	END { printf "%s (%d steps, max %.1e)", ((n == 50) && (m < 1e-7)) ? "OK" : "NG", n, m }')
+	END { ok = "NG"; if ((n == 50) && (m < 1e-7)) ok = "OK"; printf "%s (%d steps, max %.1e)", ok, n, m + 0 }')
 echo "  straight-line B-H curve == linear mur = 50 : I(t) : $res"
 case "$res" in NG*) status=1 ;; esac
 nfp=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
@@ -5177,7 +5243,7 @@ fi
 sed 's/^mesh = .*/mesh = bar_tet_rot.msh/' "$WORK/abh_qs.ofe" > "$WORK/abh_qsr.ofe"
 (cd "$WORK" && "$OFE" -n 2 abh_qsr.ofe > /dev/null 2>&1) || { echo "  abh_qsr : the run failed -> NG" >&2; status=1; }
 res=$(paste -d, "$WORK/abh_qs.csv" "$WORK/ofe_transient.csv" | awk -F, 'NR > 1 { d = ($3 - $10) / 0.5; if (d < 0) d = -d; if (d > m) m = d; n++ }
-	END { printf "%s (%d steps, max %.1e of the peak)", ((n == 64) && (m < 1e-6)) ? "OK" : "NG", n, m }')
+	END { ok = "NG"; if ((n == 64) && (m < 1e-6)) ok = "OK"; printf "%s (%d steps, max %.1e of the peak)", ok, n, m + 0 }')
 echo "  B-H curve, rigidly rotated mesh : I(t) == axis-aligned mesh : $res"
 case "$res" in NG*) status=1 ;; esac
 nfp=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
@@ -5256,6 +5322,12 @@ awk '/^convection =/{next} /^thermal/{print "heatsink = 0 20"} {print}' "$WORK/t
 lint_expect "convectionprofile without convection" lint_pf_noconv.ofe yes
 awk '/^thermal/{next} {print}' "$WORK/thpf_s.ofe" | awk '!/^kthermal|^convection = /' > "$WORK/lint_pf_noth.ofe"
 lint_expect "convectionprofile without thermal" lint_pf_noth.ofe yes
+lint_expect "convectionexpr (clean)" thex_s.ofe no
+lint_expect "radiationexpr (clean)" thex_rs.ofe no
+awk '/^convection =/{next} /^thermal/{print "heatsink = 0 20"} {print}' "$WORK/thex_s.ofe" > "$WORK/lint_ex_noconv.ofe"
+lint_expect "convectionexpr without convection" lint_ex_noconv.ofe yes
+awk '/^thermal/{next} {print}' "$WORK/thex_s.ofe" | awk '!/^kthermal|^convection = /' > "$WORK/lint_ex_noth.ofe"
+lint_expect "convectionexpr without thermal" lint_ex_noth.ofe yes
 awk '/^thermal/{print "radiationexchange = 1"} {print}' "$SRC/thermal_bar.ofe" > "$WORK/lint_rx_norad.ofe"
 lint_expect "radiationexchange without radiation" lint_rx_norad.ofe yes
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)

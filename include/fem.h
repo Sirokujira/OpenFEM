@@ -76,6 +76,16 @@ extern "C" {
 //   dM/dH = [ (1-c) δ_M (M_an-M)/(δk - α(M_an-M)) + c dM_an/dHe ]
 //         / [ 1 - α c dM_an/dHe ]
 #define MAXTEMPTAB (32)		// 温度係数の表の点数の上限
+#define EXPR_MAXOP (256)		// 位置の式 (convectionexpr / radiationexpr) の命令の数の上限
+#define EXPR_MAXSTACK (32)		// 位置の式の評価のスタックの深さの上限
+#define EXPR_MAXLEN (1024)		// 位置の式の文字数の上限
+
+// 位置の式 f(x, y, z) を逆ポーランド記法に翻訳したもの (sol/expr.c)
+typedef struct {
+	int n;
+	int op[EXPR_MAXOP];
+	double val[EXPR_MAXOP];
+} expr_t;
 
 typedef struct {
 	int    on;					// 1 : このモデルを使う
@@ -363,6 +373,10 @@ EXTERN double ConvTabT[MAXTEMPTAB], ConvTabF[MAXTEMPTAB];	// 面の温度 [degC]
 EXTERN int ProfN[2];			// 面の係数の位置の折れ線 (0 : 対流 h、1 : 輻射 ε) の点数 (0 : 位置に依らない)
 EXTERN int ProfAxis[2];			// 折れ線の座標軸 (0 = x, 1 = y, 2 = z)
 EXTERN double ProfX[2][MAXTEMPTAB], ProfF[2][MAXTEMPTAB];	// 位置 [m] と倍率
+EXTERN int ExprOn[2];				// 面の係数の位置の式 (0 : 対流 h、1 : 輻射 ε) がある
+EXTERN expr_t ExprF[2];				// 位置の式 (面の中心で評価して倍率にする)
+EXTERN char ExprStr[2][EXPR_MAXLEN];	// 位置の式の文字列 (ログ用)
+EXTERN int ExprBad[2];				// 位置の式が負・非有限 (輻射は ε f > 1 も) になった面の数
 EXTERN int RadExchange;			// 1 : 輻射の面どうしの相互放射 (形態係数、構造格子)
 EXTERN int RadTabN;				// 輻射の ε の温度依存の折れ線の点数 (0 : ε は一定)
 EXTERN double RadTabT[MAXTEMPTAB], RadTabF[MAXTEMPTAB];	// 面の温度 [degC] と ε の倍率

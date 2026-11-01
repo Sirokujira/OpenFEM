@@ -284,6 +284,9 @@ int input_data(FILE *fp)
 	RadTabN = 0;
 	ProfN[0] = ProfN[1] = 0;
 	ProfAxis[0] = ProfAxis[1] = 0;
+	ExprOn[0] = ExprOn[1] = 0;
+	ExprBad[0] = ExprBad[1] = 0;
+	ExprStr[0][0] = ExprStr[1][0] = '\0';
 	RadExchange = 0;
 	NConv = 0;
 	NRad = 0;
@@ -1037,6 +1040,33 @@ int input_data(FILE *fp)
 			ProfAxis[k] = ax - 'x';
 			ProfN[k] = np;
 		}
+		else if (!strcmp(strkey, "convectionexpr") || !strcmp(strkey, "radiationexpr")) {
+			// convectionexpr = <式 f(x, y, z)>   (radiationexpr も同じ)
+			//   h (ε) に面の中心での f を掛ける (convectionprofile と併用すれば両方の積)。式は + - * / ^、
+			//   括弧、x y z [m]、pi、sin cos tan exp log sqrt abs tanh step min max pow (sol/expr.c)
+			const int k = ((strkey[0] == 'r') ? 1 : 0);
+			char buf[EXPR_MAXLEN];
+			size_t len = 0;
+			buf[0] = '\0';
+			for (int i = 2; i < ntoken; i++) {
+				const size_t l = strlen(token[i]);
+				if ((len + l + 2) >= sizeof(buf)) {
+					len = sizeof(buf);
+					break;
+				}
+				if (i > 2) buf[len++] = ' ';
+				memcpy(&buf[len], token[i], l);
+				len += l;
+				buf[len] = '\0';
+			}
+			if ((nval < 1) || ExprOn[k] || (len >= sizeof(buf)) || expr_compile(buf, &ExprF[k])) {
+				printf("*** invalid %s (syntax error, unknown name or given twice) : %s\n", strkey,
+					((len < sizeof(buf)) ? buf : "(too long)"));
+				return 1;
+			}
+			strcpy(ExprStr[k], buf);
+			ExprOn[k] = 1;
+		}
 		else if (!strcmp(strkey, "radiationexchange")) {
 			// radiationexchange = 1 : 輻射を課した露出面どうしの相互放射 (灰色・拡散、形態係数は
 			//   閉形式、遮蔽は面の中心どうしの線分で判定)。0 なら各面は周囲 (T_r) とだけ交換する
@@ -1638,6 +1668,14 @@ int input_data(FILE *fp)
 			input_warn("radiationprofile has no effect without radiation (it scales "
 				"the emissivity of the radiation lines)");
 		}
+		if (ExprOn[0] && (NConv < 1)) {
+			input_warn("convectionexpr has no effect without convection (it scales "
+				"the h of the convection lines)");
+		}
+		if (ExprOn[1] && (NRad < 1)) {
+			input_warn("radiationexpr has no effect without radiation (it scales "
+				"the emissivity of the radiation lines)");
+		}
 		// 倍率が全部 0 なら面から熱が出ない (逃げ場の検査は行の値で見ているので、ここで弾く)
 		for (int k = 0; k < 2; k++) {
 			double fm = 0;
@@ -1774,6 +1812,14 @@ int input_data(FILE *fp)
 		}
 		if (ProfN[1] > 0) {
 			input_warn("radiationprofile has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (ExprOn[0]) {
+			input_warn("convectionexpr has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (ExprOn[1]) {
+			input_warn("radiationexpr has no effect without thermal (it is only "
 				"read by the electro-thermal coupling)");
 		}
 		if (RadTabN > 0) {

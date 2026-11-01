@@ -74,6 +74,7 @@ set(SOL_SOURCES
     sol/unstruct.c
     sol/edge.c
     sol/eddy3d.c
+    sol/expr.c
     sol/fieldout.c
     sol/hdf5out.c
     sol/mpiwrap.c

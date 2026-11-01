@@ -355,11 +355,23 @@ static const surfbc_t *surf_bc(int rad, double xc, double yc, double zc, int *id
 	for (int e = nb - 1; e >= 0; e--) {
 		if (surf_in(&list[e], xc, yc, zc)) {
 			if (idx) *idx = e;
-			if (ProfN[k] < 1) return &list[e];
+			if ((ProfN[k] < 1) && !ExprOn[k]) return &list[e];
 			const double r[3] = {xc, yc, zc};
 			double sl;
 			prof[k] = list[e];
-			prof[k].c = list[e].c * tab_eval(ProfN[k], ProfX[k], ProfF[k], r[ProfAxis[k]], &sl);
+			if (!ExprOn[k]) {
+				prof[k].c = list[e].c * tab_eval(ProfN[k], ProfX[k], ProfF[k], r[ProfAxis[k]], &sl);
+				return &prof[k];
+			}
+			// 位置の式 (convectionexpr / radiationexpr)。折れ線もあれば両方の積。負・非有限
+			// (輻射は ε f > 1 も) は 0 にして数え、solve_thermal が入力エラーにする
+			double f = expr_eval(&ExprF[k], xc, yc, zc);
+			if (ProfN[k] > 0) f = tab_eval(ProfN[k], ProfX[k], ProfF[k], r[ProfAxis[k]], &sl) * f;
+			if (!((f >= 0) && (f <= 1e300)) || (k && ((list[e].c * f) > 1))) {
+				ExprBad[k]++;
+				f = 0;
+			}
+			prof[k].c = list[e].c * f;
 			return &prof[k];
 		}
 	}
@@ -2607,6 +2619,11 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 		for (int i = 0; i < ProfN[k]; i++) fprintf(fp_log, " (%g, %g)", ProfX[k][i], ProfF[k][i]);
 		fprintf(fp_log, " (at the face centre)\n");
 	}
+	for (int k = 0; k < 2; k++) {
+		if (!ExprOn[k]) continue;
+		fprintf(fp_log, "  %s(r) = %s x f(x, y, z), f = %s (at the face centre)\n",
+			(k ? "emissivity e" : "convection h"), (k ? "e" : "h"), ExprStr[k]);
+	}
 	if ((RadEps > 0) && (RadTabN > 0)) {
 		fprintf(fp_log, "  emissivity e(T) = e f(T), f :");
 		for (int k = 0; k < RadTabN; k++) fprintf(fp_log, " (%g, %g)", RadTabT[k], RadTabF[k]);
@@ -2699,6 +2716,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 		// 係数が正の露出面の数。直方体を付けた行は、露出面に 1 つも当たらなければ
 		// 書き間違い (座標の桁違いなど) なので黙って無視せず入力エラーにする
 		int *hits = (int *)calloc((size_t)(NConv + NRad), sizeof(int));
+		ExprBad[0] = ExprBad[1] = 0;		// 数えるのはこの 1 回の走査の面 (組み立ての走査と二重に数えない)
 		nface = (int64_t)surf_faces(NULL, NULL, NULL, kcell, 2, hits);
 		for (int e = 0; e < (NConv + NRad); e++) {
 			const surfbc_t *bc = ((e < NConv) ? &ConvBC[e] : &RadBC[e - NConv]);
@@ -2710,6 +2728,13 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 			}
 		}
 		free(hits);
+		for (int k = 0; k < 2; k++) {
+			if (ExprOn[k] && (ExprBad[k] > 0)) {
+				fprintf(fp_log, "*** thermal : %s = %s is negative or not finite%s on %d exposed faces\n",
+					(k ? "radiationexpr" : "convectionexpr"), ExprStr[k], (k ? " (or e f > 1)" : ""), ExprBad[k]);
+				ierr = 1;
+			}
+		}
 		fprintf(fp_log, "  %s : %lld exposed faces\n",
 			((NConv > 0) ? ((NRad > 0) ? "convection / radiation" : "convection") : "radiation"),
 			(long long)nface);
