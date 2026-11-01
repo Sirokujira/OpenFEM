@@ -327,7 +327,8 @@ double bh_nu(const material_t *mt, int ax, double b)
 static void bh_nu_dnu(const material_t *mt, double b, double *nu, double *dnudb2)
 {
 	if (mt->nbh[0] <= 0) {
-		*nu = 1 / (MU0 * mt->mu6[0]);
+		// 線形材料の μr にも温度依存を掛ける (material_coef_pub と同じ倍率)
+		*nu = 1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
 		*dnudb2 = 0;
 		return;
 	}
@@ -512,7 +513,7 @@ void assemble_ja(const double *az, double *res, double *nucell)
 				nud = dhdb;
 			}
 			else {
-				nu = nud = 1 / (MU0 * mt->mu6[0]);
+				nu = nud = 1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
 			}
 			nusum += nud;
 

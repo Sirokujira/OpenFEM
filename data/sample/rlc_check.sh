@@ -1845,6 +1845,27 @@ tt_run tts_line
 compare "tempcotable (a straight line) == tempco, R(85 degC) [ohm]" "$(tt_val tts_line R)" "$(tt_val tts_lin R)" 1e-12
 compare "tempcotable : R(85 degC) = 1.76 R(20 degC) [ohm]" "$(tt_val tts_tab R)" \
 	"$(awk -v r="$(tt_val tts_ref R)" 'BEGIN { printf "%.12e", 1.76 * r }')" 1e-7
+#   (d4) 非線形 (B-H) の M で、同居する**線形**磁性体の μr にも表が効くこと。非線形の
+#       経路は要素ごとの ν を自前で作るので、そこで 1 次係数を直接書くと表が黙って
+#       無視される (実際にあった)。板間を非線形層と線形層 (μr0 = 4、100 degC で 0.5 倍)
+#       に分け、μr = 2 を直接書いたものと ofe.out がバイト一致することを見る
+for c in tab ref; do mkdir -p "$WORK/ttnl_$c"; done
+awk '/^geometry/{print "geometry = 2 1 0 1e-3 0.05e-3 0.15e-3 0 1e-4"
+		print "material = 1.0 0"; print "mur = 3 4.0"; print "mutemptable = 3 20 1 100 0.5"
+		print "geometry = 3 1 0 1e-3 0.15e-3 0.25e-3 0 1e-4"; next}
+	/^analysis/{print "temperature = 100"} {print}' "$SRC/plate_line_bh.ofe" > "$WORK/ttnl_tab/x.ofe"
+awk '/^geometry/{print "geometry = 2 1 0 1e-3 0.05e-3 0.15e-3 0 1e-4"
+		print "material = 1.0 0"; print "mur = 3 2.0"
+		print "geometry = 3 1 0 1e-3 0.15e-3 0.25e-3 0 1e-4"; next}
+	/^analysis/{print "temperature = 100"} {print}' "$SRC/plate_line_bh.ofe" > "$WORK/ttnl_ref/x.ofe"
+mkdir -p "$WORK/ttnl_lin"
+awk '/^mutemptable/{print "mutempco = 3 -5e-3 0"; next} {print}' "$WORK/ttnl_tab/x.ofe" > "$WORK/ttnl_lin/x.ofe"
+tt_run ttnl_tab; tt_run ttnl_ref; tt_run ttnl_lin
+tt_same "mutemptable on a linear layer inside a nonlinear (B-H) M problem == mur written directly" ttnl_tab ttnl_ref
+#       1 次係数 (mutempco) も同じ。**Newton の反復の中で線形材料の ν を作る関数が温度を
+#       見ておらず、1 次係数でも黙って無視されていた** (この検査を足して見つかった)
+tt_same "mutempco on a linear layer inside a nonlinear (B-H) M problem == mur written directly" ttnl_lin ttnl_ref
+
 #   (e) 弾く入力 (理由まで見る)
 tt_reject() {	# tt_reject <ラベル> <sed の置換> <理由>
 	sed "$2" "$SRC/temp_mur.ofe" > "$WORK/ttx.ofe"
