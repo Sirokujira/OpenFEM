@@ -26,8 +26,12 @@ title = 3D eddy current (A-phi) with a nonlinear (B-H) magnetic layer
 # 格子の離散化誤差は線形の層 (μr = 50) と同じ L -0.028% (実測)。
 #
 # この構成は**磁束で駆動される** (層の μ を上げると H がほぼ反比例して下がる) ので、
-# H を独立変数にした更新の収束は遅く、Anderson 加速で 18〜56 回かかる。電流で
+# H を独立変数にした更新の収束は遅く、Anderson 加速で 16〜38 回かかる。電流で
 # 駆動される構成 (plate_line_bh_ac.ofe、H が Ampère で決まる) では 2 回。
+# 許容 (max dν/ν < 1e-7) は内側の COCG (1e-9) より緩くすること。同じ 1e-9 に
+# すると反復の終わりが丸めの雑音で決まり (dν/ν が 1e-6〜1e-9 を往復する)、回数が
+# コンパイラ次第になる (実測: 手元 54 回、CI の 3 OS では上限 60 回を越えて落ちた)。
+# L は 1e-7 の時点で 9 桁収束している。
 #
 mesh = bar_air.msh
 material = 1.0 5.8e7
@@ -43,7 +47,7 @@ awall = 20
 
 frequency = 1e2
 current = 200
-nlsolver = 60 1e-9 1.0
+nlsolver = 100 1e-7 1.0
 analysis = A
 solver = 20000 2000 1e-9
 end
