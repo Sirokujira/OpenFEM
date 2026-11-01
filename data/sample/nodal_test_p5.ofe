@@ -1,0 +1,19 @@
+OpenFEM 1 0
+title = nodal element (P5) self test, anisotropic epsilon
+#
+# 5 次四面体 (56 節点、gmsh の tet56 = 型 31) の自己検証 (analysis = P)。直線要素の箱
+# (box_p5.msh、box_p3.geo を gmsh_geo_order.py で 5 次にしたもの) で
+#   (a) K 1 = 0、(b) 1 次・(c) 2 次・(f) 3 次・(g) 4 次・(h) 5 次の φ で φᵀKφ = ∫(∇φ)ᵀε(∇φ) dV、
+#   (e) 重心の勾配、(d) 対称性
+# を機械精度で見る。**5 次特有の基底を検査できるのは (h) だけ**。(h) の厳密値は解析的な
+# ∇φ を別の積分則 (Duffy + 7 点) で積分したもので、要素行列 (6 点) と独立。
+#
+mesh = box_p5.msh
+material = 1.0 0.0
+anisoepsr = 2 5.0 3.5 2.5 0.8 0.6 1.3
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end

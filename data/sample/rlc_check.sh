@@ -3608,6 +3608,62 @@ th_reject "35-node tetrahedra with 10-node electrode triangles" p4x_tri.ofe "tri
 sed 's/^analysis = .*/analysis = E/' "$WORK/box_p4.ofe" > "$WORK/p4x_e.ofe"
 th_reject "analysis E on a 35-node tetrahedral mesh" p4x_e.ofe "need a first-order mesh"
 
+# ---- 5 次要素 (gmsh の tet56 = 型 31 / tri21 = 型 25) ----
+#
+# 並びは gmsh 4.15.2 の出力を重心座標で分類した実測の表 (unstruct.c の TET5_A / TRI5_A。同じ分類で TET4_A /
+# TRI4_A が全項一致)。積分は Duffy + 6 点 (216 点)、自己検証の右辺は 7 点。格子は gmsh_geo_order.py。
+#   (a) 箱の平行平板 : C が閉形式に全桁。2.2 / 4.1 / バイナリ 4.1 で rlc.csv が一致
+#   (b) analysis = P : 5 次の φ の恒等式 (h) と重心の勾配が機械精度 (**5 次特有の基底を見るのはこれだけ**)
+#   (c) 曲がった同軸 (h = 0.4mm) : C' 2e-5・体積 5e-6 以内 (実測 −6.7e-6 / +1.9e-6)。奇数次の幾何誤差は 1 つ下の
+#       偶数次と同じ h⁶ なので、**4 次に勝つことは assert しない** (実測 4 次 +8.5e-6 / −9.5e-7、偽陽性になる)
+#   (d) 断面 2 次元の 10 MHz の表皮効果 : R が閉形式に 2e-9 以内 (実測 −2.9e-10)、同じ頂点の 4 次 (−1.3e-8) より 5 倍以上よい
+#   (e) 5 次の四面体の面に 4 次の三角形、E は弾く。面の多重指数を入れ替えると写像が裏返って setup で落ちる (実測)
+echo "[order-5] 56-node tetrahedra / 21-node triangles (gmsh tet56 / tri21)"
+for m in box_p5 box_p5_41 box_p5_bin_41 coax_p5 plate2d_p5; do cp "$SRC/$m.msh" "$WORK/"; done
+sed 's/^mesh = .*/mesh = box_p5.msh/' "$SRC/box_p3.ofe" > "$WORK/box_p5.ofe"
+(cd "$WORK" && "$OFE" -n 2 box_p5.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "C (tet56 box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/p5_22.csv"
+for f in box_p5_41 box_p5_bin_41; do
+	sed "s/^mesh = .*/mesh = $f.msh/" "$WORK/box_p5.ofe" > "$WORK/p5f.ofe"
+	(cd "$WORK" && "$OFE" -n 2 p5f.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/p5f.csv"
+	if cmp -s "$WORK/p5_22.csv" "$WORK/p5f.csv"; then echo "  56-node tetrahedra, $f == ASCII 2.2 -> OK"
+	else echo "  56-node tetrahedra, $f differs from ASCII 2.2 -> NG" >&2; status=1; fi
+done
+run_case nodal_test_p5
+if grep -q "(h) quintic" "$WORK/ofe.log" && grep -q "centroid gradient (quintic" "$WORK/ofe.log" && grep -q "result : passed" "$WORK/ofe.log"; then
+	echo "  P5 self test (quintic field identity, machine precision) : $(awk '/\(h\) quintic/ { print $NF; exit }' "$WORK/ofe.log") -> OK"
+else
+	echo "  P5 self test : the quintic-field identity was not run or failed -> NG" >&2
+	status=1
+fi
+set -- $(p4c coax_p5)
+res=$(awk -v c="$1" -v v="$2" 'BEGIN { ce = 2 * atan2(0, -1) * 8.8541878128e-12 * 2.1 / log(3)
+	ve = atan2(0, -1) * (1.5e-3 ^ 2 - 0.5e-3 ^ 2) * 0.1e-3
+	e = (c - ce) / ce; w = (v - ve) / ve; ae = (e < 0) ? -e : e; aw = (w < 0) ? -w : w
+	printf "%s (C %+.2e, volume %+.2e)", ((ae <= 2e-5) && (aw <= 5e-6)) ? "OK" : "NG", e, w }')
+echo "  curved coax, order 5 (h = 0.4 mm) : C' within 2e-5 and the isoparametric volume within 5e-6 : $res"
+case "$res" in NG*) status=1 ;; esac
+sed -e "s/plate2d.msh/plate2d_p5.msh/" -e "s/^frequency = .*/frequency = 1e7/" "$SRC/plate2d_ac.ofe" > "$WORK/p5ac.ofe"
+(cd "$WORK" && "$OFE" -n 2 p5ac.ofe > /dev/null && "$OFE_POST" > /dev/null)
+r5=$(value_of Rf)
+compare "L(f = 10 MHz, 2-D P5) vs coth closed form [H/m]" "$(value_of Lf)" "$lex" 1e-7
+res=$(awk -v a="$r4" -v b="$r5" -v r="$rex" 'BEGIN {
+	f4 = (a - r) / r; if (f4 < 0) f4 = -f4
+	f5 = (b - r) / r; if (f5 < 0) f5 = -f5
+	printf "%s (R : P4 %.2e vs P5 %.2e)", ((f5 <= 2e-9) && (f4 > 5 * f5)) ? "OK" : "NG", f4, f5 }')
+echo "  2-D, order 5 : R(10 MHz) within 2e-9 of the closed form and 5x better than order 4 : $res"
+case "$res" in NG*) status=1 ;; esac
+sed "s/^mesh = .*/mesh = plate2d_p5.msh/" "$SRC/plate2d_dc.ofe" > "$WORK/p5dc.ofe"
+(cd "$WORK" && "$OFE" -n 2 p5dc.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "Ldc (2-D P5) [H/m]" "$(value_of Ldc)" 2.932153e-07 1e-5
+awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 25) { s = $1 " 23"; for (i = 3; i <= 3 + $3 + 15; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p5.msh" > "$WORK/box_p5_tri15.msh"
+sed 's/^mesh = .*/mesh = box_p5_tri15.msh/' "$WORK/box_p5.ofe" > "$WORK/p5x_tri.ofe"
+mesh_reject "56-node tetrahedra with 15-node electrode triangles" p5x_tri.ofe
+sed 's/^analysis = .*/analysis = E/' "$WORK/box_p5.ofe" > "$WORK/p5x_e.ofe"
+th_reject "analysis E on a 56-node tetrahedral mesh" p5x_e.ofe "need a first-order mesh"
+
 # ---- 熱連成の六面体・角柱・ピラミッド (1 次、混在可) ----
 #
 # 剛性・発熱・質量・要素の温度を 1 つの積分点 API (unstruct.c の elem3d_ip) で組む

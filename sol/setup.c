@@ -254,8 +254,8 @@ static int setup_unstruct(void)
 		for (int e = 0; e < NTet; e++) {
 			double ke[TET_NMAX][TET_NMAX], vol;
 			if (tet20_element(e, c1, ke, &vol)) {
-				printf("*** tetrahedron %d (20-node) is degenerate or inverted (det J changes "
-					"sign inside the element)\n", e + 1);
+				printf("*** tetrahedron %d (%d-node) is degenerate or inverted (det J changes "
+					"sign inside the element)\n", e + 1, tet_nen());
 				return 1;
 			}
 		}

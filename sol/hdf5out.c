@@ -250,7 +250,7 @@ static int write_mesh(void)
 		const int p2 = (TetOrder >= 2);
 		int nen = 0, uniform = 1;
 		if (MeshDim == 2) {
-			nen = ((TetOrder == 4) ? 15 : (TetOrder == 3) ? 10 : p2 ? 6 : 3);
+			nen = ((TetOrder >= 3) ? (((TetOrder + 1) * (TetOrder + 2)) / 2) : p2 ? 6 : 3);
 		}
 		else {
 			for (int64_t e = 0; e < nc; e++) {
