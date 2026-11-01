@@ -3902,9 +3902,59 @@ awk '/^thermal/{print; print "heatcap = 2 3.4e6"; print "transient = 0.5 20 0.5"
 	"$SRC/thermal_cavity.ofe" > "$WORK/thrx_tr.ofe"
 th_run thrx_tr.ofe
 th_balance "radiation exchange, transient (CN)"
+# (7) 非構造格子 (thermal.c の rx_build_tet の注釈)。六面体の空洞は面が軸に平行なので、
+#     辺の対は平行 (閉形式) か直交 (寄与 0) だけになり、構造格子と同じ離散問題になる :
+#     同じ格子点の構造格子 (x を 20 分割) と R・T_max・T_mean が全桁一致 (空洞・2 つの空洞・
+#     閉じた空隙)。四面体の空洞は斜めの辺の対 (数値積分) を通り、行ごとの F∞ が
+#     閉形式に 1e-10 で一致する (三角形に割っても面の和は同じ形態係数)
+for m in thermal_cavity_hex thermal_cavity_tet thermal_cavity2_hex thermal_void_hex; do cp "$SRC/$m.msh" "$WORK/"; done
+rx_unst() {	# rx_unst <格子> <構造格子の入力> <出力> : 同じ形の非構造格子の入力にする
+	awk -v m="$1" '/^xmesh|^ymesh|^zmesh|^geometry|^conductor/{next}
+		/^material/{print "mesh = " m ".msh"; print; print "region = 1 2"; print "electrode = 10 0"; print "electrode = 11 1"; next}
+		{print}' "$WORK/$2" > "$WORK/$3"
+}
+rx_x20() { awk '/^xmesh/{print "xmesh = 0 20 0.01"; next} {print}' "$WORK/$1" > "$WORK/$2"; }
+rx_same() {	# rx_same <ラベル> <構造格子の入力> <六面体の格子>
+	rx_x20 "$2" rxg.ofe
+	th_run rxg.ofe; r0=$(th_r); t0=$(th_t); m0=$(t3_tm); f0=$(rx_sum)
+	rx_unst "$3" rxg.ofe rxh.ofe
+	th_run rxh.ofe
+	compare "$1 : hexahedra == structured grid : R [ohm]" "$(th_r)" "$r0" 1e-10
+	compare "$1 : hexahedra == structured grid : T_max [degC]" "$(th_t)" "$t0" 1e-10
+	compare "$1 : hexahedra == structured grid : T_mean [degC]" "$(t3_tm)" "$m0" 1e-10
+	compare "$1 : hexahedra == structured grid : sum A F_inf / sum A [-]" "$(awk -v s="$(rx_sum)" 'BEGIN { printf "%.15e", 1 + s }')" \
+		"$(awk -v s="$f0" 'BEGIN { printf "%.15e", 1 + s }')" 1e-12
+	th_energy "$1, hexahedra"
+}
+cp "$WORK/thrx2.ofe" "$WORK/thrx2s.ofe"
+rx_same "open cavity" thermal_cavity.ofe thermal_cavity_hex
+compare "hexahedra : cavity floor -> opening == parallel squares [-]" "$(rx_row 2)" "$fpar" 1e-10
+rx_same "two cavities (occlusion by the wall)" thrx2s.ofe thermal_cavity2_hex
+compare "hexahedra : two cavities, far wall -> opening (occluded) [-]" "$(rx_row 2)" "$fper" 1e-10
+rx_same "closed void" thrx_void.ofe thermal_void_hex
+res=$(awk '/joule power/ { for (i = 1; i <= NF; i++) { if ($i == "R") a = $(i+2); if ($i == "radiation") g = $(i+2) + 0 } }
+	END { d = g / a; if (d < 0) d = -d; printf "%s (to radiation / I^2 R = %.1e)", (d < 1e-10) ? "OK" : "NG", d }' "$WORK/ofe.log")
+echo "  hexahedra : closed void, no heat leaves by radiation : $res"
+case "$res" in NG*) status=1 ;; esac
+#     四面体 : 斜めの辺を含む三角形の面
+rx_x20 thermal_cavity.ofe rxg.ofe
+rx_unst thermal_cavity_tet rxg.ofe rxt.ofe
+th_run rxt.ofe
+compare "tetrahedra : cavity floor -> opening == parallel squares (Hottel) [-]" "$(rx_row 2)" "$fpar" 1e-10
+compare "tetrahedra : cavity wall -> opening == perpendicular squares [-]" "$(rx_row 3)" "$fper" 1e-10
+compare "tetrahedra : sum A F_inf / sum A == 0.2 [-]" "$(rx_sum)" 0.2 1e-10
+th_energy "radiation exchange, tetrahedra"
+tex=$(th_t)
+awk '!/^radiationexchange/' "$WORK/rxt.ofe" > "$WORK/rxt0.ofe"
+th_run rxt0.ofe
+res=$(awk -v a="$tex" -v b="$(th_t)" 'BEGIN { printf "%s (T_max %.6f with exchange vs %.6f without)", (a > b) ? "OK" : "NG", a, b }')
+echo "  tetrahedra : exchange inside the cavity reduces the heat lost to the ambient : $res"
+case "$res" in NG*) status=1 ;; esac
+awk '/^thermal/{print; print "heatcap = 2 3.4e6"; print "transient = 0.5 20 0.5"; next} {print}' \
+	"$WORK/rxt.ofe" > "$WORK/rxt_tr.ofe"
+th_run rxt_tr.ofe
+th_balance "radiation exchange, tetrahedra, transient (CN)"
 # (6) 弾くべき入力
-awk '/^thermal/{print "radiation = 0.8 10"; print "radiationexchange = 1"} {print}' "$SRC/thermal_tet.ofe" > "$WORK/thrxx_tet.ofe"
-th_reject "radiationexchange on a tetrahedral mesh" thrxx_tet.ofe "structured grid only"
 awk '/^radiationexchange/{print; print "radiationtemptable = 0 1 500 1.2"; next} {print}' "$SRC/thermal_cavity.ofe" > "$WORK/thrxx_tab.ofe"
 th_reject "radiationexchange with radiationtemptable" thrxx_tab.ofe "cannot be combined with radiationtemptable"
 awk '/^radiationexchange/{print "radiationexchange = 2"; next} {print}' "$SRC/thermal_cavity.ofe" > "$WORK/thrxx_2.ofe"

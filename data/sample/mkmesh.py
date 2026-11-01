@@ -1235,6 +1235,95 @@ def make_neck_hex(split=0, pyrneck=0, bar=0, nx=40, grade=0):
     return nodes, cells
 
 
+def make_cavity_hex(split=0, nx=40, two=0, void=0):
+    """開いた立方体の空洞 (thermal_cavity.ofe と同じ形・同じ格子) の六面体 / 四面体版
+    (非構造格子の相互放射の検証)
+
+    導体の直方体 (10mm x 3mm x 3mm) の上面に空洞 (x 4..6mm、y 0.5..2.5mm、z 1..3mm) を
+    開ける。格子点は thermal_cavity.ofe の xmesh / ymesh / zmesh と同じなので、六面体の版
+    (split = 0) は構造格子と同じ離散問題になる。split = 1 は各セルを Kuhn の分割で
+    6 つの四面体に割る (主対角線 v000 - v111 の向きが全セルで揃うので隣と適合する。
+    電極の四角形は同じ対角線 (j,k)-(j+1,k+1) で三角形 2 枚に割る)。
+
+    nx は x の分割 (既定 40 = 構造格子と同じ。20 でも空洞の壁は格子線に乗る)。
+    two = 1 で空洞を 2 つ (x 2..4mm と 6..8mm、間の壁が遮蔽になる)、void = 1 で閉じた
+    空隙 (x 4..6mm、y 0.5..2.5mm、z 0.5..2.2mm、導体の中に閉じている) にする
+    (どちらも rlc_check.sh の構造格子の検査と同じ形)。
+
+    物理タグ : 1 = 導体、10 = x=0 面 (電極 0)、11 = x=10mm 面 (電極 1)
+    """
+    def axis(spec):
+        xs = [spec[0]]
+        for n, b in spec[1:]:
+            a = xs[-1]
+            for i in range(1, n + 1):
+                xs.append(a + (b - a) * i / n)
+        return xs
+    xs = axis([0.0, (nx, 0.01)])
+    ys = axis([0.0, (2, 0.5e-3), (5, 2.5e-3), (2, 3e-3)])
+    zs = axis([0.0, (4, 1e-3), (5, 3e-3)])
+    nx, ny, nz = len(xs) - 1, len(ys) - 1, len(zs) - 1
+    if void:
+        holes = ((4e-3, 6e-3, 0.5e-3, 2.5e-3, 0.5e-3, 2.2e-3),)
+    elif two:
+        holes = ((2e-3, 4e-3, 0.5e-3, 2.5e-3, 1e-3, 3e-3), (6e-3, 8e-3, 0.5e-3, 2.5e-3, 1e-3, 3e-3))
+    else:
+        holes = ((4e-3, 6e-3, 0.5e-3, 2.5e-3, 1e-3, 3e-3),)
+
+    def solid(i, j, k):
+        xc = 0.5 * (xs[i] + xs[i + 1])
+        yc = 0.5 * (ys[j] + ys[j + 1])
+        zc = 0.5 * (zs[k] + zs[k + 1])
+        return not any((h[0] < xc < h[1]) and (h[2] < yc < h[3]) and (h[4] < zc < h[5])
+                       for h in holes)
+
+    nodes, idx = [], {}
+    def node(i, j, k):
+        if (i, j, k) not in idx:
+            idx[(i, j, k)] = len(nodes)
+            nodes.append((xs[i], ys[j], zs[k]))
+        return idx[(i, j, k)]
+
+    def det(a, b, c, d):
+        p = [[nodes[v][q] - nodes[a][q] for q in range(3)] for v in (b, c, d)]
+        return (p[0][0] * (p[1][1] * p[2][2] - p[1][2] * p[2][1])
+                - p[0][1] * (p[1][0] * p[2][2] - p[1][2] * p[2][0])
+                + p[0][2] * (p[1][0] * p[2][1] - p[1][1] * p[2][0]))
+
+    cells = []
+    perms = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                if not solid(i, j, k):
+                    continue
+                if split == 0:
+                    cells.append((1, 5, [node(i, j, k), node(i + 1, j, k), node(i + 1, j + 1, k),
+                                         node(i, j + 1, k), node(i, j, k + 1), node(i + 1, j, k + 1),
+                                         node(i + 1, j + 1, k + 1), node(i, j + 1, k + 1)]))
+                    continue
+                for pm in perms:
+                    o = [0, 0, 0]
+                    t = [node(i, j, k)]
+                    for ax in pm:
+                        o[ax] += 1
+                        t.append(node(i + o[0], j + o[1], k + o[2]))
+                    if det(*t) < 0:
+                        t[1], t[2] = t[2], t[1]
+                    cells.append((1, 4, t))
+    for j in range(ny):
+        for k in range(nz):
+            for i, tag in ((0, 10), (nx, 11)):
+                a, b = node(i, j, k), node(i, j + 1, k)
+                c, d = node(i, j + 1, k + 1), node(i, j, k + 1)
+                if split == 0:
+                    cells.append((tag, 3, [a, b, c, d]))
+                else:
+                    cells.append((tag, 2, [a, b, c]))
+                    cells.append((tag, 2, [a, c, d]))
+    return nodes, cells
+
+
 def make_bar_air(nx=24, ny=2, nz=24, nza=4,
                  lx=2e-3, ly=0.25e-3, lz=1e-3, gz=0.5e-3):
     """導体棒 + 非導電層 (3 次元渦電流 A-φ で空気を含む系の検証)
@@ -1339,6 +1428,11 @@ def main():
                         else make_box_hexpyrtet(**opt))
         write_msh_cells(path, nodes, cells)
         print("%s : pyramids, %d nodes, %d cells" % (path, len(nodes), len(cells)))
+        return 0
+    elif kind == "cavity_hex":
+        nodes, cells = make_cavity_hex(**opt)
+        write_msh_cells(path, nodes, cells)
+        print("%s : cavity, %d nodes, %d cells" % (path, len(nodes), len(cells)))
         return 0
     elif kind == "neck_hex":
         nodes, cells = make_neck_hex(**opt)

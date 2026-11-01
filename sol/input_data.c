@@ -1546,11 +1546,6 @@ int input_data(FILE *fp)
 			input_warn("convectiontemptable has no effect without convection (it scales "
 				"the h of the convection lines)");
 		}
-		if (RadExchange && MeshMode) {
-			printf("%s\n", "*** radiationexchange is implemented for the structured grid only "
-				"(the closed-form view factors assume axis-aligned rectangular faces)");
-			return 1;
-		}
 		if (RadExchange && (RadTabN > 0)) {
 			printf("%s\n", "*** radiationexchange cannot be combined with radiationtemptable "
 				"(the radiosity matrix is built once for constant emissivities)");
