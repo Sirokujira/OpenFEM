@@ -127,7 +127,7 @@ void field_cell_grad(const double *u, int kind, double *v)
 			double d[3] = {0, 0, 0};
 			if (kind == MESHELEM_HEX) {
 				if (HexNen > 8) {
-					double gn[27][3];
+					double gn[HEXP_NMAX][3];
 					int nen = 0;
 					if (!hex2_grad_center(e - NTet, gn, &nen)) {
 						int32_t nd[ELEM_NMAX];
@@ -151,10 +151,10 @@ void field_cell_grad(const double *u, int kind, double *v)
 			}
 			else if (kind == MESHELEM_PRISM) {
 				if (PrismNen > 6) {
-					double gn[18][3];
+					double gn[PRISMP_NMAX][3];
 					int nen = 0;
 					if (!prism2_grad_center(e - NTet - NHex, gn, &nen)) {
-						int32_t nd[18];
+						int32_t nd[PRISMP_NMAX];
 						prism_nodes(e - NTet - NHex, nd);
 						for (int a = 0; a < nen; a++) {
 							const double ua = u[nd[a]];

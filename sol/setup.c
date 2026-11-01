@@ -281,8 +281,8 @@ static int setup_unstruct(void)
 				NodeConductor[Quad[(t * 4) + l]] = (signed char)ElecCond[q];
 			}
 			if (Quad2 != NULL) {
-				for (int l = 0; l < 5; l++) {
-					const int32_t n = Quad2[(t * 5) + l];
+				for (int l = 0; l < QUAD2_W; l++) {
+					const int32_t n = Quad2[(t * QUAD2_W) + l];
 					if (n >= 0) NodeConductor[n] = (signed char)ElecCond[q];
 				}
 			}

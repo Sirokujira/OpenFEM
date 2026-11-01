@@ -19,6 +19,9 @@ unstruct.c
 #include "fem.h"
 #include "fem_prototype.h"
 
+// 格子ファイルの 1 行の最大長 (BUFSIZ は MSVC で 512 しかなく、64 節点の要素の行が入らない)
+#define MESH_LINE (8192)
+
 #define ARRAY_INC (100000)
 
 
@@ -26,7 +29,7 @@ unstruct.c
 
 static int read_nodes(FILE *fp, int32_t **idmap, int32_t *maxid)
 {
-	char line[BUFSIZ];
+	char line[MESH_LINE];
 
 	if (fgets(line, sizeof(line), fp) == NULL) return 1;
 	const int nn = atoi(line);
@@ -115,11 +118,11 @@ static int elem_store(int type, int tag, const int32_t *nd)
 	                 : ((type == 29) || (type == 21)) ? 3
 	                 : ((type == 30) || (type == 23)) ? 4 : 1);
 
-	if ((type == 5) || (type == 12) || (type == 17)) {
+	if ((type == 5) || (type == 12) || (type == 17) || (type == 92)) {
 		// 六面体 (8 / 27 / 20 節点)。局所の並びは Gmsh のまま使う。
 		// 頂点 8 個を Hex に、2 次の残り (辺 12 + 面 6 + 体心 1) を Hex2 に
 		// 入れる。次数は最初の 1 個で決め、以後は混在を許さない
-		const int hn = ((type == 5) ? 8 : (type == 12) ? 27 : 20);
+		const int hn = ((type == 5) ? 8 : (type == 12) ? 27 : (type == 92) ? 64 : 20);
 		if (HexNen == 0) HexNen = hn;
 		if (HexNen != hn) {
 			printf("*** mesh : mixed hexahedron orders (%d-node after %d-node)\n",
@@ -130,20 +133,20 @@ static int elem_store(int type, int tag, const int32_t *nd)
 			Hex = (int32_t *)realloc(Hex, (size_t)(NHex + ARRAY_INC) * 8 * sizeof(int32_t));
 			HexTag = (int *)realloc(HexTag, (size_t)(NHex + ARRAY_INC) * sizeof(int));
 			if (hn > 8) {
-				Hex2 = (int32_t *)realloc(Hex2, (size_t)(NHex + ARRAY_INC) * 19 * sizeof(int32_t));
+				Hex2 = (int32_t *)realloc(Hex2, (size_t)(NHex + ARRAY_INC) * HEX2_W * sizeof(int32_t));
 			}
 		}
 		for (int l = 0; l < 8; l++) Hex[(NHex * 8) + l] = nd[l];
-		for (int l = 8; l < hn; l++) Hex2[(NHex * 19) + (l - 8)] = nd[l];
+		for (int l = 8; l < hn; l++) Hex2[(NHex * HEX2_W) + (l - 8)] = nd[l];
 		HexTag[NHex] = tag;
 		NHex++;
 
 		return 0;
 	}
-	if ((type == 6) || (type == 13) || (type == 18)) {
+	if ((type == 6) || (type == 13) || (type == 18) || (type == 90)) {
 		// 角柱 (6 / 18 / 15 節点)。局所の並びは Gmsh のまま使う。
 		// 頂点 6 個を Prism に、2 次の残り (辺 9 + 四角形面 3) を Prism2 に入れる
-		const int pn = ((type == 6) ? 6 : (type == 13) ? 18 : 15);
+		const int pn = ((type == 6) ? 6 : (type == 13) ? 18 : (type == 90) ? 40 : 15);
 		if (PrismNen == 0) PrismNen = pn;
 		if (PrismNen != pn) {
 			printf("*** mesh : mixed prism orders (%d-node after %d-node)\n",
@@ -154,11 +157,11 @@ static int elem_store(int type, int tag, const int32_t *nd)
 			Prism = (int32_t *)realloc(Prism, (size_t)(NPrism + ARRAY_INC) * 6 * sizeof(int32_t));
 			PrismTag = (int *)realloc(PrismTag, (size_t)(NPrism + ARRAY_INC) * sizeof(int));
 			if (pn > 6) {
-				Prism2 = (int32_t *)realloc(Prism2, (size_t)(NPrism + ARRAY_INC) * 12 * sizeof(int32_t));
+				Prism2 = (int32_t *)realloc(Prism2, (size_t)(NPrism + ARRAY_INC) * PRISM2_W * sizeof(int32_t));
 			}
 		}
 		for (int l = 0; l < 6; l++) Prism[(NPrism * 6) + l] = nd[l];
-		for (int l = 6; l < pn; l++) Prism2[(NPrism * 12) + (l - 6)] = nd[l];
+		for (int l = 6; l < pn; l++) Prism2[(NPrism * PRISM2_W) + (l - 6)] = nd[l];
 		PrismTag[NPrism] = tag;
 		NPrism++;
 
@@ -176,19 +179,19 @@ static int elem_store(int type, int tag, const int32_t *nd)
 
 		return 0;
 	}
-	if ((type == 3) || (type == 16) || (type == 10)) {
+	if ((type == 3) || (type == 16) || (type == 10) || (type == 36)) {
 		// 四角形 (境界面、4 / 8 / 9 節点)。六面体格子の電極面はこれになる。
 		// 2 次の中間節点 (辺 4 + 中心) は Quad2 に入れる。無い位置は -1 で
 		// 埋める (realloc した領域は未初期化なので、必ず全 5 要素を書くこと)
-		const int qn = ((type == 3) ? 4 : (type == 16) ? 8 : 9);
+		const int qn = ((type == 3) ? 4 : (type == 16) ? 8 : (type == 36) ? 16 : 9);
 		if (NQuad % ARRAY_INC == 0) {
 			Quad = (int32_t *)realloc(Quad, (size_t)(NQuad + ARRAY_INC) * 4 * sizeof(int32_t));
 			QuadTag = (int *)realloc(QuadTag, (size_t)(NQuad + ARRAY_INC) * sizeof(int));
-			Quad2 = (int32_t *)realloc(Quad2, (size_t)(NQuad + ARRAY_INC) * 5 * sizeof(int32_t));
+			Quad2 = (int32_t *)realloc(Quad2, (size_t)(NQuad + ARRAY_INC) * QUAD2_W * sizeof(int32_t));
 		}
 		for (int l = 0; l < 4; l++) Quad[(NQuad * 4) + l] = nd[l];
-		for (int l = 0; l < 5; l++) {
-			Quad2[(NQuad * 5) + l] = (((4 + l) < qn) ? nd[4 + l] : -1);
+		for (int l = 0; l < QUAD2_W; l++) {
+			Quad2[(NQuad * QUAD2_W) + l] = (((4 + l) < qn) ? nd[4 + l] : -1);
 		}
 		QuadTag[NQuad] = tag;
 		NQuad++;
@@ -620,11 +623,29 @@ static int elem_finish(void)
 		// 角柱格子。電極面は上下の三角形でも側面の四角形でもよい
 		MeshElem = MESHELEM_PRISM;
 		MeshDim = 3;
-		TetOrder = ((PrismNen > 6) ? 2 : 1);
+		TetOrder = ((PrismNen == 40) ? 3 : (PrismNen > 6) ? 2 : 1);
 		if ((NTri < 1) && (NQuad < 1)) {
 			printf("%s\n", "*** mesh : a prism mesh needs triangular or "
 				"quadrilateral boundary faces for the electrodes");
 			return 1;
+		}
+		// 3 次の角柱 (40 節点) の境界面は 10 節点三角形と 16 節点四角形 (面の内部の節点まで固定する)
+		if (TetOrder == 3) {
+			for (int t = 0; t < NTri; t++) {
+				if ((Tri3[t * TRI_HO_MAX] < 0) || (Tri3[(t * TRI_HO_MAX) + 7] >= 0)) {
+					printf("%s\n", "*** mesh : the prisms are order 3 (40-node) but a "
+						"triangle is not a 10-node triangle (regenerate the mesh with -order 3)");
+					return 1;
+				}
+			}
+			for (int t = 0; t < NQuad; t++) {
+				if (Quad2[(t * QUAD2_W) + 11] < 0) {
+					printf("%s\n", "*** mesh : the prisms are order 3 (40-node) but a "
+						"quadrilateral is not a 16-node quadrilateral (regenerate the mesh with -order 3)");
+					return 1;
+				}
+			}
+			return elem_face_check();
 		}
 		// 2 次の角柱に 1 次の境界面が混ざると電極の中間節点が固定されず、
 		// 電極が「穴だらけ」になる (収束はするが Q が合わない)。tet10 と同じ規則
@@ -637,13 +658,13 @@ static int elem_finish(void)
 				}
 			}
 			for (int t = 0; t < NQuad; t++) {
-				if (Quad2[(t * 5)] < 0) {
+				if (Quad2[(t * QUAD2_W)] < 0) {
 					printf("%s\n", "*** mesh : the prisms are order 2 but a "
 						"quadrilateral is order 1 (regenerate the mesh with -order 2)");
 					return 1;
 				}
 				// 18 節点の角柱の側面は面心つきの 9 節点四角形 (六面体と同じ穴)
-				if ((PrismNen == 18) && (Quad2[(t * 5) + 4] < 0)) {
+				if ((PrismNen == 18) && (Quad2[(t * QUAD2_W) + 4] < 0)) {
 					printf("%s\n", "*** mesh : the prisms are 18-node but a "
 						"quadrilateral has no centre node (9-node quadrilaterals "
 						"are required; do not mix Mesh.SecondOrderIncomplete)");
@@ -658,7 +679,17 @@ static int elem_finish(void)
 		// 六面体格子 (1 次の 8 節点、または 2 次の 20 / 27 節点)
 		MeshElem = MESHELEM_HEX;
 		MeshDim = 3;
-		TetOrder = ((HexNen > 8) ? 2 : 1);
+		TetOrder = ((HexNen == 64) ? 3 : (HexNen > 8) ? 2 : 1);
+		// 3 次の六面体 (64 節点) の電極面は 16 節点四角形 (面の内部の 4 節点まで固定する)
+		if (TetOrder == 3) {
+			for (int t = 0; t < NQuad; t++) {
+				if (Quad2[(t * QUAD2_W) + 11] < 0) {
+					printf("%s\n", "*** mesh : the hexahedra are order 3 (64-node) but a "
+						"quadrilateral is not a 16-node quadrilateral (regenerate the mesh with -order 3)");
+					return 1;
+				}
+			}
+		}
 		if (NQuad < 1) {
 			printf("%s\n", "*** mesh : a hexahedral mesh needs quadrilateral "
 				"boundary faces for the electrodes");
@@ -667,14 +698,14 @@ static int elem_finish(void)
 		// 2 次の六面体に 1 次の四角形が混ざると電極の中間節点が固定されない。
 		// **27 節点の六面体は面心節点まで要る** (8 節点四角形では辺の中間節点が
 		// 埋まるので、先頭だけ見る検査を素通りして C が -41% になる。実測)
-		if (TetOrder >= 2) {
+		if (TetOrder == 2) {
 			for (int t = 0; t < NQuad; t++) {
-				if (Quad2[(t * 5)] < 0) {
+				if (Quad2[(t * QUAD2_W)] < 0) {
 					printf("%s\n", "*** mesh : the hexahedra are order 2 but a "
 						"quadrilateral is order 1 (regenerate the mesh with -order 2)");
 					return 1;
 				}
-				if ((HexNen == 27) && (Quad2[(t * 5) + 4] < 0)) {
+				if ((HexNen == 27) && (Quad2[(t * QUAD2_W) + 4] < 0)) {
 					printf("%s\n", "*** mesh : the hexahedra are 27-node but a "
 						"quadrilateral has no centre node (9-node quadrilaterals "
 						"are required; do not mix Mesh.SecondOrderIncomplete)");
@@ -725,7 +756,7 @@ static int elem_finish(void)
 
 static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 {
-	char line[BUFSIZ];
+	char line[MESH_LINE];
 
 	if (fgets(line, sizeof(line), fp) == NULL) return 1;
 	const int ne = atoi(line);
@@ -737,9 +768,9 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 
 		// id type ntags tag1 ... tagn node1 ...
 		int nv = 0;
-		long v[64];
+		long v[ELEM_NMAX + 16];		// id type ntags tags... + 節点 (64 節点の六面体まで)
 		char *p = line;
-		while ((nv < 64) && (*p != '\0')) {
+		while ((nv < (ELEM_NMAX + 16)) && (*p != '\0')) {
 			while ((*p == ' ') || (*p == '\t')) p++;
 			if ((*p == '\0') || (*p == '\n') || (*p == '\r')) break;
 			v[nv++] = strtol(p, &p, 10);
@@ -759,7 +790,8 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              : (type == 7) ? 5
 		              : (type == 12) ? 27 : (type == 17) ? 20
 		              : (type == 13) ? 18 : (type == 18) ? 15
-		              : (type == 10) ? 9 : (type == 16) ? 8 : 0);
+		              : (type == 10) ? 9 : (type == 16) ? 8
+		              : (type == 92) ? 64 : (type == 90) ? 40 : (type == 36) ? 16 : 0);
 		if (nn == 0) continue;			// 点・線分など、使わない要素型
 		if (nv < off + nn) continue;
 
@@ -931,7 +963,8 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              : (type == 7) ? 5
 		              : (type == 12) ? 27 : (type == 17) ? 20
 		              : (type == 13) ? 18 : (type == 18) ? 15
-		              : (type == 10) ? 9 : (type == 16) ? 8 : 0);
+		              : (type == 10) ? 9 : (type == 16) ? 8
+		              : (type == 92) ? 64 : (type == 90) ? 40 : (type == 36) ? 16 : 0);
 		// 物理タグはエンティティ側にある (2.2 と違い要素の行には無い)
 		const int phys = ent_phys((int)dim, tag);
 
@@ -1002,6 +1035,10 @@ static const int GMSH_NNODE[32] = {
 
 static int gmsh_nnode(long type)
 {
+	// 3 次の六面体・角柱・四角形 (表の外の番号)
+	if (type == 92) return 64;
+	if (type == 90) return 40;
+	if (type == 36) return 16;
 	if ((type < 1) || (type > 31)) return 0;
 
 	return GMSH_NNODE[type];
@@ -1027,7 +1064,7 @@ static int rd_i64(FILE *fp, int64_t *v)
 // 節点 (2.2 バイナリ)
 static int read_nodes_bin22(FILE *fp, int32_t **idmap, int32_t *maxid)
 {
-	char line[BUFSIZ];
+	char line[MESH_LINE];
 
 	if (fgets(line, sizeof(line), fp) == NULL) return 1;
 	const int nn = atoi(line);
@@ -1075,7 +1112,7 @@ static int read_nodes_bin22(FILE *fp, int32_t **idmap, int32_t *maxid)
 // 要素 (2.2 バイナリ)。型ごとのブロックで並ぶ
 static int read_elements_bin22(FILE *fp, const int32_t *idmap, int32_t maxid)
 {
-	char line[BUFSIZ];
+	char line[MESH_LINE];
 
 	if (fgets(line, sizeof(line), fp) == NULL) return 1;
 	const long ne = atol(line);
@@ -1104,7 +1141,7 @@ static int read_elements_bin22(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              || (type == 29) || (type == 21) || (type == 30) || (type == 23)
 		              || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 		              || (type == 12) || (type == 17) || (type == 13) || (type == 18)
-		              || (type == 10) || (type == 16));
+		              || (type == 10) || (type == 16) || (type == 92) || (type == 90) || (type == 36));
 
 		for (long e = 0; e < cnt; e++) {
 			int32_t etag = 0;
@@ -1271,7 +1308,7 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              || (type == 29) || (type == 21) || (type == 30) || (type == 23)
 		              || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 		              || (type == 12) || (type == 17) || (type == 13) || (type == 18)
-		              || (type == 10) || (type == 16));
+		              || (type == 10) || (type == 16) || (type == 92) || (type == 90) || (type == 36));
 
 		for (int64_t e = 0; e < cnt; e++) {
 			int64_t etag = 0;
@@ -1311,7 +1348,7 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 */
 static int mesh_read_binary(const char *fname, int v41)
 {
-	char line[BUFSIZ];
+	char line[MESH_LINE];
 	int32_t *idmap = NULL;
 	int32_t maxid = 0;
 	int ierr = 0;
@@ -1407,7 +1444,7 @@ static int mesh_read_binary(const char *fname, int v41)
 
 int mesh_read(const char *fname)
 {
-	char line[BUFSIZ];
+	char line[MESH_LINE];
 	int32_t *idmap = NULL;
 	int32_t maxid = 0;
 	int ierr = 0;
@@ -1644,17 +1681,17 @@ int elem3d_kind(int e)
 int hex_nodes(int e, int32_t nd[ELEM_NMAX])
 {
 	for (int l = 0; l < 8; l++) nd[l] = Hex[(e * 8) + l];
-	for (int l = 8; l < HexNen; l++) nd[l] = Hex2[(e * 19) + (l - 8)];
+	for (int l = 8; l < HexNen; l++) nd[l] = Hex2[(e * HEX2_W) + (l - 8)];
 
 	return HexNen;
 }
 
 
 // 角柱 e の局所節点をまとめて取り出す。戻り値は節点数 (6 / 15 / 18)
-int prism_nodes(int e, int32_t nd[18])
+int prism_nodes(int e, int32_t nd[PRISMP_NMAX])
 {
 	for (int l = 0; l < 6; l++) nd[l] = Prism[(e * 6) + l];
-	for (int l = 6; l < PrismNen; l++) nd[l] = Prism2[(e * 12) + (l - 6)];
+	for (int l = 6; l < PrismNen; l++) nd[l] = Prism2[(e * PRISM2_W) + (l - 6)];
 
 	return PrismNen;
 }
@@ -2601,9 +2638,119 @@ static double lag3d(int s, double x)
 }
 
 
-// 局所座標での微分 dn[a][k] = ∂N_a/∂(ξ,η,ζ)
-static void hex2_dshape(int nen, double x, double y, double z, double dn[27][3])
+/*
+3 次の六面体 (hexa64、Gmsh の型 92) と角柱 (prism40、型 90)。
+
+局所節点の並びは **gmsh 4.15.2 の出力を分類した実測の表** (g3/cls.py で、要素の角の節点から
+作った局所座標を 3 倍して丸めたもの)。六面体は各方向の格子位置 (0..3、ξ = -1 + 2i/3)、角柱は
+三角形の重心座標の多重指数 (a, b, c) (a + b + c = 3、λ0 が角 0) と ζ の格子位置 (0..3)。
+形状関数は次数によらない Lagrange の式 (1 次元の等間隔の Lagrange の積 / 三角形の多重指数の式)
+なので、表さえ正しければ式を暗記に頼らない。
+*/
+static const signed char HEX3_I[64][3] = {
+	{0, 0, 0}, {3, 0, 0}, {3, 3, 0}, {0, 3, 0}, {0, 0, 3}, {3, 0, 3}, {3, 3, 3}, {0, 3, 3},
+	{1, 0, 0}, {2, 0, 0}, {0, 1, 0}, {0, 2, 0}, {0, 0, 1}, {0, 0, 2}, {3, 1, 0}, {3, 2, 0},
+	{3, 0, 1}, {3, 0, 2}, {2, 3, 0}, {1, 3, 0}, {3, 3, 1}, {3, 3, 2}, {0, 3, 1}, {0, 3, 2},
+	{1, 0, 3}, {2, 0, 3}, {0, 1, 3}, {0, 2, 3}, {3, 1, 3}, {3, 2, 3}, {2, 3, 3}, {1, 3, 3},
+	{1, 1, 0}, {1, 2, 0}, {2, 2, 0}, {2, 1, 0}, {1, 0, 1}, {2, 0, 1}, {2, 0, 2}, {1, 0, 2},
+	{0, 1, 1}, {0, 1, 2}, {0, 2, 2}, {0, 2, 1}, {3, 1, 1}, {3, 2, 1}, {3, 2, 2}, {3, 1, 2},
+	{2, 3, 1}, {1, 3, 1}, {1, 3, 2}, {2, 3, 2}, {1, 1, 3}, {2, 1, 3}, {2, 2, 3}, {1, 2, 3},
+	{1, 1, 1}, {2, 1, 1}, {2, 2, 1}, {1, 2, 1}, {1, 1, 2}, {2, 1, 2}, {2, 2, 2}, {1, 2, 2},
+};
+static const signed char PRISM3_A[40][4] = {
+	{3, 0, 0, 0}, {0, 3, 0, 0}, {0, 0, 3, 0}, {3, 0, 0, 3}, {0, 3, 0, 3}, {0, 0, 3, 3},
+	{2, 1, 0, 0}, {1, 2, 0, 0}, {2, 0, 1, 0}, {1, 0, 2, 0}, {3, 0, 0, 1}, {3, 0, 0, 2},
+	{0, 2, 1, 0}, {0, 1, 2, 0}, {0, 3, 0, 1}, {0, 3, 0, 2}, {0, 0, 3, 1}, {0, 0, 3, 2},
+	{2, 1, 0, 3}, {1, 2, 0, 3}, {2, 0, 1, 3}, {1, 0, 2, 3}, {0, 2, 1, 3}, {0, 1, 2, 3},
+	{1, 1, 1, 0}, {1, 1, 1, 3}, {2, 1, 0, 1}, {1, 2, 0, 1}, {1, 2, 0, 2}, {2, 1, 0, 2},
+	{2, 0, 1, 1}, {2, 0, 1, 2}, {1, 0, 2, 2}, {1, 0, 2, 1}, {0, 2, 1, 1}, {0, 1, 2, 1},
+	{0, 1, 2, 2}, {0, 2, 1, 2}, {1, 1, 1, 1}, {1, 1, 1, 2},
+};
+
+
+// 1 次元の p 次 Lagrange (等間隔の節点 x_i = -1 + 2i/p) の値 v と微分 d
+static void lagp(int p, int i, double x, double *v, double *d)
 {
+	double val = 1, der = 0;
+	const double xi = -1 + ((2.0 * i) / p);
+	for (int j = 0; j <= p; j++) {
+		if (j == i) continue;
+		const double xj = -1 + ((2.0 * j) / p);
+		const double f = (x - xj) / (xi - xj);
+		der = (der * f) + (val / (xi - xj));
+		val *= f;
+	}
+	*v = val;
+	*d = der;
+}
+
+
+// 三角形の p 次 Lagrange (多重指数 al、重心座標 lam) の値と dT/dλ_m
+static double lagp_tri(int p, const signed char al[3], const double lam[3], double dl[3])
+{
+	double g[3], gd[3];
+	for (int m = 0; m < 3; m++) {
+		double val = 1, der = 0;
+		for (int s = 0; s < al[m]; s++) {
+			const double f = ((p * lam[m]) - s) / (s + 1);
+			der = (der * f) + (val * p / (s + 1));
+			val *= f;
+		}
+		g[m] = val;
+		gd[m] = der;
+	}
+	dl[0] = gd[0] * g[1] * g[2];
+	dl[1] = g[0] * gd[1] * g[2];
+	dl[2] = g[0] * g[1] * gd[2];
+	return g[0] * g[1] * g[2];
+}
+
+
+// 3 次の六面体の値と局所微分
+static void hex3_shape(double x, double y, double z, double nv[HEXP_NMAX], double dn[HEXP_NMAX][3])
+{
+	double lx[4], dx[4], ly[4], dy[4], lz[4], dz[4];
+	for (int i = 0; i < 4; i++) {
+		lagp(3, i, x, &lx[i], &dx[i]);
+		lagp(3, i, y, &ly[i], &dy[i]);
+		lagp(3, i, z, &lz[i], &dz[i]);
+	}
+	for (int a = 0; a < 64; a++) {
+		const int i = HEX3_I[a][0], j = HEX3_I[a][1], k = HEX3_I[a][2];
+		if (nv) nv[a] = lx[i] * ly[j] * lz[k];
+		if (dn) {
+			dn[a][0] = dx[i] * ly[j] * lz[k];
+			dn[a][1] = lx[i] * dy[j] * lz[k];
+			dn[a][2] = lx[i] * ly[j] * dz[k];
+		}
+	}
+}
+
+
+// 3 次の角柱の値と局所微分 (u, v は λ1, λ2、λ0 = 1 - u - v)
+static void prism3_shape(double u, double v, double ze, double nv[PRISMP_NMAX], double dn[PRISMP_NMAX][3])
+{
+	const double lam[3] = {1 - u - v, u, v};
+	double lz[4], dz[4];
+	for (int k = 0; k < 4; k++) lagp(3, k, ze, &lz[k], &dz[k]);
+	for (int a = 0; a < 40; a++) {
+		double dl[3];
+		const double t = lagp_tri(3, PRISM3_A[a], lam, dl);
+		const int k = PRISM3_A[a][3];
+		if (nv) nv[a] = t * lz[k];
+		if (dn) {
+			dn[a][0] = (dl[1] - dl[0]) * lz[k];
+			dn[a][1] = (dl[2] - dl[0]) * lz[k];
+			dn[a][2] = t * dz[k];
+		}
+	}
+}
+
+
+// 局所座標での微分 dn[a][k] = ∂N_a/∂(ξ,η,ζ)
+static void hex2_dshape(int nen, double x, double y, double z, double dn[HEXP_NMAX][3])
+{
+	if (nen == 64) { hex3_shape(x, y, z, NULL, dn); return; }
 	if (nen == 27) {
 		for (int a = 0; a < 27; a++) {
 			const int sx = HEX2_XI[a][0], sy = HEX2_XI[a][1], sz = HEX2_XI[a][2];
@@ -2646,9 +2793,9 @@ static void hex2_dshape(int nen, double x, double y, double z, double dn[27][3])
 
 // 局所座標 (x, y, z) での物理勾配 g[a][i] = ∂N_a/∂x_i と det J
 static int hex2_grad(const int32_t *nd, int nen, double x, double y, double z,
-	double g[27][3], double *det)
+	double g[HEXP_NMAX][3], double *det)
 {
-	double dn[27][3];
+	double dn[HEXP_NMAX][3];
 	hex2_dshape(nen, x, y, z, dn);
 
 	double jm[3][3];
@@ -2690,8 +2837,9 @@ static int hex2_grad(const int32_t *nd, int nen, double x, double y, double z,
 
 
 // 局所座標での形状関数の値 (hex2_dshape と同じ基底。熱連成の積分点 elem3d_ip で使う)
-static void hex2_nval(int nen, double x, double y, double z, double nv[27])
+static void hex2_nval(int nen, double x, double y, double z, double nv[HEXP_NMAX])
 {
+	if (nen == 64) { hex3_shape(x, y, z, nv, NULL); return; }
 	if (nen == 27) {
 		for (int a = 0; a < 27; a++) {
 			nv[a] = lag3(HEX2_XI[a][0], x) * lag3(HEX2_XI[a][1], y) * lag3(HEX2_XI[a][2], z);
@@ -2714,24 +2862,32 @@ static void hex2_nval(int nen, double x, double y, double z, double nv[27])
 // 3 点 Gauss-Legendre (各方向) の位置と重み
 static const double GX3[3] = {-0.7745966692414834, 0.0, 0.7745966692414834};
 static const double GW3[3] = {5.0 / 9, 8.0 / 9, 5.0 / 9};
+// 4 点 Gauss-Legendre (3 次の要素の各方向、2 次の体積の検算)
+static const double GX4[4] = {-0.8611363115940526, -0.3399810435848563,
+                               0.3399810435848563,  0.8611363115940526};
+static const double GW4[4] = {0.3478548451374538, 0.6521451548625461,
+                              0.6521451548625461, 0.3478548451374538};
 
 
 // 2 次六面体の要素行列 (3x3x3 Gauss)。vol には体積 Σ w |det J| を返す
-static int hex2_element(int e, const double c[6], double ke[27][27], double *vol)
+static int hex2_element(int e, const double c[6], double ke[HEXP_NMAX][HEXP_NMAX], double *vol)
 {
 	int32_t nd[ELEM_NMAX];
 	const int nen = hex_nodes(e, nd);
 
-	memset(ke, 0, sizeof(double) * 27 * 27);
+	memset(ke, 0, sizeof(double) * HEXP_NMAX * HEXP_NMAX);
+	// 2 次は各方向 3 点、3 次は 4 点 (直方体の剛性・質量が厳密)
+	const int ng = ((nen == 64) ? 4 : 3);
+	const double *gx = ((ng == 4) ? GX4 : GX3), *gw = ((ng == 4) ? GW4 : GW3);
 	double v = 0, sgn = 0;
-	for (int i = 0; i < 3; i++) {
-	for (int j = 0; j < 3; j++) {
-	for (int k = 0; k < 3; k++) {
-		double g[27][3], det;
-		if (hex2_grad(nd, nen, GX3[i], GX3[j], GX3[k], g, &det)) return 1;
+	for (int i = 0; i < ng; i++) {
+	for (int j = 0; j < ng; j++) {
+	for (int k = 0; k < ng; k++) {
+		double g[HEXP_NMAX][3], det;
+		if (hex2_grad(nd, nen, gx[i], gx[j], gx[k], g, &det)) return 1;
 		if (sgn == 0) sgn = ((det > 0) ? 1 : -1);
 		else if (det * sgn <= 0) return 1;		// 要素内で符号が変わる = 裏返り
-		const double dw = GW3[i] * GW3[j] * GW3[k] * fabs(det);
+		const double dw = gw[i] * gw[j] * gw[k] * fabs(det);
 		v += dw;
 		for (int l = 0; l < nen; l++) {
 			for (int m = 0; m < nen; m++) {
@@ -2753,7 +2909,7 @@ static int hex2_element(int e, const double c[6], double ke[27][27], double *vol
 
 
 // 要素中心での勾配 (場の出力用)
-int hex2_grad_center(int e, double g[27][3], int *nen)
+int hex2_grad_center(int e, double g[HEXP_NMAX][3], int *nen)
 {
 	int32_t nd[ELEM_NMAX];
 	double det;
@@ -2793,8 +2949,9 @@ static void tri_quad(double lam[NQTRI][3], double wq[NQTRI]);
 
 
 // 局所座標 (u, v, ζ) での微分 dn[a][k] (λ = (1-u-v, u, v))
-static void prism2_dshape(int nen, double u, double v, double ze, double dn[18][3])
+static void prism2_dshape(int nen, double u, double v, double ze, double dn[PRISMP_NMAX][3])
 {
+	if (nen == 40) { prism3_shape(u, v, ze, NULL, dn); return; }
 	const double lam[3] = {1 - u - v, u, v};
 	static const signed char dlu[3] = {-1, 1, 0};
 	static const signed char dlv[3] = {-1, 0, 1};
@@ -2853,8 +3010,9 @@ static void prism2_dshape(int nen, double u, double v, double ze, double dn[18][
 
 
 // 局所座標での形状関数の値 (prism2_dshape と同じ基底)
-static void prism2_nval(int nen, double u, double v, double ze, double nv[18])
+static void prism2_nval(int nen, double u, double v, double ze, double nv[PRISMP_NMAX])
 {
+	if (nen == 40) { prism3_shape(u, v, ze, nv, NULL); return; }
 	const double lam[3] = {1 - u - v, u, v};
 	double tn[6];
 	for (int t = 0; t < 3; t++) tn[t] = lam[t] * ((2 * lam[t]) - 1);
@@ -2873,9 +3031,9 @@ static void prism2_nval(int nen, double u, double v, double ze, double nv[18])
 
 
 static int prism2_grad(const int32_t *nd, int nen, double u, double v, double ze,
-	double g[18][3], double *det)
+	double g[PRISMP_NMAX][3], double *det)
 {
-	double dn[18][3];
+	double dn[PRISMP_NMAX][3];
 	prism2_dshape(nen, u, v, ze, dn);
 
 	double jm[3][3];
@@ -2917,23 +3075,27 @@ static int prism2_grad(const int32_t *nd, int nen, double u, double v, double ze
 
 
 // 2 次角柱の要素行列 (面内 Duffy 9 点 x ζ 3 点 Gauss)。vol には体積を返す
-static int prism2_element(int e, const double c[6], double ke[18][18], double *vol)
+static int prism2_element(int e, const double c[6], double ke[PRISMP_NMAX][PRISMP_NMAX], double *vol)
 {
-	int32_t nd[18];
+	int32_t nd[PRISMP_NMAX];
 	const int nen = prism_nodes(e, nd);
 
-	double lam[NQTRI][3], wq[NQTRI];
-	tri_quad(lam, wq);
+	// 2 次は面内 Duffy 9 点 x ζ 3 点、3 次は 16 点 x 4 点
+	double lam[36][3], wq[36];
+	int ntq = NQTRI, ngz = 3;
+	if (nen == 40) { ntq = tri_quad_pub(4, lam, wq); ngz = 4; }
+	else tri_quad(lam, wq);
+	const double *gz = ((ngz == 4) ? GX4 : GX3), *gwz = ((ngz == 4) ? GW4 : GW3);
 
-	memset(ke, 0, sizeof(double) * 18 * 18);
+	memset(ke, 0, sizeof(double) * PRISMP_NMAX * PRISMP_NMAX);
 	double v = 0, sgn = 0;
-	for (int q = 0; q < NQTRI; q++) {
-	for (int k = 0; k < 3; k++) {
-		double g[18][3], det;
-		if (prism2_grad(nd, nen, lam[q][1], lam[q][2], GX3[k], g, &det)) return 1;
+	for (int q = 0; q < ntq; q++) {
+	for (int k = 0; k < ngz; k++) {
+		double g[PRISMP_NMAX][3], det;
+		if (prism2_grad(nd, nen, lam[q][1], lam[q][2], gz[k], g, &det)) return 1;
 		if (sgn == 0) sgn = ((det > 0) ? 1 : -1);
 		else if (det * sgn <= 0) return 1;
-		const double dw = wq[q] * GW3[k] * fabs(det);
+		const double dw = wq[q] * gwz[k] * fabs(det);
 		v += dw;
 		for (int l = 0; l < nen; l++) {
 			for (int m = 0; m < nen; m++) {
@@ -2954,9 +3116,9 @@ static int prism2_element(int e, const double c[6], double ke[18][18], double *v
 
 
 // 要素中心 (u = v = 1/3, ζ = 0) での勾配 (場の出力用)
-int prism2_grad_center(int e, double g[18][3], int *nen)
+int prism2_grad_center(int e, double g[PRISMP_NMAX][3], int *nen)
 {
-	int32_t nd[18];
+	int32_t nd[PRISMP_NMAX];
 	double det;
 
 	*nen = prism_nodes(e, nd);
@@ -3121,13 +3283,25 @@ int tri_quad_pub(int n, double mu[][3], double *wq)
 // 露出面の積分に使う。面は角の局所座標から決める: 六面体は 1 つの座標が ±1 の面 (残り 2 方向
 // 3 点 Gauss)、角柱は ζ = ±1 の三角形 (Duffy 9 点) か三角形の辺 x ζ の四角形 (3 x 3 Gauss)。
 // 戻り値は節点数 (失敗は 0)
+// elem3d_face_ip の積分点の数 (2 次 9、3 次 16)
+int elem3d_face_nip(int e)
+{
+	int32_t nd[ELEM_NMAX];
+	return ((elem3d_nodes(e, nd) >= 40) ? 16 : 9);
+}
+
+
 int elem3d_face_ip(int e, const int32_t *cn, int k, int q, double nv[ELEM_NMAX], double *w)
 {
 	const int kind = elem3d_kind(e);
 	int32_t nd[ELEM_NMAX];
 	const int nen = elem3d_nodes(e, nd);
 	const int ncor = ((kind == MESHELEM_HEX) ? 8 : 6);
-	if ((q < 0) || (q >= 9)) return 0;
+	// 2 次は 9 点 (各方向 3 点)、3 次は 16 点 (各方向 4 点)
+	const int o3 = (nen >= 40);
+	const int ng = (o3 ? 4 : 3);
+	const double *gx = (o3 ? GX4 : GX3), *gw = (o3 ? GW4 : GW3);
+	if ((q < 0) || (q >= (ng * ng))) return 0;
 	if (((kind == MESHELEM_HEX) && ((HexNen <= 8) || (k != 4)))
 	 || ((kind == MESHELEM_PRISM) && (PrismNen <= 6))
 	 || ((kind != MESHELEM_HEX) && (kind != MESHELEM_PRISM))) return 0;
@@ -3139,7 +3313,7 @@ int elem3d_face_ip(int e, const int32_t *cn, int k, int q, double nv[ELEM_NMAX],
 		}
 		if (loc[m] < 0) return 0;
 	}
-	double dn[27][3], d1[3] = {0, 0, 0}, d2[3] = {0, 0, 0}, wt;
+	double dn[HEXP_NMAX][3], d1[3] = {0, 0, 0}, d2[3] = {0, 0, 0}, wt;
 	if (kind == MESHELEM_HEX) {
 		int d = -1;
 		for (int dd = 0; dd < 3; dd++) {
@@ -3151,23 +3325,24 @@ int elem3d_face_ip(int e, const int32_t *cn, int k, int q, double nv[ELEM_NMAX],
 		const int da = (d + 1) % 3, db = (d + 2) % 3;
 		double xi[3];
 		xi[d] = HEX2_XI[loc[0]][d];
-		xi[da] = GX3[q / 3];
-		xi[db] = GX3[q % 3];
-		wt = GW3[q / 3] * GW3[q % 3];
+		xi[da] = gx[q / ng];
+		xi[db] = gx[q % ng];
+		wt = gw[q / ng] * gw[q % ng];
 		d1[da] = 1;
 		d2[db] = 1;
 		hex2_dshape(nen, xi[0], xi[1], xi[2], dn);
 		hex2_nval(nen, xi[0], xi[1], xi[2], nv);
 	}
 	else {
-		double u, v, ze, dpr[18][3], vv[18];
+		double u, v, ze, dpr[PRISMP_NMAX][3], vv[PRISMP_NMAX];
 		if (k == 3) {
 			// ζ = ±1 の三角形
 			for (int m = 1; m < 3; m++) {
 				if (PRISM2_Z[loc[m]] != PRISM2_Z[loc[0]]) return 0;
 			}
-			double lam[NQTRI][3], wq[NQTRI];
-			tri_quad(lam, wq);
+			double lam[36][3], wq[36];
+			if (o3) tri_quad_pub(4, lam, wq);
+			else tri_quad(lam, wq);
 			u = lam[q][1];
 			v = lam[q][2];
 			ze = PRISM2_Z[loc[0]];
@@ -3183,14 +3358,14 @@ int elem3d_face_ip(int e, const int32_t *cn, int k, int q, double nv[ELEM_NMAX],
 				if (PRISM2_T[loc[m]] != i) j = PRISM2_T[loc[m]];
 			}
 			if (j < 0) return 0;
-			const double sp = (GX3[q / 3] + 1) / 2;
+			const double sp = (gx[q / ng] + 1) / 2;
 			double lam[3] = {0, 0, 0};
 			lam[i] = 1 - sp;
 			lam[j] = sp;
 			u = lam[1];
 			v = lam[2];
-			ze = GX3[q % 3];
-			wt = GW3[q / 3] * GW3[q % 3] / 2;
+			ze = gx[q % ng];
+			wt = gw[q / ng] * gw[q % ng] / 2;
 			d1[0] = (double)((j == 1) - (i == 1));
 			d1[1] = (double)((j == 2) - (i == 2));
 			d2[2] = 1;
@@ -3226,8 +3401,8 @@ int elem3d_nip(int e)
 	// 高次の四面体 : Duffy + 各方向 p + 2 点 (質量 N_i N_j の 2p 次が直線要素で厳密)
 	if (kind == MESHELEM_TET) return ((TetOrder >= 2) ? ((TetOrder + 2) * (TetOrder + 2) * (TetOrder + 2)) : 1);
 	// 2 次の六面体 3x3x3 Gauss、2 次の角柱 面内 Duffy 9 点 x ζ 3 点 (剛性の組み立てと同じ則)
-	if (kind == MESHELEM_HEX) return ((HexNen > 8) ? 27 : 8);
-	if (kind == MESHELEM_PRISM) return ((PrismNen > 6) ? (NQTRI * 3) : 6);
+	if (kind == MESHELEM_HEX) return ((HexNen == 64) ? 64 : (HexNen > 8) ? 27 : 8);
+	if (kind == MESHELEM_PRISM) return ((PrismNen == 40) ? 64 : (PrismNen > 6) ? (NQTRI * 3) : 6);
 	return 8;
 }
 
@@ -3267,35 +3442,42 @@ int elem3d_ip(int e, int q, double nv[ELEM_NMAX], double g[ELEM_NMAX][3], double
 		return 0;
 	}
 	if ((kind == MESHELEM_HEX) && (HexNen > 8)) {
-		if ((q < 0) || (q >= 27)) return 1;
+		const int ng = ((HexNen == 64) ? 4 : 3);
+		const double *gx = ((ng == 4) ? GX4 : GX3), *gw = ((ng == 4) ? GW4 : GW3);
+		if ((q < 0) || (q >= (ng * ng * ng))) return 1;
 		int32_t nd[ELEM_NMAX];
 		const int nen = hex_nodes(e - NTet, nd);
-		const double x = GX3[q / 9], y = GX3[(q / 3) % 3], z = GX3[q % 3];
-		double gg[27][3], vv[27], det;
+		const int qi = q / (ng * ng), qj = (q / ng) % ng, qk = q % ng;
+		const double x = gx[qi], y = gx[qj], z = gx[qk];
+		double gg[HEXP_NMAX][3], vv[HEXP_NMAX], det;
 		if (hex2_grad(nd, nen, x, y, z, gg, &det)) return 1;
 		hex2_nval(nen, x, y, z, vv);
 		for (int a = 0; a < nen; a++) {
 			nv[a] = vv[a];
 			for (int c = 0; c < 3; c++) g[a][c] = gg[a][c];
 		}
-		*w = GW3[q / 9] * GW3[(q / 3) % 3] * GW3[q % 3] * fabs(det);
+		*w = gw[qi] * gw[qj] * gw[qk] * fabs(det);
 		return 0;
 	}
 	if ((kind == MESHELEM_PRISM) && (PrismNen > 6)) {
-		if ((q < 0) || (q >= (NQTRI * 3))) return 1;
-		double lam[NQTRI][3], wq[NQTRI];
-		tri_quad(lam, wq);
-		int32_t nd[18];
+		const int o3 = (PrismNen == 40);
+		const int ngz = (o3 ? 4 : 3), ntq = (o3 ? 16 : NQTRI);
+		const double *gz = (o3 ? GX4 : GX3), *gwz = (o3 ? GW4 : GW3);
+		if ((q < 0) || (q >= (ntq * ngz))) return 1;
+		double lam[36][3], wq[36];
+		if (o3) tri_quad_pub(4, lam, wq);
+		else tri_quad(lam, wq);
+		int32_t nd[PRISMP_NMAX];
 		const int nen = prism_nodes(e - NTet - NHex, nd);
-		const int iq = q / 3, k = q % 3;
-		double gg[18][3], vv[18], det;
-		if (prism2_grad(nd, nen, lam[iq][1], lam[iq][2], GX3[k], gg, &det)) return 1;
-		prism2_nval(nen, lam[iq][1], lam[iq][2], GX3[k], vv);
+		const int iq = q / ngz, k = q % ngz;
+		double gg[PRISMP_NMAX][3], vv[PRISMP_NMAX], det;
+		if (prism2_grad(nd, nen, lam[iq][1], lam[iq][2], gz[k], gg, &det)) return 1;
+		prism2_nval(nen, lam[iq][1], lam[iq][2], gz[k], vv);
 		for (int a = 0; a < nen; a++) {
 			nv[a] = vv[a];
 			for (int c = 0; c < 3; c++) g[a][c] = gg[a][c];
 		}
-		*w = wq[iq] * GW3[k] * fabs(det);
+		*w = wq[iq] * gwz[k] * fabs(det);
 		return 0;
 	}
 	if (kind == MESHELEM_HEX) {
@@ -3761,10 +3943,7 @@ static int nodal_test_pyr(FILE *fp_log)
 //      それ以外の要素が混ざる格子では (3) を飛ばして (1)(2) だけ見る。
 
 // 4 点 Gauss-Legendre (3 点則の検算に使う独立な積分)
-static const double GX4[4] = {-0.8611363115940526, -0.3399810435848563,
-                               0.3399810435848563,  0.8611363115940526};
-static const double GW4[4] = {0.3478548451374538, 0.6521451548625461,
-                              0.6521451548625461, 0.3478548451374538};
+
 
 
 // 中間節点が「1 次の写像の位置」からどれだけずれているか (最大、辺長比)
@@ -3890,7 +4069,7 @@ static int nodal_test_hex2(FILE *fp_log)
 		for (int i = 0; i < 3; i++) {
 		for (int j = 0; j < 3; j++) {
 		for (int k = 0; k < 3; k++) {
-			double g[27][3], det;
+			double g[HEXP_NMAX][3], det;
 			if (hex2_grad(nd, nen, GX3[i], GX3[j], GX3[k], g, &det)) continue;
 			v3 += GW3[i] * GW3[j] * GW3[k] * fabs(det);
 		}
@@ -3899,7 +4078,7 @@ static int nodal_test_hex2(FILE *fp_log)
 		for (int i = 0; i < 4; i++) {
 		for (int j = 0; j < 4; j++) {
 		for (int k = 0; k < 4; k++) {
-			double g[27][3], det;
+			double g[HEXP_NMAX][3], det;
 			if (hex2_grad(nd, nen, GX4[i], GX4[j], GX4[k], g, &det)) continue;
 			v4 += GW4[i] * GW4[j] * GW4[k] * fabs(det);
 		}
@@ -3921,7 +4100,7 @@ static int nodal_test_hex2(FILE *fp_log)
 	for (int e = 0; e < NHex; e++) {
 		int32_t nd[ELEM_NMAX];
 		const int nen = hex_nodes(e, nd);
-		double ke[27][27], vol;
+		double ke[HEXP_NMAX][HEXP_NMAX], vol;
 		if (hex2_element(e, c, ke, &vol)) continue;
 		for (int l = 0; l < nen; l++) {
 			for (int m = 0; m < nen; m++) {
@@ -4056,13 +4235,13 @@ static int nodal_test_prism2(FILE *fp_log)
 	// (1) 体積 : 面内 Duffy 9 点 x ζ 3 点と、面内 Duffy 16 点 x ζ 4 点の一致
 	double v3 = 0, v4 = 0;
 	for (int e = 0; e < NPrism; e++) {
-		int32_t nd[18];
+		int32_t nd[PRISMP_NMAX];
 		const int nen = prism_nodes(e, nd);
 		double lam[NQTRI][3], wq[NQTRI];
 		tri_quad(lam, wq);
 		for (int q = 0; q < NQTRI; q++) {
 			for (int k = 0; k < 3; k++) {
-				double g[18][3], det;
+				double g[PRISMP_NMAX][3], det;
 				if (prism2_grad(nd, nen, lam[q][1], lam[q][2], GX3[k], g, &det)) continue;
 				v3 += wq[q] * GW3[k] * fabs(det);
 			}
@@ -4074,7 +4253,7 @@ static int nodal_test_prism2(FILE *fp_log)
 			const double l1 = u, l2 = w * (1 - u);
 			const double jw = (GW4[a] / 2) * (GW4[b] / 2) * (1 - u);
 			for (int k = 0; k < 4; k++) {
-				double g[18][3], det;
+				double g[PRISMP_NMAX][3], det;
 				if (prism2_grad(nd, nen, l1, l2, GX4[k], g, &det)) continue;
 				v4 += jw * GW4[k] * fabs(det);
 			}
@@ -4093,9 +4272,9 @@ static int nodal_test_prism2(FILE *fp_log)
 	crs_alloc(&A);
 	crs_zero(&A);
 	for (int e = 0; e < NPrism; e++) {
-		int32_t nd[18];
+		int32_t nd[PRISMP_NMAX];
 		const int nen = prism_nodes(e, nd);
-		double ke[18][18], vol;
+		double ke[PRISMP_NMAX][PRISMP_NMAX], vol;
 		if (prism2_element(e, c, ke, &vol)) continue;
 		for (int l = 0; l < nen; l++) {
 			for (int m = 0; m < nen; m++) {
@@ -4131,7 +4310,7 @@ static int nodal_test_prism2(FILE *fp_log)
 		int nright = 0;
 		double exact = 0;
 		for (int e = 0; e < NPrism; e++) {
-			int32_t nd[18];
+			int32_t nd[PRISMP_NMAX];
 			const int nen = prism_nodes(e, nd);
 			const int32_t *v6 = &Prism[e * 6];
 			double h = 0;
@@ -4315,7 +4494,7 @@ void assemble_elem3d(crs_t *A, int mode)
 			if (HexNen > 8) {
 				int32_t nd[ELEM_NMAX];
 				const int nen = hex_nodes(e - NTet, nd);
-				double ke[27][27], vol;
+				double ke[HEXP_NMAX][HEXP_NMAX], vol;
 				if (hex2_element(e - NTet, c, ke, &vol)) continue;
 				for (int l = 0; l < nen; l++) {
 					for (int m = 0; m < nen; m++) {
@@ -4339,9 +4518,9 @@ void assemble_elem3d(crs_t *A, int mode)
 
 		if (kind == MESHELEM_PRISM) {
 			if (PrismNen > 6) {
-				int32_t nd[18];
+				int32_t nd[PRISMP_NMAX];
 				const int nen = prism_nodes(e - NTet - NHex, nd);
-				double ke[18][18], vol;
+				double ke[PRISMP_NMAX][PRISMP_NMAX], vol;
 				if (prism2_element(e - NTet - NHex, c, ke, &vol)) continue;
 				for (int l = 0; l < nen; l++) {
 					for (int m = 0; m < nen; m++) {
@@ -4620,14 +4799,269 @@ static int nodal_test_hex(FILE *fp_log)
 }
 
 
+/*
+3 次の六面体 (64 節点) / 角柱 (40 節点) の自己検証 (analysis = P)。
+  (1) 線形場 φ = a・r : どんな形でも φᵀKφ = aᵀCa V (V は要素の積分で得た体積)
+  (2) 3 次の場 φ = a・r + rᵀBr/2 + γ1 xyz + γ2 x³ + γ3 y²z + γ4 xz² + γ5 z³ (全次数 3) :
+      アフィンな要素では Q3 / P3×P3 の空間に厳密に入るので φᵀKφ = Σ_e ∫ ∇φᵀC∇φ。右辺は解析的な
+      勾配を**角の 1 次の写像の上で 5 点則**で積分する (形状関数を使わない独立な計算)。
+      **3 次特有の基底 (辺の 2 節点・面の 4 節点・体心) を検査できるのはこれだけ** (線形場と平行平板は
+      2 次以下に退行しても通る)
+*/
+static void cubic_grad(const double r[3], const double av[3], const double bm[3][3], const double gm[5], double g[3])
+{
+	const double x = r[0], y = r[1], z = r[2];
+	for (int k = 0; k < 3; k++) {
+		g[k] = av[k];
+		for (int l = 0; l < 3; l++) g[k] += bm[k][l] * r[l];
+	}
+	g[0] += (gm[0] * y * z) + (3 * gm[1] * x * x) + (gm[3] * z * z);
+	g[1] += (gm[0] * x * z) + (2 * gm[2] * y * z);
+	g[2] += (gm[0] * x * y) + (gm[2] * y * y) + (2 * gm[3] * x * z) + (3 * gm[4] * z * z);
+}
+
+
+static double cubic_val(const double r[3], const double av[3], const double bm[3][3], const double gm[5])
+{
+	const double x = r[0], y = r[1], z = r[2];
+	double f = (av[0] * x) + (av[1] * y) + (av[2] * z);
+	for (int k = 0; k < 3; k++) {
+		for (int l = 0; l < 3; l++) f += bm[k][l] * r[k] * r[l] / 2;
+	}
+	return f + (gm[0] * x * y * z) + (gm[1] * x * x * x) + (gm[2] * y * y * z) + (gm[3] * x * z * z) + (gm[4] * z * z * z);
+}
+
+
+static int nodal_test_ho3(FILE *fp_log, int prism)
+{
+	int ierr = 0;
+	const int ne = (prism ? NPrism : NHex);
+	fprintf(fp_log, "\n=== nodal element (%s, order 3) self test ===\n", (prism ? "prism" : "hexahedron"));
+	fprintf(fp_log, "  nodes = %d, elements = %d, nodes per element = %d\n", NNode, ne, (prism ? PrismNen : HexNen));
+
+	const double c[6] = {2.0, 3.0, 1.5, 0.4, 0.3, 0.2};
+	const double cm[3][3] = {{c[0], c[3], c[5]}, {c[3], c[1], c[4]}, {c[5], c[4], c[2]}};
+	const double av[3] = {0.7, -1.3, 0.9};
+	const double bm[3][3] = {{3.0, -1.1, 0.6}, {-1.1, 2.2, 1.7}, {0.6, 1.7, -0.9}};
+	// 3 次の項は座標の大きさ (格子の寸法 L) に合わせて振る (L³ の項が線形の項と同じ桁になるように)
+	double lmax = 0;
+	for (int i = 0; i < NNode; i++) {
+		const double m = fabs(Xp[i]) + fabs(Yp[i]) + fabs(Zp[i]);
+		if (m > lmax) lmax = m;
+	}
+	if (lmax <= 0) lmax = 1;
+	double gm[5] = {1.3, -0.8, 1.1, 0.6, -0.7};
+	double bs[3][3];
+	for (int k = 0; k < 5; k++) gm[k] /= (lmax * lmax);
+	for (int k = 0; k < 3; k++) {
+		for (int l = 0; l < 3; l++) bs[k][l] = bm[k][l] / lmax;
+	}
+
+	crs_t A;
+	crs_alloc(&A);
+	crs_zero(&A);
+	double vol = 0;
+	for (int e = 0; e < ne; e++) {
+		int32_t nd[ELEM_NMAX];
+		const int nen = (prism ? prism_nodes(e, nd) : hex_nodes(e, nd));
+		static double kh[HEXP_NMAX][HEXP_NMAX], kp[PRISMP_NMAX][PRISMP_NMAX];
+		double v;
+		if (prism ? prism2_element(e, c, kp, &v) : hex2_element(e, c, kh, &v)) {
+			fprintf(fp_log, "*** element %d is degenerate or inverted\n", e + 1);
+			ierr = 1;
+			continue;
+		}
+		vol += v;
+		for (int l = 0; l < nen; l++) {
+			for (int m = 0; m < nen; m++) {
+				const int64_t p = crs_find(&A, nd[l], nd[m]);
+				if (p >= 0) A.val[p] += (prism ? kp[l][m] : kh[l][m]);
+			}
+		}
+	}
+	double *phi = (double *)malloc((size_t)NNode * sizeof(double));
+
+	// (1) 線形場
+	double aca = 0;
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) aca += av[i] * cm[i][j] * av[j];
+	}
+	for (int i = 0; i < NNode; i++) phi[i] = (av[0] * Xp[i]) + (av[1] * Yp[i]) + (av[2] * Zp[i]);
+	double q1 = 0;
+	for (int i = 0; i < NNode; i++) q1 += phi[i] * crs_row_dot(&A, i, phi);
+	{
+		const double want = aca * vol;
+		const double err = fabs(q1 - want) / fabs(want);
+		fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, rel. error = %.2e\n", q1, want, err);
+		if (!(err <= 1e-12)) {
+			fprintf(fp_log, "*** the linear-field identity failed\n");
+			ierr = 1;
+		}
+	}
+
+	// (2) 3 次の場 (アフィンな要素だけ。1 つでも外れたら飛ばす)
+	int naff = 0;
+	double exact = 0;
+	static const double G5[5] = {-0.9061798459386640, -0.5384693101056831, 0.0, 0.5384693101056831, 0.9061798459386640};
+	static const double W5[5] = {0.2369268850561891, 0.4786286704993665, 0.5688888888888889, 0.4786286704993665, 0.2369268850561891};
+	for (int e = 0; e < ne; e++) {
+		int32_t nd[ELEM_NMAX];
+		const int nen = (prism ? prism_nodes(e, nd) : hex_nodes(e, nd));
+		const int nc = (prism ? 6 : 8);
+		double h = 0;
+		for (int l = 0; l < nc; l++) {
+			for (int m = l + 1; m < nc; m++) {
+				const double dx = Xp[nd[m]] - Xp[nd[l]], dy = Yp[nd[m]] - Yp[nd[l]], dz = Zp[nd[m]] - Zp[nd[l]];
+				const double d = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+				if (d > h) h = d;
+			}
+		}
+		// アフィン : 角の 1 次の写像が平行移動の分を除いて一定 (六面体は平行六面体、角柱は上下が平行移動)、
+		// かつ全節点がその写像の上の位置にある (曲がっていない)
+		int aff = 1;
+		for (int cd = 0; cd < 3; cd++) {
+			const double *p = ((cd == 0) ? Xp : (cd == 1) ? Yp : Zp);
+			if (prism) {
+				for (int t = 0; t < 3; t++) {
+					const double dz0 = p[nd[3]] - p[nd[0]], dzt = p[nd[3 + t]] - p[nd[t]];
+					if (fabs(dzt - dz0) > (1e-9 * h)) aff = 0;
+				}
+			}
+			else {
+				double sum = 0;
+				for (int l = 0; l < 8; l++) sum += HEX_SGN[l][0] * HEX_SGN[l][1] * HEX_SGN[l][2] * p[nd[l]];
+				// 双 1 次の交差項 (3 組) もアフィンでは 0
+				double s01 = 0, s12 = 0, s02 = 0;
+				for (int l = 0; l < 8; l++) {
+					s01 += HEX_SGN[l][0] * HEX_SGN[l][1] * p[nd[l]];
+					s12 += HEX_SGN[l][1] * HEX_SGN[l][2] * p[nd[l]];
+					s02 += HEX_SGN[l][0] * HEX_SGN[l][2] * p[nd[l]];
+				}
+				if ((fabs(sum) + fabs(s01) + fabs(s12) + fabs(s02)) > (1e-9 * h)) aff = 0;
+			}
+		}
+		for (int a = nc; aff && (a < nen); a++) {
+			double r0[3] = {0, 0, 0};
+			if (prism) {
+				const double lam[3] = {PRISM3_A[a][0] / 3.0, PRISM3_A[a][1] / 3.0, PRISM3_A[a][2] / 3.0};
+				const double t = PRISM3_A[a][3] / 3.0;
+				for (int k = 0; k < 3; k++) {
+					const double wb = lam[k] * (1 - t), wt = lam[k] * t;
+					r0[0] += (wb * Xp[nd[k]]) + (wt * Xp[nd[3 + k]]);
+					r0[1] += (wb * Yp[nd[k]]) + (wt * Yp[nd[3 + k]]);
+					r0[2] += (wb * Zp[nd[k]]) + (wt * Zp[nd[3 + k]]);
+				}
+			}
+			else {
+				const double xi[3] = {-1 + (2.0 * HEX3_I[a][0] / 3), -1 + (2.0 * HEX3_I[a][1] / 3), -1 + (2.0 * HEX3_I[a][2] / 3)};
+				for (int l = 0; l < 8; l++) {
+					const double w = (1 + (HEX_SGN[l][0] * xi[0])) * (1 + (HEX_SGN[l][1] * xi[1])) * (1 + (HEX_SGN[l][2] * xi[2])) / 8;
+					r0[0] += w * Xp[nd[l]];
+					r0[1] += w * Yp[nd[l]];
+					r0[2] += w * Zp[nd[l]];
+				}
+			}
+			const double dx = Xp[nd[a]] - r0[0], dy = Yp[nd[a]] - r0[1], dz = Zp[nd[a]] - r0[2];
+			if (sqrt((dx * dx) + (dy * dy) + (dz * dz)) > (1e-9 * h)) aff = 0;
+		}
+		if (!aff) continue;
+		naff++;
+		// 角の 1 次の写像の上で 5 点則 (アフィンなので det J は一定)
+		if (prism) {
+			double lq[36][3], wq[36];
+			const int nq = tri_quad_pub(5, lq, wq);
+			double j1[3], j2[3], j3[3];
+			for (int k = 0; k < 3; k++) {
+				const double *p = ((k == 0) ? Xp : (k == 1) ? Yp : Zp);
+				j1[k] = p[nd[1]] - p[nd[0]];
+				j2[k] = p[nd[2]] - p[nd[0]];
+				j3[k] = (p[nd[3]] - p[nd[0]]) / 2;
+			}
+			const double det = fabs((j1[0] * ((j2[1] * j3[2]) - (j2[2] * j3[1]))) - (j1[1] * ((j2[0] * j3[2]) - (j2[2] * j3[0])))
+			                      + (j1[2] * ((j2[0] * j3[1]) - (j2[1] * j3[0]))));
+			for (int q = 0; q < nq; q++) {
+				for (int k = 0; k < 5; k++) {
+					const double t = (G5[k] + 1) / 2;
+					double r[3] = {0, 0, 0};
+					for (int cc = 0; cc < 3; cc++) {
+						const double *p = ((cc == 0) ? Xp : (cc == 1) ? Yp : Zp);
+						for (int m = 0; m < 3; m++) r[cc] += lq[q][m] * (((1 - t) * p[nd[m]]) + (t * p[nd[3 + m]]));
+					}
+					double g[3];
+					cubic_grad(r, av, bs, gm, g);
+					double gcg = 0;
+					for (int i = 0; i < 3; i++) {
+						for (int j = 0; j < 3; j++) gcg += g[i] * cm[i][j] * g[j];
+					}
+					exact += wq[q] * W5[k] * det * gcg;
+				}
+			}
+		}
+		else {
+			for (int i = 0; i < 5; i++) {
+			for (int j = 0; j < 5; j++) {
+			for (int k = 0; k < 5; k++) {
+				const double xi[3] = {G5[i], G5[j], G5[k]};
+				double r[3] = {0, 0, 0}, jm[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+				for (int l = 0; l < 8; l++) {
+					const double f[3] = {1 + (HEX_SGN[l][0] * xi[0]), 1 + (HEX_SGN[l][1] * xi[1]), 1 + (HEX_SGN[l][2] * xi[2])};
+					const double w = f[0] * f[1] * f[2] / 8;
+					const double dw[3] = {HEX_SGN[l][0] * f[1] * f[2] / 8, HEX_SGN[l][1] * f[0] * f[2] / 8, HEX_SGN[l][2] * f[0] * f[1] / 8};
+					const double p[3] = {Xp[nd[l]], Yp[nd[l]], Zp[nd[l]]};
+					for (int cc = 0; cc < 3; cc++) {
+						r[cc] += w * p[cc];
+						for (int d = 0; d < 3; d++) jm[cc][d] += p[cc] * dw[d];
+					}
+				}
+				const double det = fabs((jm[0][0] * ((jm[1][1] * jm[2][2]) - (jm[1][2] * jm[2][1])))
+				                      - (jm[0][1] * ((jm[1][0] * jm[2][2]) - (jm[1][2] * jm[2][0])))
+				                      + (jm[0][2] * ((jm[1][0] * jm[2][1]) - (jm[1][1] * jm[2][0]))));
+				double g[3];
+				cubic_grad(r, av, bs, gm, g);
+				double gcg = 0;
+				for (int a = 0; a < 3; a++) {
+					for (int b = 0; b < 3; b++) gcg += g[a] * cm[a][b] * g[b];
+				}
+				exact += W5[i] * W5[j] * W5[k] * det * gcg;
+			}
+			}
+			}
+		}
+	}
+	if (naff == ne) {
+		for (int i = 0; i < NNode; i++) {
+			const double r[3] = {Xp[i], Yp[i], Zp[i]};
+			phi[i] = cubic_val(r, av, bs, gm);
+		}
+		double q3 = 0;
+		for (int i = 0; i < NNode; i++) q3 += phi[i] * crs_row_dot(&A, i, phi);
+		const double err = fabs(q3 - exact) / fabs(exact);
+		fprintf(fp_log, "  cubic field : phi^T K phi = %.10e, exact = %.10e, rel. error = %.2e\n", q3, exact, err);
+		if (!(err <= 1e-10)) {
+			fprintf(fp_log, "*** the cubic-field identity failed (this is the only test that exercises the order-3 basis)\n");
+			ierr = 1;
+		}
+	}
+	else {
+		fprintf(fp_log, "  cubic field : skipped (%d of %d elements are affine and straight; the identity needs all of them)\n",
+			naff, ne);
+	}
+	free(phi);
+	crs_free(&A);
+	return ierr;
+}
+
+
 int solve_nodal_test(FILE *fp_log)
 {
 	int ierr = 0;
 
 	if (MeshElem == MESHELEM_HEX) {
+		if (HexNen == 64) return nodal_test_ho3(fp_log, 0);
 		return ((HexNen > 8) ? nodal_test_hex2(fp_log) : nodal_test_hex(fp_log));
 	}
 	if (MeshElem == MESHELEM_PRISM) {
+		if (PrismNen == 40) return nodal_test_ho3(fp_log, 1);
 		return ((PrismNen > 6) ? nodal_test_prism2(fp_log) : nodal_test_prism(fp_log));
 	}
 	if (MeshElem == MESHELEM_PYR)   return nodal_test_pyr(fp_log);

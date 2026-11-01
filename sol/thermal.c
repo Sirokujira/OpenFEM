@@ -755,7 +755,8 @@ static double surf_face_ho(crs_t *B, double *g, const double *t, int rad, int f,
 		ge[a] = 0;
 		for (int b = 0; b < nen; b++) me[a][b] = 0;
 	}
-	for (int q = 0; q < 9; q++) {
+	const int nfq = elem3d_face_nip(e);
+	for (int q = 0; q < nfq; q++) {
 		double nv[ELEM_NMAX], w;
 		if (elem3d_face_ip(e, cn, k, q, nv, &w) != nen) { *bad = 1; return 0; }
 		double tg = 0;

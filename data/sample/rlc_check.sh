@@ -3885,6 +3885,121 @@ if ! grep -q "hexahedra / prisms (DC, without radiationexchange)" "$WORK/ofe.log
 	echo "  *** it was rejected for a different reason than radiationexchange" >&2; status=1
 fi
 
+# ---- 3 次の六面体 (64 節点、gmsh の hexa64) と角柱 (40 節点、prism40) ----
+#
+# 局所節点の並びは gmsh 4.15.2 の出力を分類した実測の表 (unstruct.c の HEX3_I / PRISM3_A)。形状関数は
+# 次数によらない Lagrange の式 (1 次元の等間隔の積 / 三角形の多重指数)、積分は各方向 4 点 (角柱は
+# 面内 Duffy 16 点 x ζ 4 点)。格子はすべて gmsh 製 (gmsh_box_ho.py / gmsh_coax_ho.py / gmsh_slab_ho.py)。
+#   (a) 箱の平行平板 : C が閉形式に全桁、analysis = P の線形場・3 次の場の恒等式 (3 次特有の基底を
+#       検査できるのは 3 次の場だけ)、2.2 / 4.1 / バイナリで rlc.csv が完全一致
+#   (b) 曲がった同軸 : C' が h⁴ 以上で収束 (1/4 周 2 -> 4 分割で 六面体 24 倍・角柱 26 倍、実測)
+#   (c) 熱連成 : 片面を冷やす板が閉形式に機械精度 (四角形の面 / 三角形の面)、曲がった面を冷やす円環が
+#       h⁴ (1 次の折れ線の 1/1000)
+echo "[order-3 hex/prism] 64-node hexahedra / 40-node prisms (gmsh hexa64 / prism40)"
+for m in box_hex3 box_prism3; do
+	for f in "" _41 _bin_22 _bin_41; do cp "$SRC/$m$f.msh" "$WORK/"; done
+done
+for m in coax_hex3a coax_hex3b coax_prism3a coax_prism3b slab_hex3 slab_prism3 ann_hex3a ann_hex3b ann_prism3a ann_prism3b ann_hex1b; do
+	cp "$SRC/$m.msh" "$WORK/"
+done
+h3_c() {	# h3_c <格子> <解析> : box_hex2.ofe の格子と解析を差し替えて解く
+	sed -e "s/box_hex2.msh/$1.msh/" -e "s/^analysis.*/analysis = $2/" "$SRC/box_hex2.ofe" > "$WORK/h3.ofe"
+	(cd "$WORK" && "$OFE" -n 2 h3.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  $1 : the run failed -> NG" >&2; status=1; }
+}
+h3_selftest() {	# h3_selftest <ラベル> <cubic|skip> : analysis = P の自己検証の結果
+	if grep -q '^\*\*\*' "$WORK/ofe.log"; then echo "  $1 : self test failed -> NG" >&2; status=1; return; fi
+	if ! grep -q "linear field : .*rel. error" "$WORK/ofe.log"; then echo "  $1 : no linear-field line -> NG" >&2; status=1; return; fi
+	if [ "$2" = cubic ]; then
+		e=$(awk '/cubic field : phi/ { print $NF }' "$WORK/ofe.log")
+		if [ -z "$e" ]; then echo "  $1 : the cubic-field identity did not run -> NG" >&2; status=1; return; fi
+		echo "  $1 : linear and cubic field identities (cubic rel. error $e) -> OK"
+	else
+		if ! grep -q "cubic field : skipped" "$WORK/ofe.log"; then echo "  $1 : the cubic identity ran on a curved mesh -> NG" >&2; status=1; return; fi
+		echo "  $1 : linear field identity on a curved mesh (cubic skipped) -> OK"
+	fi
+}
+for m in box_hex3 box_prism3; do
+	h3_c "$m" C
+	compare "$m : C (parallel plate) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/h3_22.csv"
+	for f in _41 _bin_22 _bin_41; do
+		h3_c "$m$f" C
+		grep -v '^title' "$WORK/rlc.csv" > "$WORK/h3_f.csv"
+		if [ -s "$WORK/h3_22.csv" ] && cmp -s "$WORK/h3_22.csv" "$WORK/h3_f.csv"; then echo "  $m : 2.2 vs ${f#_} : rlc.csv identical -> OK"
+		else echo "  $m : 2.2 vs ${f#_} : differ -> NG" >&2; status=1; fi
+	done
+	h3_c "$m" P
+	h3_selftest "$m (analysis P)" cubic
+done
+# (b) 曲がった同軸 (C' = 2π ε0 εr / ln 3)
+cex=$(awk 'BEGIN { pi = atan2(0, -1); printf "%.12e", 2 * pi * 8.8541878128e-12 * 2.1 / log(3) }')
+for k in hex prism; do
+	for r in a b; do
+		sed -e "s/coax_hex2.msh/coax_${k}3$r.msh/" "$SRC/coax_hex2.ofe" | awk '/^analysis/{print "analysis = C"; next} {print}' > "$WORK/h3cx.ofe"
+		(cd "$WORK" && "$OFE" -n 2 h3cx.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  coax_${k}3$r : the run failed -> NG" >&2; status=1; }
+		eval "c_$r=\$(value_of C)"
+	done
+	tol=$( [ $k = hex ] && echo 1e-4 || echo 2e-4 )
+	compare "curved coax ($k, order 3, finer) : C' [F/m]" "$c_b" "$cex" "$tol"
+	res=$(awk -v a="$c_a" -v b="$c_b" -v e="$cex" 'BEGIN { ea = (a - e) / e; if (ea < 0) ea = -ea; eb = (b - e) / e; if (eb < 0) eb = -eb
+		printf "%s (%.2e -> %.2e, ratio %.1f)", (ea > 12 * eb) ? "OK" : "NG", ea, eb, (eb > 0) ? ea / eb : 0 }')
+	echo "  curved coax ($k, order 3) : C' converges at h^4 or faster (1/4 turn 2 -> 4 cells) : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+sed -e "s/coax_hex2.msh/coax_hex3a.msh/" "$SRC/coax_hex2.ofe" | awk '/^analysis/{print "analysis = P"; next} {print}' > "$WORK/h3cx.ofe"
+(cd "$WORK" && "$OFE" -n 2 h3cx.ofe > /dev/null 2>&1) || true
+h3_selftest "curved coax (hexa64, analysis P)" skip
+# (c) 熱連成
+for m in slab_hex3:8 slab_prism3:16; do
+	g=${m%%:*}; nf=${m#*:}
+	printf 'OpenFEM 1 0\ntitle = order-3 slab cooled on one face\nmesh = %s.msh\nmaterial = 1.0 1e6\ntempco = 2 0 0\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\nconvection = 5000 20 0 2e-3 0 1e-3 0 0\ntemperature = 20\nthermal = 10\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' "$g" > "$WORK/h3th.ofe"
+	th_run h3th.ofe
+	compare "$g : bottom face cooled : T_max (parabola) [degC]" "$(th_t)" 125 1e-9
+	compare "$g : bottom face cooled : T_mean [degC]" "$(t3_tm)" 123.333333333 1e-9
+	th_nface "$g : convection on the bottom face only" "$nf"
+	th_energy "$g"
+done
+set -- $(awk 'BEGIN { pi = atan2(0, -1); a = 0.5e-3; b = 1.5e-3; lz = 0.1e-3; s = 1e6; k = 10; h = 2000; I = 10
+	A = pi * (b * b - a * a); q = (I / A) ^ 2 / s
+	Pb = -q * b * b / (4 * k); Pa = -q * a * a / (4 * k)
+	a11 = -k / b - h * log(b); a12 = -h; r1 = h * Pb - q * b / 2
+	a21 = k / a - h * log(a); a22 = -h; r2 = h * Pa + q * a / 2
+	d = a11 * a22 - a12 * a21; c1 = (r1 * a22 - a12 * r2) / d; c2 = (a11 * r2 - a21 * r1) / d
+	n = 20000; num = 0; den = 0
+	for (i = 0; i < n; i++) { r = a + (b - a) * (i + 0.5) / n; num += r * (-q * r * r / (4 * k) + c1 * log(r) + c2); den += r }
+	printf "%.12e %.12e", lz / (s * A), num / den }')
+h3ra=$1; h3ta=$2
+for m in ann_hex1b ann_hex3a ann_hex3b ann_prism3a ann_prism3b; do
+	printf 'OpenFEM 1 0\ntitle = order-3 annulus cooled on its curved faces\nmesh = %s.msh\nmaterial = 1.0 1e6\ntempco = 2 0 0\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\nconvection = 2000 20\ntemperature = 20\nthermal = 10\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' "$m" > "$WORK/h3an.ofe"
+	th_run h3an.ofe
+	th_energy "$m"
+	eval "e_$m=\$(awk -v t=\"\$(t3_tm)\" -v x=\"\$h3ta\" 'BEGIN { d = (t - 20 - x) / x; if (d < 0) d = -d; printf \"%.6e\", d }')"
+	case "$m" in *3b) compare "$m : R = L / (sigma pi (b^2 - a^2)) [ohm]" "$(th_r)" "$h3ra" 1e-4
+	                  compare "$m : curved faces cooled : volume-mean temperature rise [K]" \
+	                          "$(awk -v t="$(t3_tm)" 'BEGIN { printf "%.12e", t - 20 }')" "$h3ta" 1e-4 ;; esac
+done
+res=$(awk -v l="$e_ann_hex1b" -v ha="$e_ann_hex3a" -v hb="$e_ann_hex3b" -v pa="$e_ann_prism3a" -v pb="$e_ann_prism3b" 'BEGIN {
+	ok = (ha > 12 * hb) && (pa > 12 * pb) && (l > 100 * hb)
+	printf "%s (hexa64 %.2e -> %.2e, prism40 %.2e -> %.2e, hex8 %.2e)", ok ? "OK" : "NG", ha, hb, pa, pb, l }')
+echo "  annulus : order 3 converges at h^4 and beats the linear facets : $res"
+case "$res" in NG*) status=1 ;; esac
+# (d) 弾くべき入力 : 電極面の次数違い、辺要素
+awk '/^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 }
+	e && ($2 == 36) && !done { s = $1 " 10"; for (i = 3; i <= 3 + $3 + 9; i++) s = s " " $i; print s; done = 1; next } { print }' \
+	"$SRC/box_hex3.msh" > "$WORK/h3x_q9.msh"
+sed -e "s/box_hex2.msh/h3x_q9.msh/" "$SRC/box_hex2.ofe" > "$WORK/h3x_q9.ofe"
+mesh_reject "hexa64 with a 9-node electrode quadrilateral" h3x_q9.ofe
+(cd "$WORK" && "$OFE" -n 2 h3x_q9.ofe 2>&1 | grep -q "not a 16-node quadrilateral") || { echo "  *** rejected for a different reason" >&2; status=1; }
+awk '/^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 }
+	e && ($2 == 21) && !done { s = $1 " 9"; for (i = 3; i <= 3 + $3 + 6; i++) s = s " " $i; print s; done = 1; next } { print }' \
+	"$SRC/box_prism3.msh" > "$WORK/h3x_t6.msh"
+sed -e "s/box_hex2.msh/h3x_t6.msh/" "$SRC/box_hex2.ofe" > "$WORK/h3x_t6.ofe"
+mesh_reject "prism40 with a 6-node electrode triangle" h3x_t6.ofe
+(cd "$WORK" && "$OFE" -n 2 h3x_t6.ofe 2>&1 | grep -q "not a 10-node triangle") || { echo "  *** rejected for a different reason" >&2; status=1; }
+sed -e "s/box_hex2.msh/box_hex3.msh/" -e "s/^analysis.*/analysis = E/" "$SRC/box_hex2.ofe" > "$WORK/h3x_e.ofe"
+mesh_reject "analysis E on a hexa64 mesh" h3x_e.ofe
+(cd "$WORK" && "$OFE" -n 2 h3x_e.ofe 2>&1 | grep -q "need a first-order mesh") || { echo "  *** rejected for a different reason" >&2; status=1; }
+
 # ---- 交流の発熱 (thermal + analysis = A) ----
 #
 # 3 次元渦電流 (A-φ) の時間平均の損失 Q_e = ½ eᴴ T_e e (e = jωa + Gφ) で温度を解く。

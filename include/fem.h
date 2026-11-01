@@ -208,7 +208,12 @@ EXTERN int32_t *Tri2;			// [3*NTri] 2 次のときのみ (1 次では NULL)
 EXTERN int32_t *Tet3;			// [TET_HO_MAX*NTet] 3 次・4 次のときのみ (3 次は先頭 16 個)
 #define TRI_NMAX (15)		// 三角形 1 個の最大節点数 (4 次の tri15)
 #define TET_NMAX (35)		// 四面体 1 個の最大節点数 (4 次の tet35)
-#define ELEM_NMAX (35)		// 3 次元要素 1 個の最大節点数 (tet35 > hex27)
+#define ELEM_NMAX (64)		// 3 次元要素 1 個の最大節点数 (3 次の hexa64)
+#define HEXP_NMAX (64)		// 六面体 1 個の節点数の上限 (3 次の hexa64)
+#define PRISMP_NMAX (40)	// 角柱 1 個の節点数の上限 (3 次の prism40)
+#define HEX2_W (56)			// Hex2 の 1 要素あたりの欄数 (頂点以外、3 次で 56)
+#define PRISM2_W (34)		// Prism2 の 1 要素あたりの欄数 (頂点以外、3 次で 34)
+#define QUAD2_W (12)		// Quad2 の 1 面あたりの欄数 (頂点以外、16 節点四角形で 12)
 #define TET_HO_MAX (31)		// Tet3 の 1 要素あたりの幅 (頂点以外の節点、3 次 16 / 4 次 31)
 #define TRI_HO_MAX (12)		// Tri3 の 1 要素あたりの幅 (頂点以外の節点、3 次 7 / 4 次 12)
 EXTERN int32_t *Tri3;			// [TRI_HO_MAX*NTri] 常に確保 (3 次は先頭 7 個、使わない欄は -1)
@@ -252,13 +257,13 @@ EXTERN unsigned char *HexMat;	// [NHex] 材料番号
 //        y+ (2,3,7,6), z+ (4,5,6,7)、最後に体心
 // 次数の混在は弾くので HexNen は格子全体で 1 つ (8 / 20 / 27)
 EXTERN int HexNen;				// 六面体 1 個の節点数
-EXTERN int32_t *Hex2;			// [19*NHex] 2 次のときのみ (1 次では NULL)
+EXTERN int32_t *Hex2;			// [HEX2_W*NHex] 2 次以上のときのみ (1 次では NULL)
 EXTERN int NQuad;				// 四角形数 (電極面の指定に使う)
 EXTERN int32_t *Quad;			// [4*NQuad] 頂点
 EXTERN int *QuadTag;			// [NQuad] 物理タグ
 // 2 次の四角形 (型 16 = 8 節点 / 10 = 9 節点)。辺 (0,1)(1,2)(2,3)(3,0) の
 // 中間節点 4 個 + 中心 (8 節点では -1)。電極の中間節点の固定にだけ使う
-EXTERN int32_t *Quad2;			// [5*NQuad] 2 次のときのみ (1 次では NULL)
+EXTERN int32_t *Quad2;			// [QUAD2_W*NQuad] 2 次以上のとき (1 次では -1)
 
 // 角柱 (6 節点、三角形を押し出した形)。局所の並びは Gmsh / VTK と同じ
 // 「下面の三角形 (0,1,2)、その真上に上面 (3,4,5)」。境界面は三角形と四角形の
@@ -273,7 +278,7 @@ EXTERN unsigned char *PrismMat;	// [NPrism] 材料番号
 //   辺 : (0,1)(0,2)(0,3)(1,2)(1,4)(2,5)(3,4)(3,5)(4,5)
 //   四角形面 : (0,1,4,3) (0,2,5,3) (1,2,5,4)
 EXTERN int PrismNen;			// 角柱 1 個の節点数 (6 / 15 / 18)
-EXTERN int32_t *Prism2;			// [12*NPrism] 2 次のときのみ (1 次では NULL)
+EXTERN int32_t *Prism2;			// [PRISM2_W*NPrism] 2 次以上のときのみ (1 次では NULL)
 
 // ピラミッド (5 節点、四角形の底面 + 頂点)。局所の並びは Gmsh / VTK と同じ
 // 「底面を反時計回り (0..3)、最後に頂点 (4)」。四角形面 1 枚と三角形面 4 枚を
