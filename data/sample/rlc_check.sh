@@ -1026,17 +1026,8 @@ res=$(awk -v a="$c1" -v b="$c2" 'BEGIN {
 echo "  order 2 beats order 1 on the same coarse mesh : $res"
 case "$res" in NG*) status=1 ;; esac
 # (e) 弾かれるべき入力 (理由の文字列まで見る)
-# 次数の混在 : 1 次の六面体格子に 27 節点六面体を 1 個足す
-awk '/^\$Elements/ { print; getline; print $1 + 1
-                     print "9999 12 2 1 1 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27"
-                     next } { print }' \
-    "$SRC/box_hex.msh" > "$WORK/mixord.msh"
-sed 's/^mesh = .*/mesh = mixord.msh/' "$SRC/box_hex.ofe" > "$WORK/mixord.ofe"
-mesh_reject "an 8-node mesh with one 27-node hexahedron" mixord.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 mixord.ofe 2>&1 | grep -q "mixed hexahedron orders"); then
-	echo "  *** it was rejected for a different reason than the order mixing" >&2
-	status=1
-fi
+# (次数の違う六面体の混在は弾かず最高次数に上げる。検査は [mixed orders] の (e)。以前ここにあった「1 次の格子に
+#  でたらめな節点の 27 節点六面体を足すと弾く」検査は、次数の混在で弾かなくなったので外した)
 # 2 次の六面体格子に 1 次の四角形 (電極面) を足す -> 中間節点が固定されない
 awk '/^\$Elements/ { print; getline; print $1 + 1
                      print "9998 3 2 10 10 1 2 3 4"; next } { print }' \
@@ -1058,16 +1049,7 @@ if ! (cd "$WORK" && "$OFE" -n 2 q8.ofe 2>&1 | grep -q "no centre node"); then
 	echo "  *** it was rejected for a different reason than the missing centre node" >&2
 	status=1
 fi
-# 2 次の六面体と 1 次の角柱の混在 (種別の混在は次数が揃っていること。[mixed high order] も参照)
-awk '/^\$Elements/ { print; getline; print $1 + 1
-                     print "9997 6 2 1 1 1 2 3 4 5 6"; next } { print }' \
-    "$SRC/box_hex2.msh" > "$WORK/mix2.msh"
-sed 's/^mesh = .*/mesh = mix2.msh/' "$SRC/box_hex2.ofe" > "$WORK/mix2.ofe"
-mesh_reject "an order-2 hex mesh mixed with a prism" mix2.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 mix2.ofe 2>&1 | grep -q "must have the same order"); then
-	echo "  *** it was rejected for a different reason than the mixed-order rule" >&2
-	status=1
-fi
+# (2 次の六面体と 1 次の角柱の混在も最高次数に上げる。検査は [mixed high order] の (d) の同軸)
 
 # 六面体・角柱の辺要素 (最低次 Nedelec)。参照要素の辺基底を共変 Piola 変換
 # (W = J^-T W^, ∇×W = J c^ / det J) で物理空間に写して数値積分する。
