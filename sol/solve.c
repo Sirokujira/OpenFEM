@@ -429,7 +429,7 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 	fprintf(fp_log, "  transient (eddy currents%s) : t_end = %.6e [s], %d steps (dt = %.6e [s]), "
 		"%d conducting cells in %d isolated regions (zero net current each)\n",
 		((JaB != NULL) ? " + hysteresis" : ""), TransientTime, TransientSteps, dt, nsigc, ncomp);
-	FILE *fcsv = fopen(FN_transient, "w");
+	FILE *fcsv = mpi_fopen_out(FN_transient, "w");
 	if (fcsv == NULL) {
 		fprintf(fp_log, "*** cannot open %s\n", FN_transient);
 		ierr = 1;
@@ -1708,7 +1708,13 @@ int solve(FILE *fp_log)
 	掃引の無い入力と fieldout = 1 は分散する仕事が無い / 場が解いた rank に
 	しか無いので、黙って直列で走らず入力エラーにする。
 	*/
-	if (msize > 1) {
+	if ((msize > 1) && MpiSolve) {
+		// 行ブロックの行列ベクトル積 (以下は全 rank が直列と同じ流れを重複して走る)
+		mpi_rows_enable(1);
+		fprintf(fp_log, "\n=== MPI : matrix-vector products split by rows over %d ranks "
+			"(everything else is repeated on every rank in the serial order) ===\n", msize);
+	}
+	else if (msize > 1) {
 		if (NFreqSweep < 2) {
 			fprintf(fp_log, "*** MPI parallelism distributes the frequency-sweep "
 				"points, but this input has fewer than two; run without mpirun, "
@@ -1743,16 +1749,16 @@ int solve(FILE *fp_log)
 		return ierr;
 	}
 
-	FILE *fp = ((mrank == 0) ? fopen(FN_sweep, "w") : NULL);
-	if ((mrank == 0) && (fp == NULL)) {
+	FILE *fp = (((mrank == 0) || MpiSolve) ? mpi_fopen_out(FN_sweep, "w") : NULL);
+	if (((mrank == 0) || MpiSolve) && (fp == NULL)) {
 		fprintf(fp_log, "*** %s open error\n", FN_sweep);
 		h5_close(NULL);
 		return 1;
 	}
 	fprintf(fp_log, "\n=== frequency sweep (%d points%s) ===\n", NFreqSweep,
-		((msize > 1) ? ", MPI" : ""));
+		(((msize > 1) && !MpiSolve) ? ", MPI" : ""));
 
-	if (msize > 1) {
+	if ((msize > 1) && !MpiSolve) {
 		/*
 		点 q を rank (q % msize) に round-robin で配る。各 rank は自分の点を
 		解いて結果 (Have* と結果行列 8 本) を 1 本の pack にして rank 0 へ送り、

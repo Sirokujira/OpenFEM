@@ -125,12 +125,16 @@ void crs_spmv(const crs_t *A, const double *x, double *y, const unsigned char *f
 	// MSVC の OpenMP 2.0 は 64bit のループ変数を受け付けないので int を使う
 	// (節点数が INT32_MAX 未満であることは setup() で確認済み)
 	const int n = (int)A->n;
+	// mpisolve : この rank の行ブロックだけ計算して全 rank で揃える (行ごとの和の順序は分け方に
+	// 依らないので直列とビット単位で同じ。無効のときは r0 = 0, r1 = n で従来どおり)
+	int r0, r1;
+	mpi_row_range(n, &r0, &r1);
 
 	int row;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (row = 0; row < n; row++) {
+	for (row = r0; row < r1; row++) {
 		if ((fix != NULL) && fix[row]) {
 			y[row] = x[row];
 			continue;
@@ -143,6 +147,7 @@ void crs_spmv(const crs_t *A, const double *x, double *y, const unsigned char *f
 		}
 		y[row] = s;
 	}
+	mpi_allgather_rows(y, n);
 }
 
 

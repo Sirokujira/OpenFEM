@@ -1378,7 +1378,7 @@ int solve_eddy3d_transient(FILE *fp_log)
 	double bref = 0;
 	long fptotal = 0;
 
-	FILE *fcsv = fopen("ofe_transient.csv", "w");
+	FILE *fcsv = mpi_fopen_out("ofe_transient.csv", "w");
 	if (fcsv) fprintf(fcsv, "t [s],V [V],I [A],W_in [J],W_mag [J],W_joule [J],iter\n");
 	double win = 0, wmag = 0, wjou = 0;
 	fprintf(fp_log, "  %6s %13s %13s %13s %6s\n", "step", "t [s]", "V [V]", "I [A]", "iter");

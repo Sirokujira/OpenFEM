@@ -387,7 +387,11 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
   落ちる。Gmsh バイナリは gmsh 自身に変換させたものを置いてある。
   なお gmsh は変換のたびに節点を振り直すので、比較する ASCII 側も**同じ変換で
   出したもの**でないと丸めの順序が変わって一致しない。
-- **MPI の並列化の粒度は「周波数掃引の点」だけ。** 各点の演算は直列と完全に
+- **`mpisolve = 1` は疎行列ベクトル積 `crs_spmv()` の行ブロック分割** (`mpi_row_range` /
+  `mpi_allgather_rows`)。それ以外は全 rank が直列の順で重複して走るので出力は直列とバイト一致。
+  行列ベクトル積を `crs_spmv()` を通さずに書くと分散から漏れる (結果は正しいが遅い) ので、新しい積も
+  `crs_spmv()` を使うこと。出力ファイルは `mpi_fopen_out()` で開く (rank > 0 は null デバイス)。
+- **MPI の並列化の粒度は「周波数掃引の点」(既定) か、上の行ブロックの積 (`mpisolve`) だけ。** 各点の演算は直列と完全に
   同一なので、`mpirun -np N` の出力は直列と**バイト単位で一致**しなければ
   ならない (それが `rlc_check.sh` の [mpi] 節の恒等式。閉形式も許容誤差も
   要らない)。rank 0 だけがファイルを書き、他 rank のログは tmpfile に捨てる。

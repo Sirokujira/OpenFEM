@@ -2242,7 +2242,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	crs_alloc(&S);
 	th_mass(&M, ccell);
 
-	FILE *fcsv = fopen(FN_transient, "w");
+	FILE *fcsv = mpi_fopen_out(FN_transient, "w");
 	if (fcsv == NULL) {
 		fprintf(fp_log, "*** thermal : cannot open %s\n", FN_transient);
 		ierr = 1;

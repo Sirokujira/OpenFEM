@@ -373,6 +373,7 @@ EXTERN double ConvTabT[MAXTEMPTAB], ConvTabF[MAXTEMPTAB];	// 面の温度 [degC]
 EXTERN int ProfN[2];			// 面の係数の位置の折れ線 (0 : 対流 h、1 : 輻射 ε) の点数 (0 : 位置に依らない)
 EXTERN int ProfAxis[2];			// 折れ線の座標軸 (0 = x, 1 = y, 2 = z)
 EXTERN double ProfX[2][MAXTEMPTAB], ProfF[2][MAXTEMPTAB];	// 位置 [m] と倍率
+EXTERN int MpiSolve;				// 1 : mpirun で行列ベクトル積を行ブロックに分ける (mpisolve)
 EXTERN int ExprOn[2];				// 面の係数の位置の式 (0 : 対流 h、1 : 輻射 ε) がある
 EXTERN expr_t ExprF[2];				// 位置の式 (面の中心で評価して倍率にする)
 EXTERN char ExprStr[2][EXPR_MAXLEN];	// 位置の式の文字列 (ログ用)

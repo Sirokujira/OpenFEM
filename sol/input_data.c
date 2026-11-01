@@ -284,6 +284,7 @@ int input_data(FILE *fp)
 	RadTabN = 0;
 	ProfN[0] = ProfN[1] = 0;
 	ProfAxis[0] = ProfAxis[1] = 0;
+	MpiSolve = 0;
 	ExprOn[0] = ExprOn[1] = 0;
 	ExprBad[0] = ExprBad[1] = 0;
 	ExprStr[0][0] = ExprStr[1][0] = '\0';
@@ -1039,6 +1040,19 @@ int input_data(FILE *fp)
 			}
 			ProfAxis[k] = ax - 'x';
 			ProfN[k] = np;
+		}
+		else if (!strcmp(strkey, "mpisolve")) {
+			// mpisolve = 0 | 1 : 1 で mpirun の rank に行列ベクトル積を行ブロックで分ける (掃引の点の
+			//   分散の代わり。出力は直列とバイト一致)。WITH_MPI=OFF のビルドでは黙って直列に落ちず入力エラー
+			if ((nval != 1) || ((atoi(token[2]) != 0) && (atoi(token[2]) != 1))) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			MpiSolve = atoi(token[2]);
+			if (MpiSolve && !mpi_enabled()) {
+				printf("%s\n", "*** mpisolve = 1 needs a build with -DWITH_MPI=ON (this binary was built without MPI)");
+				return 1;
+			}
 		}
 		else if (!strcmp(strkey, "convectionexpr") || !strcmp(strkey, "radiationexpr")) {
 			// convectionexpr = <式 f(x, y, z)>   (radiationexpr も同じ)

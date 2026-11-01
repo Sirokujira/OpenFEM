@@ -1418,9 +1418,57 @@ else
 		else
 			echo "  HDF5 series comparison : skipped (no HDF5 build or no h5dump)"
 		fi
+		# 行ブロックの行列ベクトル積 (mpisolve = 1)。各 rank が crs_spmv の自分の行だけ計算して
+		# Allgatherv で揃え、他の演算は全 rank が直列の順で重複して行うので、出力は直列とバイト一致。
+		# 構造格子の CG (C)、A-φ の COCG (A)、熱の過渡 (Picard + θ 法)、掃引、場の出力 (rank 0 だけが書く)
+		cp "$SRC/parallel_plate.ofe" "$SRC/bar_eddy.ofe" "$SRC/bar_tet.msh" "$SRC/thermal_transient.ofe" "$SRC/sweep_plate.ofe" "$WORK/"
+		for c in parallel_plate bar_eddy thermal_transient sweep_plate; do
+			awk '/^analysis/{print "mpisolve = 1"} {print}' "$WORK/$c.ofe" > "$WORK/ms_$c.ofe"
+		done
+		sed 's/^analysis = /fieldout = 1\nanalysis = /' "$WORK/ms_parallel_plate.ofe" > "$WORK/ms_field.ofe"
+		for c in parallel_plate bar_eddy thermal_transient sweep_plate field; do
+			rm -rf "$WORK/msref"; mkdir -p "$WORK/msref"
+			rm -f "$WORK/ofe.out" "$WORK/ofe_transient.csv" "$WORK/ofe_sweep.csv" "$WORK/ofe_field.vtk"
+			(cd "$WORK" && "$OFE" -n 2 "ms_$c.ofe" > /dev/null 2>&1) || { echo "  mpisolve $c : the serial run failed -> NG" >&2; status=1; }
+			for o in ofe.out ofe_transient.csv ofe_sweep.csv ofe_field.vtk; do
+				[ -f "$WORK/$o" ] && cp "$WORK/$o" "$WORK/msref/"
+			done
+			nps="2 3"; [ "$c" = thermal_transient ] && nps=2
+			for np in $nps; do
+				rm -f "$WORK/ofe.out" "$WORK/ofe_transient.csv" "$WORK/ofe_sweep.csv" "$WORK/ofe_field.vtk"
+				(cd "$WORK" && mpirun -np $np "$OFE" -n 2 "ms_$c.ofe" > /dev/null 2>&1) || true
+				r=OK; nf=0
+				for o in ofe.out ofe_transient.csv ofe_sweep.csv ofe_field.vtk; do
+					if [ -f "$WORK/msref/$o" ]; then
+						nf=$((nf + 1))
+						cmp -s "$WORK/msref/$o" "$WORK/$o" || r=NG
+					fi
+				done
+				grep -q "matrix-vector products split by rows over $np ranks" "$WORK/ofe.log" || r=NG
+				if [ "$r" = OK ] && [ "$nf" -ge 1 ]; then
+					echo "  mpisolve = 1, np = $np : $c gives byte-identical output ($nf files) : OK"
+				else
+					echo "  mpisolve = 1, np = $np : $c differs from the serial run (or not split) -> NG" >&2
+					status=1
+				fi
+			done
+		done
 		;;
 	esac
 fi
+# mpisolve = 1 は MPI の無いビルドでは黙って直列に落ちず入力エラー (MPI のビルドでは直列でも走る)
+awk '/^analysis/{print "mpisolve = 1"} {print}' "$SRC/parallel_plate.ofe" > "$WORK/msx.ofe"
+msmsg=$( (cd "$WORK" && "$OFE" -n 2 msx.ofe 2>&1) || true)
+case "$msmsg" in
+*"needs a build with -DWITH_MPI=ON"*)
+	echo "  [mpi] mpisolve = 1 in a build without MPI : rejected -> OK" ;;
+*)
+	if grep -q "normal end" "$WORK/ofe.log"; then
+		echo "  [mpi] mpisolve = 1 without mpirun (MPI build) : runs serially -> OK"
+	else
+		echo "  [mpi] mpisolve = 1 : neither rejected nor run -> NG" >&2; status=1
+	fi ;;
+esac
 
 # Gmsh **バイナリ**形式の読み込み。
 #

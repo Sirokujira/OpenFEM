@@ -432,7 +432,7 @@ int field_write(FILE *fp_log)
 		return 0;
 	}
 
-	FILE *fp = fopen(FN_field, "w");
+	FILE *fp = mpi_fopen_out(FN_field, "w");
 	if (fp == NULL) {
 		fprintf(fp_log, "*** %s open error\n", FN_field);
 		return 1;
