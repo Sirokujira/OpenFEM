@@ -592,6 +592,7 @@ static double surf_faces_grid(crs_t *B, double *g, const double *t, const double
 
 			if (B) {
 				for (int m = 0; m < 4; m++) {
+					if (!crs_owns(B, nd[m])) continue;		// 分散した行列 (mpisolve = 2) : 他の rank の行
 					const int64_t rowstart = B->rowptr[nd[m]];
 					for (int mm = 0; mm < 4; mm++) {
 						const int64_t pos = crs_offset(rowstart, li[m], lj[m], lk[m],
@@ -2532,6 +2533,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	crs_t M, S;
 	crs_alloc(&M);
 	crs_alloc(&S);
+	crs_distribute_pair(NULL, &M, &S);		// mpisolve = 2 : 熱の行列と同じ分け方 (S = M/Δt + θB を値の配列で作る)
 	th_mass(&M, ccell);
 
 	FILE *fcsv = mpi_fopen_out(FN_transient, "w");
@@ -2975,6 +2977,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	crs_t A, B;
 	crs_alloc(&A);
 	crs_alloc(&B);
+	crs_distribute_pair(fp_log, &A, &B);		// mpisolve = 2 : 電気と熱の行列 (同じ節点のパターン) を自分の行ブロックだけ
 	th_assemble(&B, kcell);
 	crs_diag(&B, diag);
 	double dmaxt = 0;

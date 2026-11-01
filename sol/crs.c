@@ -109,7 +109,7 @@ crs_owns で飛ばし、非構造格子は crs_find が空の行で -1 を返す
 行ごとの和の順序は直列と同じなので、行列ベクトル積・対角・反作用は直列と**ビット単位で同じ**になる。
 分散する行列は crs_distribute で登録したもの (DIST_MAX 個まで) だけなので、他の行列の扱いは一切変わらない。
 */
-#define DIST_MAX (4)		// 分散する行列の数の上限 (A-φ の実部・虚部など)
+#define DIST_MAX (8)		// 分散する行列の数の上限 (A-φ の実部・虚部、熱連成の電気・熱・熱容量など)
 static const crs_t *DistM[DIST_MAX];
 static int64_t DistR0[DIST_MAX], DistR1[DIST_MAX];
 static int NDist = 0;

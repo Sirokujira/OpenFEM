@@ -1509,6 +1509,31 @@ else
 				status=1
 			fi
 		done
+		# 断面 2 次元の M (線形、構造格子・三角形) と F (構造格子・三角形・B-H の実効磁気抵抗率法)、熱連成 (構造格子・
+		# 四面体・過渡解析)。M / F は K と M (σ) を、熱連成は電気・熱・熱容量の行列を同じ分け方で詰める
+		cp "$SRC/plate_line_dc.ofe" "$SRC/plate2d_dc.ofe" "$SRC/plate2d.msh" "$SRC/plate_line_ac.ofe" "$SRC/plate2d_ac.ofe" \
+		   "$SRC/plate_line_bh_ac.ofe" "$SRC/thermal_bar.ofe" "$SRC/thermal_tet.ofe" "$SRC/thermal_transient.ofe" "$WORK/"
+		for c in plate_line_dc plate2d_dc plate_line_ac plate2d_ac plate_line_bh_ac thermal_bar thermal_tet thermal_transient; do
+			[ -f "$WORK/$c.ofe" ] || { echo "  mpisolve = 2 $c : no input -> NG" >&2; status=1; continue; }
+			m=$(awk '/^mesh/{print $3}' "$WORK/$c.ofe"); [ -n "$m" ] && cp "$SRC/$m" "$WORK/" 2> /dev/null
+			awk '/^analysis/{print "mpisolve = 2"} {print}' "$WORK/$c.ofe" > "$WORK/mv_$c.ofe"
+			rm -f "$WORK/ofe.out" "$WORK/ofe_transient.csv" "$WORK/mv_ref.csv"
+			(cd "$WORK" && "$OFE" -n 2 "mv_$c.ofe" > /dev/null 2>&1) || { echo "  mpisolve = 2 $c : the serial run failed -> NG" >&2; status=1; }
+			cp "$WORK/ofe.out" "$WORK/mv_ref.out" 2> /dev/null || true
+			[ -f "$WORK/ofe_transient.csv" ] && cp "$WORK/ofe_transient.csv" "$WORK/mv_ref.csv"
+			rm -f "$WORK/ofe.out" "$WORK/ofe_transient.csv"
+			(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 "mv_$c.ofe" > /dev/null 2>&1) || true
+			k=$(grep -c "the matrix is distributed by rows" "$WORK/ofe.log" || true)
+			r=OK
+			cmp -s "$WORK/mv_ref.out" "$WORK/ofe.out" || r=NG
+			if [ -f "$WORK/mv_ref.csv" ]; then cmp -s "$WORK/mv_ref.csv" "$WORK/ofe_transient.csv" || r=NG; fi
+			if [ "$r" = OK ] && [ "$k" -ge 2 ]; then
+				echo "  mpisolve = 2, np = 2 : $c gives byte-identical output, $k distributed matrices : OK"
+			else
+				echo "  mpisolve = 2, np = 2 : $c differs from the serial run (or $k matrices distributed) -> NG" >&2
+				status=1
+			fi
+		done
 		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2.msh"; next} /^frequency/{next} /^analysis/{print "mpisolve = 2"; print "transient = 2e-4 5"} {print}' > "$WORK/mdx_a.ofe"
 		(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 mdx_a.ofe > /dev/null 2>&1) \
 			&& { echo "  mpisolve = 2 with the second-order A transient : accepted -> NG" >&2; status=1; } \

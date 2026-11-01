@@ -647,7 +647,14 @@ static int solve_magnetostatic(FILE *fp_log)
 	fflush(fp_log);
 
 	crs_t A;
-	crs_alloc(&A);
+	crs_alloc_dist(&A);		// mpisolve = 2 なら自分の行ブロックだけ (線形のときだけ。setup の判定)
+	{
+		int64_t r0, r1;
+		if (crs_dist_info(&A, &r0, &r1)) {
+			fprintf(fp_log, "\n=== MPI : the matrix is distributed by rows (mpisolve = 2) : rank %d holds rows %lld..%lld "
+				"of %d (%lld nonzeros) ===\n", mpi_rank(), (long long)r0, (long long)(r1 - 1), n, (long long)A.nnz);
+		}
+	}
 
 	// 鉄損 (bertotti) を評価する材料があるか
 	int havebe = 0;
@@ -1181,6 +1188,7 @@ static int solve_eddy(FILE *fp_log)
 	crs_t K, M;
 	crs_alloc(&K);
 	crs_alloc(&M);
+	crs_distribute_pair(fp_log, &K, &M);		// mpisolve = 2 : 自分の行ブロックだけ (同じパターンを同じ分け方で)
 	if (tri2d) assemble_mass_tri(&M);		// σ
 	else       assemble_mass(&M);
 
@@ -1736,11 +1744,12 @@ int solve(FILE *fp_log)
 	しか無いので、黙って直列で走らず入力エラーにする。
 	*/
 	if ((msize > 1) && (MpiSolve == 2)
-	 && (ThermalOn || Direct || (Analysis & ~(ANALYSIS_C | ANALYSIS_L | ANALYSIS_R | ANALYSIS_A))
-	     || ((Analysis & ANALYSIS_A) && TransientOn && ((TetOrder >= 2) || mpi_any_nonlin())))) {
+	 && (Direct || (Analysis & ~(ANALYSIS_C | ANALYSIS_L | ANALYSIS_R | ANALYSIS_A | ANALYSIS_M | ANALYSIS_F))
+	     || ((Analysis & ANALYSIS_A) && TransientOn && ((TetOrder >= 2) || mpi_any_nonlin()))
+	     || ((Analysis & ANALYSIS_M) && (TransientOn || mpi_any_nonlin())))) {
 		fprintf(fp_log, "*** mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R, "
-			"A in the frequency domain and the linear first-order A transient only (no thermal, no direct = 1); "
-			"use mpisolve = 1\n");
+			"A and F in the frequency domain, the linear M, the linear first-order A transient and thermal only "
+			"(no direct = 1); use mpisolve = 1\n");
 		return 1;
 	}
 	if ((msize > 1) && MpiSolve) {
