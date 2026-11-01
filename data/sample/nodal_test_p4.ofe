@@ -1,0 +1,19 @@
+OpenFEM 1 0
+title = nodal element (P4) self test, anisotropic epsilon
+#
+# 4 次四面体 (35 節点、gmsh の tet35 = 型 30) の自己検証 (analysis = P)。直線要素の箱
+# (box_p4.msh、gmsh の box_p3.geo を -order 4 で切ったもの) で
+#   (a) K 1 = 0、(b) 1 次・(c) 2 次・(f) 3 次・(g) 4 次の φ で φᵀKφ = ∫(∇φ)ᵀε(∇φ) dV、
+#   (e) 重心の勾配、(d) 対称性
+# を機械精度で見る。**4 次特有の基底を検査できるのは (g) だけ**。(g) の厳密値は解析的な
+# ∇φ を別の積分則 (Duffy + 6 点) で積分したもので、要素行列 (5 点) と独立。
+#
+mesh = box_p4.msh
+material = 1.0 0.0
+anisoepsr = 2 5.0 3.5 2.5 0.8 0.6 1.3
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end

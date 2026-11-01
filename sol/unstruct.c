@@ -112,7 +112,8 @@ static void elem_reset(void)
 static int elem_store(int type, int tag, const int32_t *nd)
 {
 	const int order = (((type == 11) || (type == 9)) ? 2
-	                 : ((type == 29) || (type == 21)) ? 3 : 1);
+	                 : ((type == 29) || (type == 21)) ? 3
+	                 : ((type == 30) || (type == 23)) ? 4 : 1);
 
 	if ((type == 5) || (type == 12) || (type == 17)) {
 		// 六面体 (8 / 27 / 20 節点)。局所の並びは Gmsh のまま使う。
@@ -195,7 +196,7 @@ static int elem_store(int type, int tag, const int32_t *nd)
 		return 0;
 	}
 
-	if ((type == 4) || (type == 11) || (type == 29)) {
+	if ((type == 4) || (type == 11) || (type == 29) || (type == 30)) {
 		// 四面体。次数は最初の 1 個で決め、以後は混在を許さない
 		if (TetOrder == 0) TetOrder = order;
 		if (TetOrder != order) {
@@ -209,16 +210,18 @@ static int elem_store(int type, int tag, const int32_t *nd)
 			if (order == 2) {
 				Tet2 = (int32_t *)realloc(Tet2, (size_t)(NTet + ARRAY_INC) * 6 * sizeof(int32_t));
 			}
-			if (order == 3) {
-				Tet3 = (int32_t *)realloc(Tet3, (size_t)(NTet + ARRAY_INC) * 16 * sizeof(int32_t));
+			if (order >= 3) {
+				Tet3 = (int32_t *)realloc(Tet3, (size_t)(NTet + ARRAY_INC) * TET_HO_MAX * sizeof(int32_t));
 			}
 		}
 		for (int l = 0; l < 4; l++) Tet[(NTet * 4) + l] = nd[l];
 		if (order == 2) {
 			for (int l = 0; l < 6; l++) Tet2[(NTet * 6) + l] = nd[4 + l];
 		}
-		if (order == 3) {
-			for (int l = 0; l < 16; l++) Tet3[(NTet * 16) + l] = nd[4 + l];
+		if (order >= 3) {
+			// 頂点以外 (3 次 16、4 次 31)。使わない欄は -1
+			const int nho = ((order == 4) ? 31 : 16);
+			for (int l = 0; l < TET_HO_MAX; l++) Tet3[(NTet * TET_HO_MAX) + l] = ((l < nho) ? nd[4 + l] : -1);
 		}
 		TetTag[NTet] = tag;
 		NTet++;
@@ -228,13 +231,16 @@ static int elem_store(int type, int tag, const int32_t *nd)
 			Tri = (int32_t *)realloc(Tri, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
 			TriTag = (int *)realloc(TriTag, (size_t)(NTri + ARRAY_INC) * sizeof(int));
 			Tri2 = (int32_t *)realloc(Tri2, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
-			Tri3 = (int32_t *)realloc(Tri3, (size_t)(NTri + ARRAY_INC) * 7 * sizeof(int32_t));
+			Tri3 = (int32_t *)realloc(Tri3, (size_t)(NTri + ARRAY_INC) * TRI_HO_MAX * sizeof(int32_t));
 		}
 		for (int l = 0; l < 3; l++) Tri[(NTri * 3) + l] = nd[l];
-		// 3 次 (10 節点) の頂点以外の 7 節点。3 次でなければ -1 で埋める
-		// (realloc した領域は未初期化なので必ず 7 要素とも書くこと)
-		for (int l = 0; l < 7; l++) {
-			Tri3[(NTri * 7) + l] = ((order == 3) ? nd[3 + l] : -1);
+		// 3 次 (10 節点) / 4 次 (15 節点) の頂点以外の 7 / 12 節点。使わない欄は -1 で埋める
+		// (realloc した領域は未初期化なので必ず TRI_HO_MAX 要素とも書くこと)
+		{
+			const int nho = ((order == 4) ? 12 : (order == 3) ? 7 : 0);
+			for (int l = 0; l < TRI_HO_MAX; l++) {
+				Tri3[(NTri * TRI_HO_MAX) + l] = ((l < nho) ? nd[3 + l] : -1);
+			}
 		}
 		// 1 次の三角形では中間節点が無いので頂点で埋める (Dirichlet の
 		// 塗り分けは重複しても同じ値になるので無害)
@@ -528,16 +534,17 @@ static int elem_finish(void)
 	// 属さず行列が特異になる。断面 2 次元 (四面体が無い) の 3 次三角形は体積要素として
 	// 下で次数を決める
 	for (int t = 0; (NTet > 0) && (t < NTri); t++) {
-		if ((Tri3[t * 7] >= 0) && (TetOrder != 3)) {
+		const int to = ((Tri3[(t * TRI_HO_MAX) + 7] >= 0) ? 4 : (Tri3[t * TRI_HO_MAX] >= 0) ? 3 : 0);
+		if ((to >= 3) && (TetOrder != to)) {
 			printf("%s\n", "*** mesh : 10-node (third-order) triangles are supported only "
 				"as the faces of 20-node tetrahedra in a 3-D mesh (no mixing with other "
 				"orders)");
 			return 1;
 		}
-		if ((TetOrder == 3) && (Tri3[t * 7] < 0)) {
-			printf("%s\n", "*** mesh : the tetrahedra are order 3 but a triangle is not "
-				"(the electrode faces must be 10-node triangles; regenerate the mesh with "
-				"-order 3)");
+		if ((TetOrder >= 3) && (to != TetOrder)) {
+			printf("%s\n", "*** mesh : the tetrahedra are order 3 / 4 but a triangle is not "
+				"(the electrode faces must be 10-node / 15-node triangles; regenerate the mesh "
+				"with the same -order)");
 			return 1;
 		}
 	}
@@ -689,9 +696,10 @@ static int elem_finish(void)
 		}
 		// 三角形の次数は「中間節点が頂点と違うか」で決まる (1 次では頂点で埋めてある)。
 		// 3 次 (10 節点) は Tri3 に辺の 6 節点と面心が入る (3 次でなければ -1)
-		TetOrder = ((Tri3[0] >= 0) ? 3 : (Tri2[0] != Tri[0]) ? 2 : 1);
+		TetOrder = ((Tri3[7] >= 0) ? 4 : (Tri3[0] >= 0) ? 3 : (Tri2[0] != Tri[0]) ? 2 : 1);
 		for (int t = 0; t < NTri; t++) {
-			const int o = ((Tri3[t * 7] >= 0) ? 3 : (Tri2[(t * 3)] != Tri[(t * 3)]) ? 2 : 1);
+			const int o = ((Tri3[(t * TRI_HO_MAX) + 7] >= 0) ? 4 : (Tri3[t * TRI_HO_MAX] >= 0) ? 3
+			            : (Tri2[(t * 3)] != Tri[(t * 3)]) ? 2 : 1);
 			if (o != TetOrder) {
 				printf("%s\n", "*** mesh : mixed triangle orders in a 2-D mesh");
 				return 1;
@@ -745,8 +753,8 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		const int off = 3 + ntag;
 
 		// 節点数 : 四面体 (型 4 / 11) と三角形 (型 2 / 9)
-		const int nn = ((type == 4) ? 4 : (type == 11) ? 10 : (type == 29) ? 20
-		              : (type == 2) ? 3 : (type == 9) ? 6 : (type == 21) ? 10
+		const int nn = ((type == 4) ? 4 : (type == 11) ? 10 : (type == 29) ? 20 : (type == 30) ? 35
+		              : (type == 2) ? 3 : (type == 9) ? 6 : (type == 21) ? 10 : (type == 23) ? 15
 		              : (type == 5) ? 8 : (type == 3) ? 4 : (type == 6) ? 6
 		              : (type == 7) ? 5
 		              : (type == 12) ? 27 : (type == 17) ? 20
@@ -758,7 +766,7 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		// 節点番号を先に解決する (未解決なら打ち切り。ここで continue すると
 		// 配列の該当要素が未初期化のまま確定し、setup_unstruct() が
 		// それを添字に使って領域外書き込みになる)
-		int32_t nd[27];
+		int32_t nd[ELEM_NMAX];
 		for (int l = 0; l < nn; l++) {
 			const long g = v[off + l];
 			if ((g < 0) || (g > maxid) || (idmap[g] < 0)) {
@@ -917,8 +925,8 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		long dim = 0, tag = 0, type = 0, cnt = 0;
 		if (fscanf(fp, "%ld %ld %ld %ld", &dim, &tag, &type, &cnt) != 4) return 1;
 
-		const int nn = ((type == 4) ? 4 : (type == 11) ? 10 : (type == 29) ? 20
-		              : (type == 2) ? 3 : (type == 9) ? 6 : (type == 21) ? 10
+		const int nn = ((type == 4) ? 4 : (type == 11) ? 10 : (type == 29) ? 20 : (type == 30) ? 35
+		              : (type == 2) ? 3 : (type == 9) ? 6 : (type == 21) ? 10 : (type == 23) ? 15
 		              : (type == 5) ? 8 : (type == 3) ? 4 : (type == 6) ? 6
 		              : (type == 7) ? 5
 		              : (type == 12) ? 27 : (type == 17) ? 20
@@ -937,7 +945,7 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 				while (((c = fgetc(fp)) != EOF) && (c != '\n')) ;
 				continue;
 			}
-			int32_t nd[27];
+			int32_t nd[ELEM_NMAX];
 			for (int l = 0; l < nn; l++) {
 				long g = 0;
 				if (fscanf(fp, "%ld", &g) != 1) return 1;
@@ -1093,7 +1101,7 @@ static int read_elements_bin22(FILE *fp, const int32_t *idmap, int32_t maxid)
 			return 1;
 		}
 		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9)
-		              || (type == 29) || (type == 21)
+		              || (type == 29) || (type == 21) || (type == 30) || (type == 23)
 		              || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 		              || (type == 12) || (type == 17) || (type == 13) || (type == 18)
 		              || (type == 10) || (type == 16));
@@ -1107,7 +1115,7 @@ static int read_elements_bin22(FILE *fp, const int32_t *idmap, int32_t maxid)
 				if (rd_i32(fp, &v)) return 1;
 				if (t == 0) tag = (int)v;		// 1 つ目が物理タグ
 			}
-			int32_t nd[27];
+			int32_t nd[ELEM_NMAX];
 			for (int l = 0; l < nn; l++) {
 				int32_t g = 0;
 				if (rd_i32(fp, &g)) return 1;
@@ -1260,7 +1268,7 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		// 物理タグはエンティティ側にある (2.2 と違い要素には無い)
 		const int phys = ent_phys((int)dim, tag);
 		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9)
-		              || (type == 29) || (type == 21)
+		              || (type == 29) || (type == 21) || (type == 30) || (type == 23)
 		              || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 		              || (type == 12) || (type == 17) || (type == 13) || (type == 18)
 		              || (type == 10) || (type == 16));
@@ -1268,7 +1276,7 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		for (int64_t e = 0; e < cnt; e++) {
 			int64_t etag = 0;
 			if (rd_i64(fp, &etag)) return 1;
-			int32_t nd[27];
+			int32_t nd[ELEM_NMAX];
 			for (int l = 0; l < nn; l++) {
 				int64_t g = 0;
 				if (rd_i64(fp, &g)) return 1;
@@ -1489,15 +1497,16 @@ static int cmp_int32(const void *a, const void *b)
 }
 
 
-// 要素 e の局所節点をまとめて取り出す。戻り値は節点数 (1 次 4、2 次 10、3 次 20)。
-// 並びは Gmsh の tet10 / tet20 と同じ (頂点 4 個のあと辺・面の節点)
-int tet_nodes(int e, int32_t nd[20])
+// 要素 e の局所節点をまとめて取り出す。戻り値は節点数 (1 次 4、2 次 10、3 次 20、4 次 35)。
+// 並びは Gmsh の tet10 / tet20 / tet35 と同じ (頂点 4 個のあと辺・面・内部の節点)
+int tet_nodes(int e, int32_t nd[TET_NMAX])
 {
 	for (int l = 0; l < 4; l++) nd[l] = Tet[(e * 4) + l];
 	if (TetOrder < 2) return 4;
-	if (TetOrder == 3) {
-		for (int l = 0; l < 16; l++) nd[4 + l] = Tet3[(e * 16) + l];
-		return 20;
+	if (TetOrder >= 3) {
+		const int nho = ((TetOrder == 4) ? 31 : 16);
+		for (int l = 0; l < nho; l++) nd[4 + l] = Tet3[(e * TET_HO_MAX) + l];
+		return 4 + nho;
 	}
 	for (int l = 0; l < 6; l++) nd[4 + l] = Tet2[(e * 6) + l];
 
@@ -1508,7 +1517,7 @@ int tet_nodes(int e, int32_t nd[20])
 // 四面体あたりの節点数 (行列のパターンの見積りに使う)
 int tet_nen(void)
 {
-	return ((TetOrder == 3) ? 20 : (TetOrder >= 2) ? 10 : 4);
+	return ((TetOrder == 4) ? 35 : (TetOrder == 3) ? 20 : (TetOrder >= 2) ? 10 : 4);
 }
 
 
@@ -1528,7 +1537,7 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nenmax, int (*get)(int, int3
 	int *cnt = (int *)malloc((size_t)n * sizeof(int));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < nelem; e++) {
-		int32_t nd[27];
+		int32_t nd[ELEM_NMAX];
 		const int nen = get(e, nd);
 		for (int l = 0; l < nen; l++) cnt[nd[l]]++;
 	}
@@ -1538,7 +1547,7 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nenmax, int (*get)(int, int3
 	int32_t *nlist = (int32_t *)malloc((size_t)nptr[n] * sizeof(int32_t));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < nelem; e++) {
-		int32_t nd[27];
+		int32_t nd[ELEM_NMAX];
 		const int nen = get(e, nd);
 		for (int l = 0; l < nen; l++) {
 			const int32_t i = nd[l];
@@ -1564,7 +1573,7 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nenmax, int (*get)(int, int3
 		}
 		int m = 0;
 		for (int64_t p = p0; p < p1; p++) {
-			int32_t nd[27];
+			int32_t nd[ELEM_NMAX];
 			const int nen = get(nlist[p], nd);
 			for (int l = 0; l < nen; l++) work[m++] = nd[l];
 		}
@@ -1586,7 +1595,7 @@ static void crs_alloc_conn(crs_t *A, int nelem, int nenmax, int (*get)(int, int3
 		const int64_t p0 = nptr[i], p1 = nptr[i + 1];
 		int m = 0;
 		for (int64_t p = p0; p < p1; p++) {
-			int32_t nd[27];
+			int32_t nd[ELEM_NMAX];
 			const int nen = get(nlist[p], nd);
 			for (int l = 0; l < nen; l++) work[m++] = nd[l];
 		}
@@ -1632,7 +1641,7 @@ int elem3d_kind(int e)
 
 // 六面体 e の局所節点をまとめて取り出す。戻り値は節点数 (8 / 20 / 27)。
 // 並びは Gmsh の hex8 / hex20 / hex27 と同じ (頂点 8 個のあと辺・面・体心)
-int hex_nodes(int e, int32_t nd[27])
+int hex_nodes(int e, int32_t nd[ELEM_NMAX])
 {
 	for (int l = 0; l < 8; l++) nd[l] = Hex[(e * 8) + l];
 	for (int l = 8; l < HexNen; l++) nd[l] = Hex2[(e * 19) + (l - 8)];
@@ -1653,7 +1662,7 @@ int prism_nodes(int e, int32_t nd[18])
 
 // 要素 e の節点。戻り値は節点数
 // (四面体 4 or 10、六面体 8/20/27、角柱 6/15/18、ピラミッド 5)
-int elem3d_nodes(int e, int32_t nd[27])
+int elem3d_nodes(int e, int32_t nd[ELEM_NMAX])
 {
 	if (e < NTet) return tet_nodes(e, nd);
 	if (e < (NTet + NHex)) return hex_nodes(e - NTet, nd);
@@ -1888,7 +1897,7 @@ static int tet10_grad(const int32_t nd[10], const double lam[4],
 // 要素 e の 10 節点要素行列 ke[10][10] と体積。戻り値 : 0 = 正常、1 = 退化
 int tet10_element(int e, const double c[6], double ke[10][10], double *vol)
 {
-	int32_t nd[20];
+	int32_t nd[TET_NMAX];
 	if (tet_nodes(e, nd) != 10) return 1;
 
 	double lam[NQTET][4], wq[NQTET];
@@ -1942,8 +1951,33 @@ static const int TET3_A[20][4] = {
 };
 #define NQTET4 (64)
 
+// 4 次 (35 節点、gmsh の tet35 = 型 30) の多重指数 4λ。**gmsh 4.15.2 の出力 (box_p4.msh の
+// 108 要素がすべて同じ並び) を重心座標で分類した実測の表**。頂点、辺 (0,1) (1,2) (2,0) (3,0)
+// (3,2) (3,1) に 3 個ずつ (始点の側から)、面 (0,1,2) (0,1,3) (0,2,3) (1,2,3) に 3 個ずつ、内部 1 個
+static const int TET4_A[35][4] = {
+	{4, 0, 0, 0}, {0, 4, 0, 0}, {0, 0, 4, 0}, {0, 0, 0, 4},
+	{3, 1, 0, 0}, {2, 2, 0, 0}, {1, 3, 0, 0},
+	{0, 3, 1, 0}, {0, 2, 2, 0}, {0, 1, 3, 0},
+	{1, 0, 3, 0}, {2, 0, 2, 0}, {3, 0, 1, 0},
+	{1, 0, 0, 3}, {2, 0, 0, 2}, {3, 0, 0, 1},
+	{0, 0, 1, 3}, {0, 0, 2, 2}, {0, 0, 3, 1},
+	{0, 1, 0, 3}, {0, 2, 0, 2}, {0, 3, 0, 1},
+	{2, 1, 1, 0}, {1, 1, 2, 0}, {1, 2, 1, 0},
+	{2, 1, 0, 1}, {1, 2, 0, 1}, {1, 1, 0, 2},
+	{2, 0, 1, 1}, {1, 0, 1, 2}, {1, 0, 2, 1},
+	{0, 1, 1, 2}, {0, 2, 1, 1}, {0, 1, 2, 1},
+	{1, 1, 1, 1}
+};
+#define NQTETMAX (125)
 
-// [0,1] の n 点 Gauss-Legendre (n = 3, 4, 5。3 点は 3 次の剛性には足りない : 変異解析用)
+// 次数 TetOrder (3 / 4) の多重指数の表
+static const int *tet_ho_a(int i)
+{
+	return ((TetOrder == 4) ? TET4_A[i] : TET3_A[i]);
+}
+
+
+// [0,1] の n 点 Gauss-Legendre (n = 3, 4, 5, 6。3 点は 3 次の剛性には足りない : 変異解析用)
 static void gauss01(int n, double *x, double *w)
 {
 	if (n == 3) {
@@ -1965,6 +1999,16 @@ static void gauss01(int n, double *x, double *w)
 		}
 		return;
 	}
+	if (n == 6) {
+		const double t[3] = {0.23861918608319690863, 0.66120938646626451366, 0.93246951420315202781};
+		const double a[3] = {0.46791393457269104739, 0.36076157304813860757, 0.17132449237917034504};
+		for (int k = 0; k < 3; k++) {
+			x[2 - k] = 0.5 - (0.5 * t[k]);
+			x[3 + k] = 0.5 + (0.5 * t[k]);
+			w[2 - k] = w[3 + k] = 0.5 * a[k];
+		}
+		return;
+	}
 	{
 		const double t[3] = {0, 0.53846931010568309104, 0.90617984593866399280};
 		const double a[3] = {0.56888888888888888889, 0.47862867049936646804,
@@ -1983,7 +2027,7 @@ static void gauss01(int n, double *x, double *w)
 // Duffy 変換 + 各方向 n 点 (n = 4 : 64 点、n = 5 : 125 点)。重みの合計は 1/6
 static int tet_quad_n(int n, double lam[][4], double *wq)
 {
-	double gp[5], gw[5];
+	double gp[6], gw[6];
 	gauss01(n, gp, gw);
 	int q = 0;
 	for (int a = 0; a < n; a++) {
@@ -2030,12 +2074,13 @@ static double lagr_tet(int p, const int a[4], const double lam[4], double dn[4])
 
 // 20 節点四面体の積分点 1 点での ∇N_i と det J (tet10_grad の 3 次版)。
 // ヤコビアンは 20 節点すべてから作る (等パラメトリック)
-static int tet20_grad(const int32_t nd[20], const double lam[4], double gn[20][3], double *det)
+static int tet20_grad(const int32_t *nd, const double lam[4], double gn[TET_NMAX][3], double *det)
 {
-	double dx[20][3];
-	for (int i = 0; i < 20; i++) {
+	const int nen = tet_nen();
+	double dx[TET_NMAX][3];
+	for (int i = 0; i < nen; i++) {
 		double dl[4];
-		lagr_tet(3, TET3_A[i], lam, dl);
+		lagr_tet(TetOrder, tet_ho_a(i), lam, dl);
 		for (int k = 0; k < 3; k++) dx[i][k] = dl[k + 1] - dl[0];
 	}
 	double j[3][3];
@@ -2043,7 +2088,7 @@ static int tet20_grad(const int32_t nd[20], const double lam[4], double gn[20][3
 		const double *p = ((r == 0) ? Xp : (r == 1) ? Yp : Zp);
 		for (int k = 0; k < 3; k++) {
 			double s = 0;
-			for (int i = 0; i < 20; i++) s += p[nd[i]] * dx[i][k];
+			for (int i = 0; i < nen; i++) s += p[nd[i]] * dx[i][k];
 			j[r][k] = s;
 		}
 	}
@@ -2062,7 +2107,7 @@ static int tet20_grad(const int32_t nd[20], const double lam[4], double gn[20][3
 		 -((j[0][0] * j[2][1]) - (j[0][1] * j[2][0])) / d,
 		  ((j[0][0] * j[1][1]) - (j[0][1] * j[1][0])) / d}
 	};
-	for (int i = 0; i < 20; i++) {
+	for (int i = 0; i < nen; i++) {
 		for (int r = 0; r < 3; r++) {
 			gn[i][r] = (dx[i][0] * ji[0][r]) + (dx[i][1] * ji[1][r]) + (dx[i][2] * ji[2][r]);
 		}
@@ -2073,26 +2118,28 @@ static int tet20_grad(const int32_t nd[20], const double lam[4], double gn[20][3
 }
 
 
-// 要素 e の 20 節点要素行列 ke[20][20] と体積。戻り値 : 0 = 正常、1 = 退化・裏返り
-int tet20_element(int e, const double c[6], double ke[20][20], double *vol)
+// 要素 e の 20 / 35 節点要素行列 ke と体積。戻り値 : 0 = 正常、1 = 退化・裏返り。
+// 積分は Duffy + 各方向 4 点 (3 次 : ∇N・∇N は λ の 4 次、u の 6 次) / 5 点 (4 次 : 6 次、u の 8 次)
+int tet20_element(int e, const double c[6], double ke[TET_NMAX][TET_NMAX], double *vol)
 {
-	int32_t nd[20];
-	if (tet_nodes(e, nd) != 20) return 1;
+	int32_t nd[TET_NMAX];
+	const int nen = tet_nodes(e, nd);
+	if (nen < 20) return 1;
 
-	double lam[NQTET4][4], wq[NQTET4];
-	const int nq = tet_quad_n(4, lam, wq);
+	double lam[NQTETMAX][4], wq[NQTETMAX];
+	const int nq = tet_quad_n(((TetOrder == 4) ? 5 : 4), lam, wq);
 
-	memset(ke, 0, sizeof(double) * 20 * 20);
+	memset(ke, 0, sizeof(double) * TET_NMAX * TET_NMAX);
 	double v = 0, sgn = 0;
 	for (int q = 0; q < nq; q++) {
-		double gn[20][3], det;
+		double gn[TET_NMAX][3], det;
 		if (tet20_grad(nd, lam[q], gn, &det)) return 1;
 		if (sgn == 0) sgn = ((det > 0) ? 1 : -1);
 		else if (det * sgn <= 0) return 1;
 		const double dw = wq[q] * fabs(det);
 		v += dw;
-		for (int l = 0; l < 20; l++) {
-			for (int m = 0; m < 20; m++) {
+		for (int l = 0; l < nen; l++) {
+			for (int m = 0; m < nen; m++) {
 				ke[l][m] += dw * ((c[0] * gn[l][0] * gn[m][0])
 				                + (c[1] * gn[l][1] * gn[m][1])
 				                + (c[2] * gn[l][2] * gn[m][2])
@@ -2109,9 +2156,9 @@ int tet20_element(int e, const double c[6], double ke[20][20], double *vol)
 
 
 // 要素の重心での ∇N_i (場の出力に使う。1 次では要素内一定なので同じ値)
-int tet_grad_center(int e, double gn[20][3], int *nen)
+int tet_grad_center(int e, double gn[TET_NMAX][3], int *nen)
 {
-	int32_t nd[20];
+	int32_t nd[TET_NMAX];
 	const int n = tet_nodes(e, nd);
 
 	*nen = n;
@@ -2127,7 +2174,7 @@ int tet_grad_center(int e, double gn[20][3], int *nen)
 	const double lam[4] = {0.25, 0.25, 0.25, 0.25};
 	double det;
 
-	if (n == 20) return tet20_grad(nd, lam, gn, &det);
+	if (n >= 20) return tet20_grad(nd, lam, gn, &det);
 	double g10[10][3];
 	const int r = tet10_grad(nd, lam, g10, &det);
 	for (int i = 0; i < 10; i++) {
@@ -2642,7 +2689,7 @@ static const double GW3[3] = {5.0 / 9, 8.0 / 9, 5.0 / 9};
 // 2 次六面体の要素行列 (3x3x3 Gauss)。vol には体積 Σ w |det J| を返す
 static int hex2_element(int e, const double c[6], double ke[27][27], double *vol)
 {
-	int32_t nd[27];
+	int32_t nd[ELEM_NMAX];
 	const int nen = hex_nodes(e, nd);
 
 	memset(ke, 0, sizeof(double) * 27 * 27);
@@ -2678,7 +2725,7 @@ static int hex2_element(int e, const double c[6], double ke[27][27], double *vol
 // 要素中心での勾配 (場の出力用)
 int hex2_grad_center(int e, double g[27][3], int *nen)
 {
-	int32_t nd[27];
+	int32_t nd[ELEM_NMAX];
 	double det;
 
 	*nen = hex_nodes(e, nd);
@@ -3475,7 +3522,7 @@ static double hex2_curve(void)
 	double curve = 0;
 
 	for (int e = 0; e < NHex; e++) {
-		int32_t nd[27];
+		int32_t nd[ELEM_NMAX];
 		const int nen = hex_nodes(e, nd);
 		double h = 0;
 		for (int l = 0; l < 8; l++) {
@@ -3587,7 +3634,7 @@ static int nodal_test_hex2(FILE *fp_log)
 	// (1) 体積 : 3 点則と 4 点則の一致
 	double v3 = 0, v4 = 0;
 	for (int e = 0; e < NHex; e++) {
-		int32_t nd[27];
+		int32_t nd[ELEM_NMAX];
 		const int nen = hex_nodes(e, nd);
 		for (int i = 0; i < 3; i++) {
 		for (int j = 0; j < 3; j++) {
@@ -3621,7 +3668,7 @@ static int nodal_test_hex2(FILE *fp_log)
 	crs_alloc(&A);
 	crs_zero(&A);
 	for (int e = 0; e < NHex; e++) {
-		int32_t nd[27];
+		int32_t nd[ELEM_NMAX];
 		const int nen = hex_nodes(e, nd);
 		double ke[27][27], vol;
 		if (hex2_element(e, c, ke, &vol)) continue;
@@ -3969,13 +4016,13 @@ void assemble_elem3d(crs_t *A, int mode)
 		const int kind = elem3d_kind(e);
 
 		if (kind == MESHELEM_TET) {
-			if (TetOrder == 3) {
-				int32_t nd[20];
-				double ke[20][20], vol;
-				tet_nodes(e, nd);
+			if (TetOrder >= 3) {
+				int32_t nd[TET_NMAX];
+				double ke[TET_NMAX][TET_NMAX], vol;
+				const int nen = tet_nodes(e, nd);
 				if (tet20_element(e, c, ke, &vol)) continue;
-				for (int l = 0; l < 20; l++) {
-					for (int m = 0; m < 20; m++) {
+				for (int l = 0; l < nen; l++) {
+					for (int m = 0; m < nen; m++) {
 						const int64_t p = crs_find(A, nd[l], nd[m]);
 						if (p >= 0) A->val[p] += ke[l][m];
 					}
@@ -3983,7 +4030,7 @@ void assemble_elem3d(crs_t *A, int mode)
 				continue;
 			}
 			if (p2) {
-				int32_t nd[20];
+				int32_t nd[TET_NMAX];
 				double ke[10][10], vol;
 				tet_nodes(e, nd);
 				if (tet10_element(e, c, ke, &vol)) continue;
@@ -4015,7 +4062,7 @@ void assemble_elem3d(crs_t *A, int mode)
 
 		if (kind == MESHELEM_HEX) {
 			if (HexNen > 8) {
-				int32_t nd[27];
+				int32_t nd[ELEM_NMAX];
 				const int nen = hex_nodes(e - NTet, nd);
 				double ke[27][27], vol;
 				if (hex2_element(e - NTet, c, ke, &vol)) continue;
@@ -4114,13 +4161,13 @@ void assemble_tet(crs_t *A, int mode)
 		material_coef_pub(TetMat[e], mode, c);
 		if ((c[0] <= 0) && (c[1] <= 0) && (c[2] <= 0)) continue;
 
-		if (TetOrder == 3) {
-			int32_t nd[20];
-			double ke[20][20], vol;
-			tet_nodes(e, nd);
+		if (TetOrder >= 3) {
+			int32_t nd[TET_NMAX];
+			double ke[TET_NMAX][TET_NMAX], vol;
+			const int nen = tet_nodes(e, nd);
 			if (tet20_element(e, c, ke, &vol)) continue;
-			for (int l = 0; l < 20; l++) {
-				for (int m = 0; m < 20; m++) {
+			for (int l = 0; l < nen; l++) {
+				for (int m = 0; m < nen; m++) {
 					const int64_t p = crs_find(A, nd[l], nd[m]);
 					if (p >= 0) A->val[p] += ke[l][m];
 				}
@@ -4128,7 +4175,7 @@ void assemble_tet(crs_t *A, int mode)
 			continue;
 		}
 		if (p2) {
-			int32_t nd[20];
+			int32_t nd[TET_NMAX];
 			double ke[10][10], vol;
 			tet_nodes(e, nd);
 			if (tet10_element(e, c, ke, &vol)) continue;
@@ -4341,11 +4388,11 @@ int solve_nodal_test(FILE *fp_log)
 
 	// 中間節点が辺の中点からどれだけずれているか (曲がった格子の判定)
 	double curve = 0;
-	if (TetOrder == 3) {
-		// 3 次 : 頂点以外の 16 節点の、直線要素での位置 Σ (a_v/3) x_v からのずれ
+	if (TetOrder >= 3) {
+		// 3 次 / 4 次 : 頂点以外の節点の、直線要素での位置 Σ (a_v/p) x_v からのずれ
 		for (int e = 0; e < NTet; e++) {
-			int32_t nd[20];
-			tet_nodes(e, nd);
+			int32_t nd[TET_NMAX];
+			const int nen = tet_nodes(e, nd);
 			double h = 0;
 			for (int a = 0; a < 4; a++) {
 				for (int b = a + 1; b < 4; b++) {
@@ -4356,12 +4403,13 @@ int solve_nodal_test(FILE *fp_log)
 				}
 			}
 			if (h <= 0) continue;
-			for (int l = 4; l < 20; l++) {
+			for (int l = 4; l < nen; l++) {
 				double r[3] = {0, 0, 0};
+				const int *a = tet_ho_a(l);
 				for (int v = 0; v < 4; v++) {
-					r[0] += TET3_A[l][v] * Xp[nd[v]] / 3;
-					r[1] += TET3_A[l][v] * Yp[nd[v]] / 3;
-					r[2] += TET3_A[l][v] * Zp[nd[v]] / 3;
+					r[0] += a[v] * Xp[nd[v]] / TetOrder;
+					r[1] += a[v] * Yp[nd[v]] / TetOrder;
+					r[2] += a[v] * Zp[nd[v]] / TetOrder;
 				}
 				const double dx = Xp[nd[l]] - r[0], dy = Yp[nd[l]] - r[1], dz = Zp[nd[l]] - r[2];
 				const double d = sqrt((dx * dx) + (dy * dy) + (dz * dz)) / h;
@@ -4373,7 +4421,7 @@ int solve_nodal_test(FILE *fp_log)
 	else if (TetOrder >= 2) {
 		static const int ed[6][2] = {{0, 1}, {1, 2}, {2, 0}, {3, 0}, {3, 2}, {3, 1}};
 		for (int e = 0; e < NTet; e++) {
-			int32_t nd[20];
+			int32_t nd[TET_NMAX];
 			tet_nodes(e, nd);
 			double h = 0;
 			for (int l = 0; l < 6; l++) {
@@ -4403,8 +4451,8 @@ int solve_nodal_test(FILE *fp_log)
 		const double c1[6] = {1, 1, 1, 0, 0, 0};
 		for (int e = 0; e < NTet; e++) {
 			double vol = 0;
-			if (TetOrder == 3) {
-				double ke[20][20];
+			if (TetOrder >= 3) {
+				double ke[TET_NMAX][TET_NMAX];
 				if (tet20_element(e, c1, ke, &vol)) {
 					fprintf(fp_log, "*** tetrahedron %d is degenerate or inverted\n", e + 1);
 					free(vole);
@@ -4479,12 +4527,17 @@ int solve_nodal_test(FILE *fp_log)
 	}
 	if (lref <= 0) lref = 1;
 	const double ck = 2.3 / (lref * lref), cmu = 1.1 / (lref * lref), cnu = -1.7 / (lref * lref);
+	// 4 次の項 ρ x²y² + τ z⁴ + ω x y z² (1/L³ 倍)
+	const double crho = 0.9 / (lref * lref * lref), ctau = -0.6 / (lref * lref * lref);
+	const double comg = 1.4 / (lref * lref * lref);
 
-	for (int cs = 0; cs < 3; cs++) {
-		const int quad = (cs >= 1);		// 0 : φ は 1 次、1 : 2 次、2 : 3 次
-		const int cubic = (cs == 2);
+	for (int cs = 0; cs < 4; cs++) {
+		const int quad = (cs >= 1);		// 0 : φ は 1 次、1 : 2 次、2 : 3 次、3 : 4 次
+		const int cubic = (cs >= 2);
+		const int quart = (cs == 3);
 		if (quad && ((TetOrder < 2) || !straight)) continue;
 		if (cubic && (TetOrder < 3)) continue;
+		if (quart && (TetOrder < 4)) continue;
 
 		// 節点値
 		for (int i = 0; i < n; i++) {
@@ -4498,6 +4551,10 @@ int solve_nodal_test(FILE *fp_log)
 			if (cubic) {
 				f += (ck * r[0] * r[1] * r[2]) + (cmu * r[0] * r[0] * r[0])
 				   + (cnu * r[1] * r[1] * r[2]);
+			}
+			if (quart) {
+				f += (crho * r[0] * r[0] * r[1] * r[1]) + (ctau * r[2] * r[2] * r[2] * r[2])
+				   + (comg * r[0] * r[1] * r[2] * r[2]);
 			}
 			phi[i] = f;
 		}
@@ -4557,10 +4614,11 @@ int solve_nodal_test(FILE *fp_log)
 
 		// 3 次の φ : ∫ (∇φ)^T C (∇φ) dV を直線要素の上で**別の積分則** (Duffy + 5 点、
 		// 125 点) で厳密に積分する (被積分関数は λ の 4 次)。要素行列 (4 点) とも
-		// 形状関数とも独立に、解析的な ∇φ だけを使う
+		// 形状関数とも独立に、解析的な ∇φ だけを使う。4 次の φ (被積分関数は 6 次、
+		// Duffy で u の 8 次) は 6 点 (216 点) で、要素行列の 5 点とは別の則
 		if (cubic) {
-			double lq[125][4], wq5[125];
-			const int nq5 = tet_quad_n(5, lq, wq5);
+			double lq[216][4], wq5[216];
+			const int nq5 = tet_quad_n((quart ? 6 : 5), lq, wq5);
 			exact = 0;
 			for (int e = 0; e < NTet; e++) {
 				const int32_t *nd = &Tet[e * 4];
@@ -4586,6 +4644,11 @@ int solve_nodal_test(FILE *fp_log)
 					gr[0] += (ck * r[1] * r[2]) + (3 * cmu * r[0] * r[0]);
 					gr[1] += (ck * r[0] * r[2]) + (2 * cnu * r[1] * r[2]);
 					gr[2] += (ck * r[0] * r[1]) + (cnu * r[1] * r[1]);
+					if (quart) {
+						gr[0] += (2 * crho * r[0] * r[1] * r[1]) + (comg * r[1] * r[2] * r[2]);
+						gr[1] += (2 * crho * r[0] * r[0] * r[1]) + (comg * r[0] * r[2] * r[2]);
+						gr[2] += (4 * ctau * r[2] * r[2] * r[2]) + (2 * comg * r[0] * r[1] * r[2]);
+					}
 					double gg = 0;
 					for (int k = 0; k < 3; k++) {
 						for (int l = 0; l < 3; l++) gg += cm[k][l] * gr[k] * gr[l];
@@ -4600,11 +4663,12 @@ int solve_nodal_test(FILE *fp_log)
 		for (int i = 0; i < n; i++) q += phi[i] * y[i];
 		const double rel = fabs(q - exact) / ((exact != 0) ? fabs(exact) : 1);
 		fprintf(fp_log, "  (%c) %s field : phi^T K phi = %.10e, exact = %.10e, err = %.3e\n",
-			(cubic ? 'f' : quad ? 'c' : 'b'), (cubic ? "cubic    " : quad ? "quadratic" : "linear   "),
+			(quart ? 'g' : cubic ? 'f' : quad ? 'c' : 'b'),
+			(quart ? "quartic  " : cubic ? "cubic    " : quad ? "quadratic" : "linear   "),
 			q, exact, rel);
 		if (!(rel <= 1e-10)) {		// NaN も不合格にする
 			fprintf(fp_log, "*** the %s stiffness matrix is wrong\n",
-				((TetOrder == 3) ? "P3" : (TetOrder >= 2) ? "P2" : "P1"));
+				((TetOrder == 4) ? "P4" : (TetOrder == 3) ? "P3" : (TetOrder >= 2) ? "P2" : "P1"));
 			ierr = 1;
 		}
 
@@ -4619,10 +4683,10 @@ int solve_nodal_test(FILE *fp_log)
 		{
 			double gmax = 0, amax2 = 0;
 			for (int e = 0; e < NTet; e++) {
-				double gn[20][3];
+				double gn[TET_NMAX][3];
 				int nen = 0;
 				if (tet_grad_center(e, gn, &nen)) continue;
-				int32_t nd[20];
+				int32_t nd[TET_NMAX];
 				tet_nodes(e, nd);
 
 				double rc[3] = {0, 0, 0};
@@ -4643,13 +4707,18 @@ int solve_nodal_test(FILE *fp_log)
 						     : (k == 1) ? ((ck * rc[0] * rc[2]) + (2 * cnu * rc[1] * rc[2]))
 						     : ((ck * rc[0] * rc[1]) + (cnu * rc[1] * rc[1])));
 					}
+					if (quart) {
+						ge += ((k == 0) ? ((2 * crho * rc[0] * rc[1] * rc[1]) + (comg * rc[1] * rc[2] * rc[2]))
+						     : (k == 1) ? ((2 * crho * rc[0] * rc[0] * rc[1]) + (comg * rc[0] * rc[2] * rc[2]))
+						     : ((4 * ctau * rc[2] * rc[2] * rc[2]) + (2 * comg * rc[0] * rc[1] * rc[2])));
+					}
 					if (fabs(gh - ge) > gmax) gmax = fabs(gh - ge);
 					if (fabs(ge) > amax2) amax2 = fabs(ge);
 				}
 			}
 			const double relg = gmax / ((amax2 > 0) ? amax2 : 1);
 			fprintf(fp_log, "  (e) centroid gradient (%s field) : max err = %.3e\n",
-				(cubic ? "cubic" : quad ? "quadratic" : "linear"), relg);
+				(quart ? "quartic" : cubic ? "cubic" : quad ? "quadratic" : "linear"), relg);
 			if (!(relg <= 1e-10)) {		// NaN も不合格にする
 				fprintf(fp_log, "*** the element-centre gradient is wrong "
 					"(this is what fieldout writes)\n");
@@ -4715,9 +4784,10 @@ int tri_nodes(int e, int32_t nd[TRI_NMAX])
 {
 	for (int l = 0; l < 3; l++) nd[l] = Tri[(e * 3) + l];
 	if (TetOrder < 2) return 3;
-	if ((TetOrder == 3) && (MeshDim == 2)) {
-		for (int l = 0; l < 7; l++) nd[3 + l] = Tri3[(e * 7) + l];
-		return 10;
+	if ((TetOrder >= 3) && (MeshDim == 2)) {
+		const int nho = ((TetOrder == 4) ? 12 : 7);
+		for (int l = 0; l < nho; l++) nd[3 + l] = Tri3[(e * TRI_HO_MAX) + l];
+		return 3 + nho;
 	}
 	for (int l = 0; l < 3; l++) nd[3 + l] = Tri2[(e * 3) + l];
 
@@ -4773,7 +4843,7 @@ void crs_alloc_tri(crs_t *A)
 {
 	const int n = NNode;
 
-	const int nen = ((TetOrder == 3) ? 10 : (TetOrder >= 2) ? 6 : 3);
+	const int nen = ((TetOrder == 4) ? 15 : (TetOrder == 3) ? 10 : (TetOrder >= 2) ? 6 : 3);
 	int *cnt = (int *)malloc((size_t)n * sizeof(int));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < NTri; e++) {
@@ -4892,12 +4962,21 @@ static const int TRI3_A[10][3] = {
 	{1, 0, 2}, {2, 0, 1},		// 辺 (2,0)
 	{1, 1, 1}					// 面心
 };
-#define NQTRI3 (16)
+// 4 次 (15 節点、gmsh の tri15 = 型 23) : gmsh 4.15.2 の出力 (box_p4.msh の電極面 36 枚が
+// すべて同じ並び) を分類した実測の表。頂点、辺 (0,1) (1,2) (2,0) に 3 個ずつ、内部 3 個
+static const int TRI4_A[15][3] = {
+	{4, 0, 0}, {0, 4, 0}, {0, 0, 4},
+	{3, 1, 0}, {2, 2, 0}, {1, 3, 0},
+	{0, 3, 1}, {0, 2, 2}, {0, 1, 3},
+	{1, 0, 3}, {2, 0, 2}, {3, 0, 1},
+	{2, 1, 1}, {1, 2, 1}, {1, 1, 2}
+};
+#define NQTRI3 (25)
 
 // 積分点 (2 次は 9 点、3 次は 16 点)。戻り値は点の数
 static int tri_quad_ord(double lam[NQTRI3][3], double wq[NQTRI3])
 {
-	if (TetOrder != 3) {
+	if (TetOrder < 3) {
 		double l9[NQTRI][3], w9[NQTRI];
 		tri_quad(l9, w9);
 		for (int q = 0; q < NQTRI; q++) {
@@ -4906,11 +4985,13 @@ static int tri_quad_ord(double lam[NQTRI3][3], double wq[NQTRI3])
 		}
 		return NQTRI;
 	}
-	double gp[5], gw[5];
-	gauss01(4, gp, gw);
+	// 3 次 : 4 点 (16 点)。4 次 : ∇N・∇N は 6 次で u の 7 次、質量は 8 次で u の 9 次 -> 5 点 (25 点)
+	const int ng = ((TetOrder == 4) ? 5 : 4);
+	double gp[6], gw[6];
+	gauss01(ng, gp, gw);
 	int q = 0;
-	for (int a = 0; a < 4; a++) {
-	for (int b = 0; b < 4; b++) {
+	for (int a = 0; a < ng; a++) {
+	for (int b = 0; b < ng; b++) {
 		const double u = gp[a], v = gp[b];
 		lam[q][1] = u;
 		lam[q][2] = v * (1 - u);
@@ -4955,10 +5036,12 @@ static void trin_shape(int nen, const double lam[3], double n[TRI_NMAX], double 
 		return;
 	}
 	const double l4[4] = {lam[0], lam[1], lam[2], 0};
-	for (int i = 0; i < 10; i++) {
-		const int a4[4] = {TRI3_A[i][0], TRI3_A[i][1], TRI3_A[i][2], 0};
+	const int p = ((nen == 15) ? 4 : 3);
+	for (int i = 0; i < nen; i++) {
+		const int *ta = ((p == 4) ? TRI4_A[i] : TRI3_A[i]);
+		const int a4[4] = {ta[0], ta[1], ta[2], 0};
 		double dn[4];
-		n[i] = lagr_tet(3, a4, l4, dn);
+		n[i] = lagr_tet(p, a4, l4, dn);
 		for (int a = 0; a < 3; a++) dl[i][a] = dn[a];
 	}
 }
@@ -5030,7 +5113,7 @@ int tri_weights(int e, double w[TRI_NMAX], double wc[TRI_NMAX])
 {
 	int32_t nd[TRI_NMAX];
 	const int nen = tri_nodes(e, nd);
-	if (nen != 10) return 0;
+	if (nen < 10) return 0;
 	double lam[NQTRI3][3], wq[NQTRI3];
 	const int nq = tri_quad_ord(lam, wq);
 	for (int l = 0; l < nen; l++) w[l] = 0;

@@ -3473,6 +3473,97 @@ compare "tet : bar + air (k = 0) == bar alone : T_max [degC]" "$(th_t)" "$tb" 1e
 th_nface "tet : bar + air, the conductor-air interface is exposed" 2496
 th_energy "tet : bar + air"
 
+# ---- 4 次要素 (gmsh の tet35 = 型 30 / tri15 = 型 23) ----
+#
+# 局所節点の並びは gmsh 4.15.2 の出力を重心座標で分類した実測の表 (unstruct.c の TET4_A /
+# TRI4_A)。形状関数は 3 次と同じ多重指数の Lagrange の式、積分は Duffy + 5 点。
+#   (a) 箱 (box_p4.msh) の平行平板 : C が閉形式に全桁 (φ が 1 次)。2.2 / 4.1 / バイナリで一致
+#   (b) analysis = P : 4 次の φ の恒等式 (g) が機械精度。**4 次特有の基底を検査できるのは
+#       これだけ** (1〜3 次の場は 3 次の基底でも厳密に表せる)
+#   (c) 曲がった同軸 (coax_p4.msh、h = 0.4mm) : 円の等間隔補間の幾何誤差は 4 次で h⁶
+#       (偶数次の超収束。3 次・2 次は h⁴) なので、**同じ h の 3 次より有意に良い**ことを
+#       assert してよい (3 次と 2 次の間ではしてはいけない。[order-3 tet] の注意)。
+#       実測 C' : 3 次 3.2e-4 -> 4 次 8.5e-6 (38 倍)、体積 : 6.5e-5 -> 9.5e-7 (68 倍)。
+#       h = 0.4 -> 0.2mm の比は C' 61、体積 66 (h⁶ = 64。0.2mm の格子は 1.3MB なので置かない)
+#   (d) 断面 2 次元 (plate2d_p4.msh、plate2d_p3.geo を -order 4) : 10 MHz の表皮効果で
+#       R -1.3e-8 / L +1.3e-9 (同じ頂点の 3 次は +6.7e-8 / +1.8e-7)。L で 10 倍を assert
+#       (R は csv の 9 桁の丸めに届くので比を取らない)
+echo "[order-4] 35-node tetrahedra / 15-node triangles (gmsh tet35 / tri15)"
+for m in box_p4 box_p4_41 box_p4_bin_22 box_p4_bin_41 coax_p4 coax_p3 plate2d_p4 plate2d_p3; do cp "$SRC/$m.msh" "$WORK/"; done
+sed 's/^mesh = .*/mesh = box_p4.msh/' "$SRC/box_p3.ofe" > "$WORK/box_p4.ofe"
+(cd "$WORK" && "$OFE" -n 2 box_p4.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "C (tet35 box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/p4_22.csv"
+for f in box_p4_41 box_p4_bin_22 box_p4_bin_41; do
+	sed "s/^mesh = .*/mesh = $f.msh/" "$WORK/box_p4.ofe" > "$WORK/p4f.ofe"
+	(cd "$WORK" && "$OFE" -n 2 p4f.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/p4f.csv"
+	if cmp -s "$WORK/p4_22.csv" "$WORK/p4f.csv"; then echo "  35-node tetrahedra, $f == ASCII 2.2 -> OK"
+	else echo "  35-node tetrahedra, $f differs from ASCII 2.2 -> NG" >&2; status=1; fi
+done
+if ! head -c 24 "$WORK/box_p4_bin_22.msh" | tr '\n' ' ' | grep -qa 'MeshFormat [0-9.]* 1 8'; then
+	echo "  box_p4_bin_22.msh is not a binary Gmsh file -> NG" >&2; status=1
+fi
+run_case nodal_test_p4
+if grep -q "(g) quartic" "$WORK/ofe.log" && grep -q "result : passed" "$WORK/ofe.log"; then
+	echo "  P4 self test (quartic field identity, machine precision) : $(awk '/\(g\) quartic/ { print $NF; exit }' "$WORK/ofe.log") -> OK"
+else
+	echo "  P4 self test : the quartic-field identity was not run or failed -> NG" >&2
+	status=1
+fi
+# (c) 同軸 : 4 次と 3 次 (同じ h = 0.4mm) の C' と体積
+p4c() {	# p4c <格子> -> C' と積分した体積
+	sed "s/^mesh = .*/mesh = $1.msh/" "$SRC/coax_p3.ofe" > "$WORK/p4c.ofe"
+	(cd "$WORK" && "$OFE" -n 2 p4c.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	cc=$(value_of C)
+	sed -e "s/^mesh = .*/mesh = $1.msh/" -e 's/^analysis = .*/analysis = P/' -e '/^tline/d' \
+		"$SRC/coax_p3.ofe" > "$WORK/p4v.ofe"
+	(cd "$WORK" && "$OFE" -n 2 p4v.ofe > /dev/null 2>&1)
+	echo "$cc $(awk '/integrated volume/ { print $4; exit }' "$WORK/ofe.log")"
+}
+set -- $(p4c coax_p4); c4=$1; v4=$2
+set -- $(p4c coax_p3); c3=$1; v3=$2
+compare "C (tet35 coax, h = 0.4 mm) [F/m]" "$c4" 1.063417e-10 0.0001
+res=$(awk -v a="$c3" -v b="$c4" -v va="$v3" -v vb="$v4" 'BEGIN { ce = 2 * atan2(0, -1) * 8.8541878128e-12 * 2.1 / log(3)
+	ve = atan2(0, -1) * (1.5e-3 ^ 2 - 0.5e-3 ^ 2) * 0.1e-3
+	e3 = (a - ce) / ce; if (e3 < 0) e3 = -e3
+	e4 = (b - ce) / ce; if (e4 < 0) e4 = -e4
+	w3 = (va - ve) / ve; if (w3 < 0) w3 = -w3
+	w4 = (vb - ve) / ve; if (w4 < 0) w4 = -w4
+	ok = (e3 > 10 * e4) && (w3 > 10 * w4)
+	printf "%s (C : P3 %.2e vs P4 %.2e, volume : P3 %.2e vs P4 %.2e)", ok ? "OK" : "NG", e3, e4, w3, w4 }')
+echo "  curved coax, order 4 (h^6 geometry) beats order 3 (h^4) at the same h : $res"
+case "$res" in NG*) status=1 ;; esac
+# (d) 断面 2 次元
+set -- $(awk 'BEGIN { pi = atan2(0, -1); mu = 4e-7 * pi; s = 5.8e7; W = 1e-3; t = 0.05e-3; d = 0.2e-3
+	om = 2 * pi * 1e7; de = sqrt(2 / (om * mu * s)); a = t / de
+	S = (exp(2 * a) - exp(-2 * a)) / 2; C = (exp(2 * a) + exp(-2 * a)) / 2
+	k = 1 / (de * s * W * (C - cos(2 * a)))
+	printf "%.12e %.12e", 2 * k * (S + sin(2 * a)), (2 * k * (S - sin(2 * a)) + om * mu * d / W) / om }')
+rex=$1; lex=$2
+for o in 4 3; do
+	sed -e "s/plate2d.msh/plate2d_p$o.msh/" -e "s/^frequency = .*/frequency = 1e7/" "$SRC/plate2d_ac.ofe" > "$WORK/p4ac.ofe"
+	(cd "$WORK" && "$OFE" -n 2 p4ac.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	eval "r$o=\$(value_of Rf); l$o=\$(value_of Lf)"
+done
+compare "R(f = 10 MHz, 2-D P4) vs coth closed form [ohm/m]" "$r4" "$rex" 1e-7
+compare "L(f = 10 MHz, 2-D P4) vs coth closed form [H/m]" "$l4" "$lex" 1e-7
+res=$(awk -v a="$l3" -v b="$l4" -v l="$lex" 'BEGIN {
+	f3 = (a - l) / l; if (f3 < 0) f3 = -f3
+	f4 = (b - l) / l; if (f4 < 0) f4 = -f4
+	printf "%s (L : P3 %.2e vs P4 %.2e)", (f3 > 10 * f4) ? "OK" : "NG", f3, f4 }')
+echo "  2-D, order 4 beats order 3 on the same vertices (10 MHz) : $res"
+case "$res" in NG*) status=1 ;; esac
+sed "s/^mesh = .*/mesh = plate2d_p4.msh/" "$SRC/plate2d_dc.ofe" > "$WORK/p4dc.ofe"
+(cd "$WORK" && "$OFE" -n 2 p4dc.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "Ldc (2-D P4) [H/m]" "$(value_of Ldc)" 2.932153e-07 1e-5
+# (e) 弾くべき入力 : 4 次の四面体の面に 3 次の三角形 (型 23 を型 21 の 10 節点に落とす)
+awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 23) { s = $1 " 21"; for (i = 3; i <= 3 + $3 + 10; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p4.msh" > "$WORK/box_p4_tri10.msh"
+sed 's/^mesh = .*/mesh = box_p4_tri10.msh/' "$WORK/box_p4.ofe" > "$WORK/p4x_tri.ofe"
+th_reject "35-node tetrahedra with 10-node electrode triangles" p4x_tri.ofe "triangles are supported only as the faces of 20-node"
+sed 's/^analysis = .*/analysis = E/' "$WORK/box_p4.ofe" > "$WORK/p4x_e.ofe"
+th_reject "analysis E on a 35-node tetrahedral mesh" p4x_e.ofe "need a first-order mesh"
+
 # ---- 熱連成の六面体・角柱・ピラミッド (1 次、混在可) ----
 #
 # 剛性・発熱・質量・要素の温度を 1 つの積分点 API (unstruct.c の elem3d_ip) で組む
@@ -4193,7 +4284,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
-         bertotti_core temp_material temp_mur hn_plate plate2d_p2 plate2d_p3 \
+         bertotti_core temp_material temp_mur hn_plate plate2d_p2 plate2d_p3 nodal_test_p4 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
          thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
          plate_line_bh_ac bar_air_bh thermal_tet thermal_ac thermal_natconv \

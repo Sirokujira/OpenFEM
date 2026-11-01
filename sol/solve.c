@@ -54,7 +54,7 @@ static void elem_get(int64_t e, elem_t *el)
 		el->nen = tri_nodes((int)e, nd);
 		for (int l = 0; l < el->nen; l++) el->nd[l] = nd[l];
 		el->vol = TriArea[e];
-		if (el->nen == 10) {
+		if (el->nen >= 10) {
 			// 3 次三角形 : ∫N dA を等パラメトリック写像で積分する
 			// (直線要素では頂点 A/30、辺 3A/40、面心 9A/20)
 			tri_weights((int)e, el->w, el->wc);

@@ -130,7 +130,7 @@ void field_cell_grad(const double *u, int kind, double *v)
 					double gn[27][3];
 					int nen = 0;
 					if (!hex2_grad_center(e - NTet, gn, &nen)) {
-						int32_t nd[27];
+						int32_t nd[ELEM_NMAX];
 						hex_nodes(e - NTet, nd);
 						for (int a = 0; a < nen; a++) {
 							const double ua = u[nd[a]];
@@ -184,10 +184,10 @@ void field_cell_grad(const double *u, int kind, double *v)
 				}
 			}
 			else {
-				double gn[20][3];
+				double gn[TET_NMAX][3];
 				int nen = 0;
 				if (!tet_grad_center(e, gn, &nen)) {
-					int32_t nd[20];
+					int32_t nd[TET_NMAX];
 					tet_nodes(e, nd);
 					for (int a = 0; a < nen; a++) {
 						const double ua = u[nd[a]];
@@ -305,7 +305,7 @@ static void write_grid(FILE *fp)
 		*/
 		int64_t total = 0;
 		for (int e = 0; e < ne; e++) {
-			int32_t nd[27];
+			int32_t nd[ELEM_NMAX];
 			int nen = elem3d_nodes(e, nd);
 			const int kind = elem3d_kind(e);
 			if ((kind == MESHELEM_HEX) && (nen > 8)) nen = 8;
@@ -315,7 +315,7 @@ static void write_grid(FILE *fp)
 		}
 		fprintf(fp, "\nCELLS %d %lld\n", ne, (long long)total);
 		for (int e = 0; e < ne; e++) {
-			int32_t nd[27];
+			int32_t nd[ELEM_NMAX];
 			int nen = elem3d_nodes(e, nd);
 			const int kind = elem3d_kind(e);
 			if ((kind == MESHELEM_HEX) && (nen > 8)) nen = 8;

@@ -216,7 +216,7 @@ static void tet_faces_build(const double *kcell)
 	int m = 0;
 	for (int e = 0; e < ne; e++) {
 		if (kcell[e] <= 0) continue;
-		int32_t nd[27];
+		int32_t nd[ELEM_NMAX];
 		elem3d_nodes(e, nd);
 		int fv[6][4], nfv[6];
 		const int nfe = elem_faces(e, fv, nfv);
@@ -1297,7 +1297,7 @@ static int rx_build_tet(FILE *fp_log)
 			an[2] += 0.5 * ((p[0] * q[1]) - (p[1] * q[0]));
 		}
 		// 外向き : 要素の重心から面の中心へ向かう側
-		int32_t en[27];
+		int32_t en[ELEM_NMAX];
 		const int nen = elem3d_nodes(TFaceEl[f], en);
 		double ec[3] = {0, 0, 0};
 		for (int l = 0; l < nen; l++) {
@@ -1422,7 +1422,7 @@ static void gen_assemble(crs_t *A, const double *coef, int mass)
 	for (int e = NTet; e < ne; e++) {
 		const double c = coef[e];
 		if (c <= 0) continue;
-		int32_t nd[27];
+		int32_t nd[ELEM_NMAX];
 		const int nen = elem3d_nodes(e, nd);
 		const int nq = elem3d_nip(e);
 		double ke[8][8];
@@ -1457,7 +1457,7 @@ static void gen_joule(const double *phi, const double *sig, double *f)
 	for (int e = NTet; e < ne; e++) {
 		const double sg = sig[e];
 		if (sg <= 0) continue;
-		int32_t nd[27];
+		int32_t nd[ELEM_NMAX];
 		const int nen = elem3d_nodes(e, nd);
 		const int nq = elem3d_nip(e);
 		for (int q = 0; q < nq; q++) {
@@ -1479,7 +1479,7 @@ static void gen_joule(const double *phi, const double *sig, double *f)
 // 要素 e (四面体以外) の体積と、温度場 tn の要素平均
 static double gen_mean(int e, const double *tn, double *vol)
 {
-	int32_t nd[27];
+	int32_t nd[ELEM_NMAX];
 	const int nen = elem3d_nodes(e, nd);
 	const int nq = elem3d_nip(e);
 	double v = 0, ts = 0;
@@ -1707,7 +1707,7 @@ static double th_celltemp(const double *tn, const double *kcell, double *tcell)
 			if (kcell[e] <= 0) continue;
 			double v;
 			tcell[e] = gen_mean(e, tn, &v);
-			int32_t nd[27];
+			int32_t nd[ELEM_NMAX];
 			const int nen = elem3d_nodes(e, nd);
 			for (int l = 0; l < nen; l++) {
 				if (tn[nd[l]] > tmax) tmax = tn[nd[l]];

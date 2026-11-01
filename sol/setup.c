@@ -211,10 +211,10 @@ static int setup_unstruct(void)
 	}
 	// 20 節点の四面体は、組み立てで積分点の det J の符号が揃わない要素を飛ばすので
 	// (2 次と同じ経路)、黙って誤答にしないよう先に全要素を見て弾く
-	if ((MeshDim == 3) && (TetOrder == 3)) {
+	if ((MeshDim == 3) && (TetOrder >= 3)) {
 		const double c1[6] = {1, 1, 1, 0, 0, 0};
 		for (int e = 0; e < NTet; e++) {
-			double ke[20][20], vol;
+			double ke[TET_NMAX][TET_NMAX], vol;
 			if (tet20_element(e, c1, ke, &vol)) {
 				printf("*** tetrahedron %d (20-node) is degenerate or inverted (det J changes "
 					"sign inside the element)\n", e + 1);
@@ -296,8 +296,8 @@ static int setup_unstruct(void)
 				NodeConductor[Tri2[(t * 3) + l]] = (signed char)ElecCond[q];
 			}
 			// 3 次 (10 節点) の三角形は辺の 6 節点と面心も固定する (-1 は「無い」)
-			for (int l = 0; l < 7; l++) {
-				const int32_t n3 = Tri3[(t * 7) + l];
+			for (int l = 0; l < TRI_HO_MAX; l++) {
+				const int32_t n3 = Tri3[(t * TRI_HO_MAX) + l];
 				if (n3 >= 0) NodeConductor[n3] = (signed char)ElecCond[q];
 			}
 		}

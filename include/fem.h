@@ -205,9 +205,13 @@ EXTERN int32_t *Tri2;			// [3*NTri] 2 次のときのみ (1 次では NULL)
 // 四面体が 3 次 (20 節点) のとき Tet3 に頂点以外の 16 節点 (局所 4..19)、Tri3 に三角形の
 // 頂点以外の 7 節点 (局所 3..9) が入る。並びは Gmsh の tet20 / tri10 (unstruct.c の
 // TET3_A / TRI3_A、gmsh の出力を分類した実測の表)。3 次でない三角形の Tri3 は -1
-EXTERN int32_t *Tet3;			// [16*NTet] 3 次のときのみ
-#define TRI_NMAX (10)		// 三角形 1 個の最大節点数 (3 次の tri10)
-EXTERN int32_t *Tri3;			// [7*NTri] 常に確保 (3 次でない三角形は -1)
+EXTERN int32_t *Tet3;			// [TET_HO_MAX*NTet] 3 次・4 次のときのみ (3 次は先頭 16 個)
+#define TRI_NMAX (15)		// 三角形 1 個の最大節点数 (4 次の tri15)
+#define TET_NMAX (35)		// 四面体 1 個の最大節点数 (4 次の tet35)
+#define ELEM_NMAX (35)		// 3 次元要素 1 個の最大節点数 (tet35 > hex27)
+#define TET_HO_MAX (31)		// Tet3 の 1 要素あたりの幅 (頂点以外の節点、3 次 16 / 4 次 31)
+#define TRI_HO_MAX (12)		// Tri3 の 1 要素あたりの幅 (頂点以外の節点、3 次 7 / 4 次 12)
+EXTERN int32_t *Tri3;			// [TRI_HO_MAX*NTri] 常に確保 (3 次は先頭 7 個、使わない欄は -1)
 // 辺 (3 次元渦電流の辺要素で使う)。辺は節点番号の小さい方から大きい方へ向ける
 EXTERN int NEdge;
 EXTERN int64_t *EdgePtr;		// [NNode+1] 節点 i を始点とする辺の範囲
