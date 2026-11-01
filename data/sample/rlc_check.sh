@@ -5156,7 +5156,7 @@ awk '/^radiation =/{print; print "radiationtemptable = 0 0.2  200 1.0"; next} {p
 awk '/^radiation =/{print; print "radiationexpr = 0.2 + 0.004 * T"; next} {print}' "$WORK/thermal_rad.ofe" > "$WORK/txc_e.ofe"
 tx_same "(c) e(T) = 0.2 + 0.004 T" txc_t.ofe txc_e.ofe
 awk '/^convection/{print; print "convectionexpr = (T - 1000) / 1000"; next} {print}' "$WORK/thermal_conv.ofe" > "$WORK/txx_neg.ofe"
-th_reject "convectionexpr in T that becomes negative on the faces" txx_neg.ofe "is negative or not finite at"
+ex_runerr "convectionexpr in T that is negative on the faces (runtime)" txx_neg.ofe "is negative or not finite at 640 surface points"
 awk '/^radiation =/{print; print "radiationexpr = 0.2 + 0.004 * T"; print "radiationexchange = 1"; next} {print}' "$WORK/thermal_rad.ofe" > "$WORK/txx_rx.ofe"
 th_reject "radiationexpr in T with radiationexchange" txx_rx.ofe "cannot be combined with a radiationexpr that depends on T"
 
