@@ -484,6 +484,8 @@ int setup(void)
 		if (Material[m].ja.on) hysteresis = 1;
 	}
 	JaB = JaH = JaM = JaBn = JaHn = JaMn = JaD = JaDn = NULL;
+	JaVB = JaVH = JaVM = JaVBn = JaVHn = JaVMn = NULL;
+	JaNu6 = NULL;
 	if (hysteresis) {
 		const size_t njasz = (size_t)ncell * 8 * sizeof(double);
 		JaB  = (double *)malloc(njasz);
@@ -502,6 +504,15 @@ int setup(void)
 		JaDn = (double *)malloc(njasz * 3);
 		memset(JaD,  0, njasz * 3);		// 0 : 方向未確定 (未磁化)
 		memset(JaDn, 0, njasz * 3);
+		if (JaVector) {
+			JaVB  = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVH  = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVM  = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVBn = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVHn = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVMn = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaNu6 = (double *)calloc((size_t)ncell * 6, sizeof(double));
+		}
 	}
 
 	// 結果行列
@@ -554,4 +565,5 @@ void memfree(void)
 	free(Rfmat); free(Lfmat); free(Pfemat);
 	free(JaB); free(JaH); free(JaM); free(JaBn); free(JaHn); free(JaMn);
 	free(JaD); free(JaDn);
+	free(JaVB); free(JaVH); free(JaVM); free(JaVBn); free(JaVHn); free(JaVMn); free(JaNu6);
 }

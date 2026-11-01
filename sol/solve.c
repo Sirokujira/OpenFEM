@@ -506,7 +506,8 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 				nback++;
 				continue;
 			}
-			assemble_nu(A, nucell);
+			if (JaNu6 != NULL) assemble_nu6(A, JaNu6);
+			else assemble_nu(A, nucell);
 			int li;
 			if (nsigc > 0) {
 				const int64_t nnz = A->rowptr[n];
@@ -533,19 +534,7 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 		}
 
 		// J-A の状態を確定させる (静磁場の電流掃引と同じ)
-		if (JaB != NULL) {
-			memcpy(JaB, JaBn, (size_t)ncell * 8 * sizeof(double));
-			memcpy(JaH, JaHn, (size_t)ncell * 8 * sizeof(double));
-			memcpy(JaM, JaMn, (size_t)ncell * 8 * sizeof(double));
-			for (int64_t id = 0; id < ncell * 8; id++) {
-				double *d = &JaD[id * 3];
-				if ((d[0] == 0) && (d[1] == 0) && (d[2] == 0)) {
-					d[0] = JaDn[(id * 3) + 0];
-					d[1] = JaDn[(id * 3) + 1];
-					d[2] = JaDn[(id * 3) + 2];
-				}
-			}
-		}
+		ja_commit(ncell);
 
 		// エネルギー : 入力 b・ΔA、磁気の仕事 ΔA・r_ja、渦電流損 ΔA・M_eff ΔA / Δt
 		double din = 0, dmag = 0, ded = 0, lb = 0;
@@ -757,13 +746,56 @@ static int solve_magnetostatic(FILE *fp_log)
 			bref = sqrt(bref) * ((amax > 0) ? (amax / fabs(Curr)) : 1);
 			if (bref <= 0) bref = 1;
 
+			// 2 ポートの掃引 (回転磁界) の右辺の正規化は 2 つのポートの最大電流の和で取る
+			if (NSweep2 > 0) {
+				double a2 = 0, b2 = 0;
+				for (int q = 0; q < NSweep2; q++) {
+					if (fabs(Sweep2[q]) > a2) a2 = fabs(Sweep2[q]);
+				}
+				for (int i = 0; i < n; i++) {
+					if (!fix[i]) b2 += b[1][i] * b[1][i];
+				}
+				bref += sqrt(b2) * ((a2 > 0) ? (a2 / fabs(Curr)) : 1);
+			}
+			// 仕事の収支と観測点
+			double win = 0, wmag = 0, iprev[2] = {0, 0}, lprev[2] = {0, 0};
+			int64_t probe = -1;
+			if (JaProbeOn) {
+				double dbest = 1e300;
+				const double gq = 1 / sqrt(3.0);
+				for (int i = 0; i < Nx; i++) {
+				for (int j = 0; j < Ny; j++) {
+				for (int k = 0; k < Nz; k++) {
+					const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+					if (!Material[CellMaterial[c]].ja.on) continue;
+					for (int g = 0; g < 8; g++) {
+						const double px = Xn[i] + ((Xn[i + 1] - Xn[i]) * (1 + ((((g >> 2) & 1) ? 1 : -1) * gq)) / 2);
+						const double py = Yn[j] + ((Yn[j + 1] - Yn[j]) * (1 + ((((g >> 1) & 1) ? 1 : -1) * gq)) / 2);
+						const double pz = Zn[k] + ((Zn[k + 1] - Zn[k]) * (1 + (((g & 1) ? 1 : -1) * gq)) / 2);
+						const double dd = ((px - JaProbe[0]) * (px - JaProbe[0])) + ((py - JaProbe[1]) * (py - JaProbe[1]))
+						                + ((pz - JaProbe[2]) * (pz - JaProbe[2]));
+						if (dd < dbest) { dbest = dd; probe = (c * 8) + g; }
+					}
+				}
+				}
+				}
+				if (probe < 0) {
+					fprintf(fp_log, "*** warning : japrobe : no hysteretic cell, the probe is ignored\n");
+				}
+				else {
+					fprintf(fp_log, "  probe : Gauss point %lld (distance %.3e [m]); columns : step, %s\n",
+						(long long)probe, sqrt(dbest), (JaVector ? "H_p H_q [A/m], B_p B_q [T] (in-plane, p, q follow tline)"
+						                                           : "H [A/m], B [T] (signed along the first direction)"));
+				}
+			}
 			for (int is = 0; is < NSweep; is++) {
 				const double cur = Sweep[is];
 				const double fac = cur / Curr;
 				// 前のステップの場を捨てる (最後の 1 点だけが後で VTK に残る)
 				field_free();
+				const double fac2 = ((NSweep2 > 0) ? (Sweep2[is] / Curr) : 0);
 				for (int i = 0; i < n; i++) {
-					rhs[i] = (fix[i] ? 0 : (fac * b[0][i]));
+					rhs[i] = (fix[i] ? 0 : ((fac * b[0][i]) + ((NSweep2 > 0) ? (fac2 * b[1][i]) : 0)));
 				}
 
 				int it;
@@ -781,7 +813,8 @@ static int solve_magnetostatic(FILE *fp_log)
 						converged = 1;
 						break;
 					}
-					assemble_nu(&A, nucell);
+					if (JaNu6 != NULL) assemble_nu6(&A, JaNu6);
+					else assemble_nu(&A, nucell);
 					if (solver_cg(&A, rhs2, del, fix, Solver.maxiter, Solver.nout,
 							Solver.converg, NULL, "ja") < 0) {
 						fprintf(fp_log, "*** linear solver did not converge (sweep %d)\n", is + 1);
@@ -797,17 +830,47 @@ static int solve_magnetostatic(FILE *fp_log)
 						"(step %d, residual = %.3e)\n", is + 1, rnorm);
 				}
 
-				// 状態を確定させる
-				memcpy(JaB, JaBn, (size_t)ncell * 8 * sizeof(double));
-				memcpy(JaH, JaHn, (size_t)ncell * 8 * sizeof(double));
-				memcpy(JaM, JaMn, (size_t)ncell * 8 * sizeof(double));
-				// 方向は最初に磁化したときだけ決める (以降は固定)
-				for (int64_t id = 0; id < ncell * 8; id++) {
-					double *d = &JaD[id * 3];
-					if ((d[0] == 0) && (d[1] == 0) && (d[2] == 0)) {
-						d[0] = JaDn[(id * 3) + 0];
-						d[1] = JaDn[(id * 3) + 1];
-						d[2] = JaDn[(id * 3) + 2];
+				// 磁気の仕事 ∫ H・ΔB (台形則、確定前の状態と比べる)。ベクトル J-A は面内 2 成分
+				for (int i = 0; i < Nx; i++) {
+				for (int j = 0; j < Ny; j++) {
+				for (int k = 0; k < Nz; k++) {
+					const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+					if (!Material[CellMaterial[c]].ja.on) continue;
+					const double w = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]) / 8;
+					for (int g = 0; g < 8; g++) {
+						const int64_t id = (c * 8) + g;
+						if (JaVector) {
+							for (int q = 0; q < 2; q++) {
+								wmag += w * scale * (JaVH[(id * 2) + q] + JaVHn[(id * 2) + q]) / 2
+								      * (JaVBn[(id * 2) + q] - JaVB[(id * 2) + q]);
+							}
+						}
+						else {
+							wmag += w * scale * (JaH[id] + JaHn[id]) / 2 * (JaBn[id] - JaB[id]);
+						}
+					}
+				}
+				}
+				}
+				// 状態を確定させる (方向は最初に磁化したときだけ決める)
+				ja_commit(ncell);
+				// 端子の仕事 Σ_k Ī_k ΔΛ_k (台形則)。Λ_k = b_k・A / I_ref (単位長あたり)
+				for (int pp = 0; pp < np; pp++) {
+					const double ik = ((pp == 0) ? cur : Sweep2[is]);
+					double lam = 0;
+					for (int i = 0; i < n; i++) lam += b[pp][i] * az[i];
+					lam *= scale / Curr;
+					win += (ik + iprev[pp]) / 2 * (lam - lprev[pp]);
+					iprev[pp] = ik;
+					lprev[pp] = lam;
+				}
+				if (JaProbeOn && (probe >= 0)) {
+					if (JaVector) {
+						fprintf(fp_log, "  probe %5d %13.6e %13.6e %13.6e %13.6e\n", is + 1,
+							JaVH[(probe * 2) + 0], JaVH[(probe * 2) + 1], JaVB[(probe * 2) + 0], JaVB[(probe * 2) + 1]);
+					}
+					else {
+						fprintf(fp_log, "  probe %5d %13.6e %13.6e\n", is + 1, JaH[probe], JaB[probe]);
 					}
 				}
 
@@ -858,10 +921,16 @@ static int solve_magnetostatic(FILE *fp_log)
 				if (ierr) break;
 			}
 
+			// 仕事の収支 : 収束した各点で Σ I ΔΛ = ∫ H・ΔB (Galerkin の残差 0) なので、台形則でも
+			// 反復の打ち切りを除いて一致する。閉じた履歴なら差し引きがヒステリシス損 (単位長あたり)
+			// 線形のセル (空気・導体) の分は最後の状態の磁気エネルギー (台形則が厳密に telescoping)
+			const double wlin = scale * ja_linear_energy(az);
+			fprintf(fp_log, "  hysteresis work : terminals = %.12e, magnetic (int H.dB) = %.12e "
+				"(hysteretic %.12e + linear %.12e) [J/m]\n", win, wmag + wlin, wmag, wlin);
 			free(res);
 			free(del);
 			free(rhs2);
-			free(b[0]);
+			for (int k = 0; k < np; k++) free(b[k]);
 			free(b);
 			free(rhs);
 			free(az);

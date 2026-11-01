@@ -455,6 +455,231 @@ void ja_eval(const ja_t *ja, double b0, double h0, double m0, double b,
 }
 
 
+// ---- ベクトル Jiles-Atherton (等方性、断面 2 次元の面内 2 成分) ----
+//
+// スカラーの式をそのまま向きを持つ形にする (場が 1 方向ならスカラーの式に厳密に退化する):
+//   M_an = Ms L(|He|/a) He/|He|、He = H + αM
+//   χ_an = dM_an/dHe = (Ms/a) L'(x) ê êᵀ + (Ms L(x)/|He|)(I − ê êᵀ)     (対称)
+//   f = M_an − M、不可逆成分は f の向きに : (1−c) |f|/(k − α|f|) f̂ f̂ᵀ  (f・dB > 0 のときだけ = δ_M)
+//   χ = dM/dH = (I − α c χ_an)⁻¹ [ (1−c) |f|/(k − α|f|) f̂ f̂ᵀ + c χ_an ]
+// 1 次元では (1−c)|f|/(k − α|f|) = (1−c) f/(δk − αf) (δ = sign f) なので ja_dmdh と同じ式になる。
+// B が駆動変数なので dH = (μ0 (I + χ))⁻¹ dB、dM = χ dH を Heun 法で積分する (ja_eval と同じ)。
+
+static int inv2(const double a[2][2], double r[2][2])
+{
+	const double d = (a[0][0] * a[1][1]) - (a[0][1] * a[1][0]);
+	if (d == 0) return 1;
+	r[0][0] = a[1][1] / d;
+	r[0][1] = -a[0][1] / d;
+	r[1][0] = -a[1][0] / d;
+	r[1][1] = a[0][0] / d;
+	return 0;
+}
+
+
+// 帯磁率テンソル χ (2x2)。db は駆動の向き (δ_M の判定に使う)
+static void ja_chi_vec(const ja_t *ja, const double h[2], const double m[2], const double db[2],
+	double chi[2][2])
+{
+	const double he[2] = {h[0] + (ja->alpha * m[0]), h[1] + (ja->alpha * m[1])};
+	const double hn = sqrt((he[0] * he[0]) + (he[1] * he[1]));
+	double man, dman;
+	ja_langevin(ja, hn, &man, &dman);
+	double e[2] = {1, 0};
+	if (hn > 0) { e[0] = he[0] / hn; e[1] = he[1] / hn; }
+	// 横方向の χ_an = Ms L(x)/|He| (x -> 0 で Ms/(3a) = 縦方向に一致)
+	const double sec = ((hn > (1e-4 * ja->a)) ? (man / hn) : dman);
+	double can[2][2];
+	for (int i = 0; i < 2; i++) {
+		for (int j = 0; j < 2; j++) can[i][j] = (dman * e[i] * e[j]) + (sec * (((i == j) ? 1 : 0) - (e[i] * e[j])));
+	}
+	const double f[2] = {(sec * he[0]) - m[0], (sec * he[1]) - m[1]};
+	const double fn = sqrt((f[0] * f[0]) + (f[1] * f[1]));
+	double irr = 0, fh[2] = {0, 0};
+	if ((fn > 0) && (((f[0] * db[0]) + (f[1] * db[1])) > 0)) {
+		fh[0] = f[0] / fn;
+		fh[1] = f[1] / fn;
+		const double den = ja->k - (ja->alpha * fn);
+		if (fabs(den) > 0) irr = (1 - ja->c) * fn / den;
+		// 単調性 (ja_dmdh の χ < 0 -> 0 と同じ) : f の向きの帯磁率を負にしない
+		const double along = irr + (ja->c * ((fh[0] * ((can[0][0] * fh[0]) + (can[0][1] * fh[1])))
+		                                   + (fh[1] * ((can[1][0] * fh[0]) + (can[1][1] * fh[1])))));
+		if (along < 0) irr -= along;
+	}
+	double x[2][2], a[2][2], ai[2][2];
+	for (int i = 0; i < 2; i++) {
+		for (int j = 0; j < 2; j++) {
+			x[i][j] = (irr * fh[i] * fh[j]) + (ja->c * can[i][j]);
+			a[i][j] = ((i == j) ? 1 : 0) - (ja->alpha * ja->c * can[i][j]);
+		}
+	}
+	if (inv2(a, ai)) {
+		for (int i = 0; i < 2; i++) {
+			for (int j = 0; j < 2; j++) chi[i][j] = x[i][j];
+		}
+		return;
+	}
+	for (int i = 0; i < 2; i++) {
+		for (int j = 0; j < 2; j++) chi[i][j] = (ai[i][0] * x[0][j]) + (ai[i][1] * x[1][j]);
+	}
+}
+
+
+// 対角でない成分の添字 (xx yy zz xy yz zx の並び)
+static int ja_off(int a, int b)
+{
+	const int lo = ((a < b) ? a : b), hi = ((a < b) ? b : a);
+	return ((lo == 0) && (hi == 1)) ? 3 : (((lo == 1) && (hi == 2)) ? 4 : 5);
+}
+
+
+// 2x2 の対称部分の最大固有値
+static double ja_symmax(const double a[2][2])
+{
+	const double p = (a[0][0] + a[1][1]) / 2, q = (a[0][0] - a[1][1]) / 2, r = (a[0][1] + a[1][0]) / 2;
+	return p + sqrt((q * q) + (r * r));
+}
+
+
+// dH/dB = (μ0 (I + χ))⁻¹
+static void ja_dhdb_vec(const double chi[2][2], double nd[2][2])
+{
+	double a[2][2];
+	for (int i = 0; i < 2; i++) {
+		for (int j = 0; j < 2; j++) a[i][j] = MU0 * (((i == j) ? 1 : 0) + chi[i][j]);
+	}
+	if (inv2(a, nd)) {
+		nd[0][0] = nd[1][1] = 1 / MU0;
+		nd[0][1] = nd[1][0] = 0;
+	}
+}
+
+
+// 状態 (b0, h0, m0) から b まで積分して H, M と、行列に使う正の微分磁気抵抗率 (B の向きの
+// dH/dB の成分) を返す。dref は db = 0 のときの駆動の向き (スカラーの δ = +1 に当たる)
+void ja_eval_vec(const ja_t *ja, const double b0[2], const double h0[2], const double m0[2],
+	const double b[2], const double dref[2], double hout[2], double mout[2], double ns[2][2])
+{
+	const int nsub = ((JaSub > 0) ? JaSub : 20);
+	double db[2] = {(b[0] - b0[0]) / nsub, (b[1] - b0[1]) / nsub};
+	double dd[2] = {db[0], db[1]};
+	if ((dd[0] == 0) && (dd[1] == 0)) { dd[0] = dref[0]; dd[1] = dref[1]; }
+
+	double h[2] = {h0[0], h0[1]}, m[2] = {m0[0], m0[1]};
+	for (int s = 0; s < nsub; s++) {
+		double c1[2][2], n1[2][2], c2[2][2], n2[2][2];
+		ja_chi_vec(ja, h, m, dd, c1);
+		ja_dhdb_vec(c1, n1);
+		const double dh1[2] = {(n1[0][0] * db[0]) + (n1[0][1] * db[1]), (n1[1][0] * db[0]) + (n1[1][1] * db[1])};
+		const double dm1[2] = {(c1[0][0] * dh1[0]) + (c1[0][1] * dh1[1]), (c1[1][0] * dh1[0]) + (c1[1][1] * dh1[1])};
+		const double hp[2] = {h[0] + dh1[0], h[1] + dh1[1]};
+		const double mp[2] = {m[0] + dm1[0], m[1] + dm1[1]};
+		ja_chi_vec(ja, hp, mp, dd, c2);
+		ja_dhdb_vec(c2, n2);
+		const double dh2[2] = {(n2[0][0] * db[0]) + (n2[0][1] * db[1]), (n2[1][0] * db[0]) + (n2[1][1] * db[1])};
+		const double dm2[2] = {(c2[0][0] * dh2[0]) + (c2[0][1] * dh2[1]), (c2[1][0] * dh2[0]) + (c2[1][1] * dh2[1])};
+		for (int i = 0; i < 2; i++) {
+			h[i] += (dh1[i] + dh2[i]) / 2;
+			m[i] += (dm1[i] + dm2[i]) / 2;
+		}
+	}
+
+	// 行列の傾き : dH/dB の対称部分 (2x2 のテンソル)。B の向きの成分 (スカラーの dH/dB) だけを
+	// 等方的に使うと、向きが変わる点で横方向の剛性 (|H|/|B| に近い) を過小評価して固定点反復が
+	// 振動・発散した。最大固有値を等方的に使うと 1 方向の板で反復が 6 回 -> 145 回になった (実測)。
+	// テンソルなら場が 1 方向のとき縦はスカラーの dH/dB そのもの、横は横方向の剛性になる
+	double cf[2][2], nf[2][2];
+	ja_chi_vec(ja, h, m, dd, cf);
+	ja_dhdb_vec(cf, nf);
+	if (JaSafeSlope) {
+		// 両方の枝のうち剛性の大きい方 (最大固有値で比べる)
+		double c2[2][2], n2[2][2];
+		const double dr[2] = {-dd[0], -dd[1]};
+		ja_chi_vec(ja, h, m, dr, c2);
+		ja_dhdb_vec(c2, n2);
+		if (ja_symmax(n2) > ja_symmax(nf)) {
+			for (int i = 0; i < 2; i++) {
+				for (int j = 0; j < 2; j++) nf[i][j] = n2[i][j];
+			}
+		}
+	}
+	ns[0][0] = nf[0][0];
+	ns[1][1] = nf[1][1];
+	ns[0][1] = ns[1][0] = (nf[0][1] + nf[1][0]) / 2;
+	// 正定値でなければ (非対称の帯磁率で起こり得る) 最大固有値の等方テンソルにする
+	const double tr = ns[0][0] + ns[1][1], dt = (ns[0][0] * ns[1][1]) - (ns[0][1] * ns[0][1]);
+	if (!((tr > 0) && (dt > 0))) {
+		double t = ja_symmax(nf);
+		if (!(t > 0)) t = 1 / MU0;
+		ns[0][0] = ns[1][1] = t;
+		ns[0][1] = ns[1][0] = 0;
+	}
+	hout[0] = h[0]; hout[1] = h[1];
+	mout[0] = m[0]; mout[1] = m[1];
+}
+
+
+// 線形材料 (J-A でないセル) の磁気エネルギー ½ ∫ ν |∇A|² dV (2x2x2 Gauss、assemble_ja と同じ ν)。
+// 線形のセルでは台形則の ∫ H・ΔB が厳密に telescoping するので、掃引の仕事の収支には
+// 最後の状態のこの値を足せばよい
+double ja_linear_energy(const double *az)
+{
+	const double gp = 1 / sqrt(3.0);
+	double wsum = 0;
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+		const material_t *mt = &Material[CellMaterial[c]];
+		if (mt->ja.on) continue;
+		const double dx = Xn[i + 1] - Xn[i], dy = Yn[j + 1] - Yn[j], dz = Zn[k + 1] - Zn[k];
+		const double detj = (dx * dy * dz) / 8;
+		const double rx = 2 / dx, ry = 2 / dy, rz = 2 / dz;
+		const double nu = 1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
+		double a[8];
+		for (int l = 0; l < 8; l++) a[l] = az[node_index(i + LI(l), j + LJ(l), k + LK(l))];
+		for (int g = 0; g < 8; g++) {
+			const double xi = (LI(g) ? +gp : -gp), eta = (LJ(g) ? +gp : -gp), zta = (LK(g) ? +gp : -gp);
+			double gr[3] = {0, 0, 0};
+			for (int l = 0; l < 8; l++) {
+				const double si = (LI(l) ? +1.0 : -1.0), sj = (LJ(l) ? +1.0 : -1.0), sk = (LK(l) ? +1.0 : -1.0);
+				gr[0] += a[l] * si * (1 + (sj * eta)) * (1 + (sk * zta)) / 8 * rx;
+				gr[1] += a[l] * sj * (1 + (sk * zta)) * (1 + (si * xi )) / 8 * ry;
+				gr[2] += a[l] * sk * (1 + (si * xi )) * (1 + (sj * eta)) / 8 * rz;
+			}
+			wsum += 0.5 * nu * ((gr[0] * gr[0]) + (gr[1] * gr[1]) + (gr[2] * gr[2])) * detj;
+		}
+	}
+	}
+	}
+	return wsum;
+}
+
+
+// 反復中の J-A の状態 (Jn) を確定させる (静磁場の電流掃引と過渡解析の各刻みの終わり)。
+// 方向の基準は最初に磁化したときだけ決める
+void ja_commit(int64_t ncell)
+{
+	if (JaB == NULL) return;
+	memcpy(JaB, JaBn, (size_t)ncell * 8 * sizeof(double));
+	memcpy(JaH, JaHn, (size_t)ncell * 8 * sizeof(double));
+	memcpy(JaM, JaMn, (size_t)ncell * 8 * sizeof(double));
+	if (JaVB != NULL) {
+		memcpy(JaVB, JaVBn, (size_t)ncell * 16 * sizeof(double));
+		memcpy(JaVH, JaVHn, (size_t)ncell * 16 * sizeof(double));
+		memcpy(JaVM, JaVMn, (size_t)ncell * 16 * sizeof(double));
+	}
+	for (int64_t id = 0; id < ncell * 8; id++) {
+		double *d = &JaD[id * 3];
+		if ((d[0] == 0) && (d[1] == 0) && (d[2] == 0)) {
+			d[0] = JaDn[(id * 3) + 0];
+			d[1] = JaDn[(id * 3) + 1];
+			d[2] = JaDn[(id * 3) + 2];
+		}
+	}
+}
+
+
 // ヒステリシス材料の内力ベクトル res = ∫ ν_ja(|B|) ∇A・∇N_i dV と、
 // 固定点行列に使う微分磁気抵抗率 nucell (セル毎、正定値)。
 // ヒステリシスでは ν = H/B が負になり得る (第 2 象限) ため、行列には
@@ -489,6 +714,7 @@ void assemble_ja(const double *az, double *res, double *nucell)
 		double re[8];
 		for (int l = 0; l < 8; l++) re[l] = 0;
 		double nusum = 0;
+		double ten[6] = {0, 0, 0, 0, 0, 0};
 
 		for (int g = 0; g < 8; g++) {
 			const double xi  = (LI(g) ? +gp : -gp);
@@ -531,6 +757,38 @@ void assemble_ja(const double *az, double *res, double *nucell)
 					JaDn[(id * 3) + 2] = gr[2] / bmag;
 				}
 
+				if (JaVector) {
+					// ベクトル J-A : 面内の B = (∂A/∂q, −∂A/∂p) (p, q は伝送線路軸 t の次の 2 軸)
+					const int it = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
+					const int ip = (it + 1) % 3, iq = (it + 2) % 3;
+					const double bv[2] = {gr[iq], -gr[ip]};
+					// 基準の向き (勾配の向き dir を B の向きに回したもの)。スカラーの符号付き B と同じ射影
+					const double *dg = (haved ? dir : &JaDn[id * 3]);
+					double dref[2] = {dg[iq], -dg[ip]};
+					double hv[2], mv[2], ns[2][2];
+					ja_eval_vec(&mt->ja, &JaVB[id * 2], &JaVH[id * 2], &JaVM[id * 2], bv, dref, hv, mv, ns);
+					// 行列のテンソル (∇A の基底) : c_pp = N_qq、c_qq = N_pp、c_pq = −N_pq (B = (∂A/∂q, −∂A/∂p))
+					const double nmax = ja_symmax(ns);
+					ten[ip] += ns[1][1];
+					ten[iq] += ns[0][0];
+					ten[it] += nmax;
+					ten[ja_off(ip, iq)] -= ns[0][1];
+					const double nus = nmax;
+					for (int q = 0; q < 2; q++) {
+						JaVBn[(id * 2) + q] = bv[q];
+						JaVHn[(id * 2) + q] = hv[q];
+						JaVMn[(id * 2) + q] = mv[q];
+					}
+					JaBn[id] = bs;
+					JaHn[id] = (hv[0] * dref[0]) + (hv[1] * dref[1]);
+					JaMn[id] = (mv[0] * dref[0]) + (mv[1] * dref[1]);
+					// 残差 ∫ H・(∇×N ê_t) = ∫ (H_p ∂N/∂q − H_q ∂N/∂p)
+					for (int l = 0; l < 8; l++) {
+						re[l] += ((hv[0] * dn[l][iq]) - (hv[1] * dn[l][ip])) * detj;
+					}
+					nusum += nus;
+					continue;
+				}
 				double h, m, dhdb;
 				ja_eval(&mt->ja, JaB[id], JaH[id], JaM[id], bs, &h, &m, &dhdb);
 				JaBn[id] = bs;
@@ -552,6 +810,10 @@ void assemble_ja(const double *az, double *res, double *nucell)
 		}
 
 		nucell[c] = nusum / 8;
+		if (JaNu6 != NULL) {
+			// ベクトル J-A の行列のテンソル。J-A でないセルは等方の ν
+			for (int d = 0; d < 6; d++) JaNu6[(c * 6) + d] = ((mt->ja.on) ? (ten[d] / 8) : ((d < 3) ? (nusum / 8) : 0));
+		}
 		for (int l = 0; l < 8; l++) {
 			res[nd[l]] += re[l];
 		}
@@ -724,6 +986,31 @@ static void assemble_core(crs_t *A, int mode, const double *coefcell)
 				const int dj = LJ(mm) - lj;
 				const int dk = LK(mm) - lk;
 				const int64_t p = crs_offset(rowstart, i + li, j + lj, k + lk, di, dj, dk);
+				A->val[p] += ke[l][mm];
+			}
+		}
+	}
+	}
+	}
+}
+
+
+// セル毎の 6 成分テンソル (xx yy zz xy yz zx) で行列を作る (ベクトル J-A の固定点行列)
+void assemble_nu6(crs_t *A, const double *nu6)
+{
+	crs_zero(A);
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		const int64_t cid = ((int64_t)i * Ny + j) * Nz + k;
+		double ke[8][8];
+		element_matrix(Xn[i + 1] - Xn[i], Yn[j + 1] - Yn[j], Zn[k + 1] - Zn[k], &nu6[cid * 6], ke);
+		for (int l = 0; l < 8; l++) {
+			const int li = LI(l), lj = LJ(l), lk = LK(l);
+			const int64_t row = node_index(i + li, j + lj, k + lk);
+			const int64_t rowstart = A->rowptr[row];
+			for (int mm = 0; mm < 8; mm++) {
+				const int64_t p = crs_offset(rowstart, i + li, j + lj, k + lk, LI(mm) - li, LJ(mm) - lj, LK(mm) - lk);
 				A->val[p] += ke[l][mm];
 			}
 		}

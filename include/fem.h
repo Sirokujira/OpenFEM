@@ -69,7 +69,7 @@ extern "C" {
 #define MAXPORT (16)			// 導体 (基準導体 + ポート) の最大数
 #define MAXBH   (64)			// B-H 曲線の点数の最大数
 #define MAXPOLE (8)				// 分散材料の極の最大数
-#define MAXSWEEP (64)			// 電流掃引の点数の最大数
+#define MAXSWEEP (256)			// 電流掃引の点数の最大数
 
 // Jiles-Atherton ヒステリシスモデルのパラメータ
 //   M_an(He) = Ms (coth(He/a) - a/He),  He = H + α M
@@ -401,6 +401,14 @@ EXTERN int JaSafeSlope;			// 1 : dH/dB に両方向の枝の大きい方を返�
 EXTERN double *JaBn, *JaHn, *JaMn;	// 反復中の |B|, H, M
 EXTERN double *JaD, *JaDn;		// 磁化方向の基準ベクトル (符号付き B を取るため)
 EXTERN int JaSub;				// 1 ステップあたりの部分積分数
+EXTERN int JaVector;			// 1 : ベクトル J-A (等方性、面内 2 成分。回転磁界)
+EXTERN double *JaVB, *JaVH, *JaVM;		// ベクトル J-A の収束済みの B, H, M (面内 2 成分、添字 = id * 2)
+EXTERN double *JaVBn, *JaVHn, *JaVMn;	// 反復中の B, H, M
+EXTERN double *JaNu6;			// ベクトル J-A の固定点行列のテンソル (セル毎 6 成分)
+EXTERN int NSweep2;				// 2 番目のポートの電流掃引の点数 (0 : 1 ポートだけ)
+EXTERN double Sweep2[MAXSWEEP];
+EXTERN int JaProbeOn;			// 1 : 指定点に近い Gauss 点の H, B (ベクトル) を掃引の各点でログに出す
+EXTERN double JaProbe[3];
 
 // 非線形 (B-H) 反復の設定
 EXTERN int NlMaxiter;			// 最大反復回数

@@ -14,6 +14,7 @@ mesh / material / geometry の書式は .ofd からそのまま流用できる�
 #include <stdarg.h>
 
 #define MAXTOKEN (1000)
+#define INPUT_LINE (32768)		// 入力の 1 行の最大長 (電流掃引の 256 点 x 2 本が入る)
 #define ARRAY_INC (1000)
 
 // 空白区切りでトークンに分解する ("str" は破壊される)
@@ -200,7 +201,9 @@ int input_data(FILE *fp)
 	int    *dxr = NULL, *dyr = NULL, *dzr = NULL;
 	double *xr = NULL, *yr = NULL, *zr = NULL;
 	char   prog[BUFSIZ];
-	char   strline[BUFSIZ], strkey[BUFSIZ], strsave[BUFSIZ];
+	// 1 行の長さは BUFSIZ に頼らない (MSVC 512 / macOS 1024 / glibc 8192 で違い、長い掃引の行が
+	// Windows と macOS でだけ黙って切れる)
+	static char strline[INPUT_LINE], strkey[INPUT_LINE], strsave[INPUT_LINE];
 	char   *token[MAXTOKEN];
 	const char sep[] = " \t\n\r";
 	const char errfmt1[] = "*** too many %s data\n";
@@ -307,6 +310,9 @@ int input_data(FILE *fp)
 	NSweep = 0;
 	NFreqSweep = 0;
 	JaSub = 20;
+	JaVector = 0;
+	NSweep2 = 0;
+	JaProbeOn = 0;
 
 	NlMaxiter = 50;
 	NlTol = 1e-5;
@@ -320,6 +326,11 @@ int input_data(FILE *fp)
 	// 読み込み
 
 	while (fgets(strline, sizeof(strline), fp) != NULL) {
+		// 行が長すぎて切れた (改行が無く、ファイルの終わりでもない) ら黙って誤読せず入力エラー
+		if ((strchr(strline, '\n') == NULL) && !feof(fp)) {
+			printf("*** input line too long (more than %d characters)\n", INPUT_LINE - 2);
+			return 1;
+		}
 		// コメント
 		char *pcomment = strchr(strline, '#');
 		if (pcomment != NULL) *pcomment = '\0';
@@ -1180,6 +1191,33 @@ int input_data(FILE *fp)
 				Sweep[q] = atof(token[2 + q]);
 			}
 		}
+		else if (!strcmp(strkey, "currentsweep2")) {
+			// currentsweep2 = <I1> <I2> ...  : 2 番目のポートの電流 (currentsweep と同じ点数)。
+			//   2 つのポートの電流の位相をずらすと回転磁界になる (javector と使う)
+			if ((nval < 1) || (nval > MAXSWEEP)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			NSweep2 = nval;
+			for (int q = 0; q < nval; q++) Sweep2[q] = atof(token[2 + q]);
+		}
+		else if (!strcmp(strkey, "javector")) {
+			// javector = 0 | 1 : 1 でベクトル J-A (等方性、断面 2 次元の面内 2 成分)
+			if ((nval != 1) || ((atoi(token[2]) != 0) && (atoi(token[2]) != 1))) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			JaVector = atoi(token[2]);
+		}
+		else if (!strcmp(strkey, "japrobe")) {
+			// japrobe = <x> <y> <z> : その点に近い Gauss 点の H, B (面内のベクトル) を掃引の各点でログに出す
+			if (nval != 3) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			for (int q = 0; q < 3; q++) JaProbe[q] = atof(token[2 + q]);
+			JaProbeOn = 1;
+		}
 		else if (!strcmp(strkey, "jasub")) {
 			// jasub = <n>  : 1 ステップあたりの J-A 部分積分数
 			JaSub = atoi(token[2]);
@@ -1970,8 +2008,24 @@ int input_data(FILE *fp)
 			printf("%s\n", "*** the ja key cannot be combined with analysis F");
 			return 1;
 		}
-		if (NPort != 1) {
-			printf("%s\n", "*** a hysteretic (ja) model requires exactly one port");
+		if (NSweep2 > 0) {
+			// 2 ポートの掃引 (回転磁界) : 2 番目のポートの電流を currentsweep2 で与える
+			if (NPort != 2) {
+				printf("%s\n", "*** currentsweep2 needs exactly two ports (conductors 1 and 2)");
+				return 1;
+			}
+			if (NSweep2 != NSweep) {
+				printf("%s\n", "*** currentsweep2 needs as many points as currentsweep");
+				return 1;
+			}
+			if (TransientOn) {
+				printf("%s\n", "*** currentsweep2 cannot be combined with transient");
+				return 1;
+			}
+		}
+		else if (NPort != 1) {
+			printf("%s\n", "*** a hysteretic (ja) model requires exactly one port "
+				"(two ports with currentsweep2)");
 			return 1;
 		}
 		if (NSweep < 1) {
@@ -1983,6 +2037,16 @@ int input_data(FILE *fp)
 	else if (NSweep > 0) {
 		printf("%s\n", "*** currentsweep needs a hysteretic (ja) material");
 		return 1;
+	}
+	if ((NSweep2 > 0) && !hysteresis) {
+		printf("%s\n", "*** currentsweep2 needs a hysteretic (ja) material and currentsweep");
+		return 1;
+	}
+	if (!hysteresis && JaVector) {
+		input_warn("javector has no effect without a hysteretic (ja) material");
+	}
+	if (!hysteresis && JaProbeOn) {
+		input_warn("japrobe has no effect without a hysteretic (ja) material");
 	}
 	if ((NFreqSweep > 0) && (NSweep > 0)) {
 		printf("%s\n", "*** frequencysweep and currentsweep cannot be combined");

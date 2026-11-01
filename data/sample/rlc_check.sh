@@ -4651,6 +4651,100 @@ awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
 th_run p3x_th.ofe
 th_energy "thermal on a 20-node tetrahedral mesh"
 
+# ---- ベクトルヒステリシス (javector = 1、等方性のベクトル J-A、回転磁界) ----
+#
+# assemble.c の ja_chi_vec / ja_eval_vec (B 駆動の逆。dH = (μ0 (I + χ))⁻¹ dB、dM = χ dH を Heun 法で積分)。
+#   (a) 場が 1 方向の板 (plate_line_ja.ofe) ではスカラーの J-A の表と B・L・反復回数が印字の全桁で一致
+#       (テンソルの行列は場が 1 方向なら縦方向がスカラーの dH/dB そのもの)。H は I = 0 の点が
+#       ±6e-8 A/m の丸めの雑音なので絶対値 1e-6 A/m で比べる
+#   (b) 端子の仕事 Σ Ī ΔΛ = 磁気の仕事 ∫ H・ΔB (台形則。収束した各点で Galerkin の残差が 0 なので
+#       反復の打ち切りを除いて厳密)。線形のセルの分は最後の状態の ½∫ν|B|² (台形則が telescoping)
+#   (c) 回転磁界 (ja_rotating.ofe、2 ポート) : japrobe の Gauss 点の H の列を折れ線でつなぎ、**H 駆動の
+#       順方向**のベクトル J-A を awk で独立に積分した B (ja_vector_fwd.awk) が FEM の B に近づく。
+#       FEM は B を、awk は H を刻みの中で直線にするので経路の差が刻みの 2 乗で残る (1 回転 24 点で
+#       1.8e-2、48 点で 4.4e-3、比 4.2、実測)。許容は 48 点で 1e-2、比 > 3
+echo "[javector] vector Jiles-Atherton hysteresis (rotating field, two-port sweep)"
+cp "$SRC/plate_line_ja.ofe" "$SRC/ja_rotating.ofe" "$WORK/"
+jv_table() { sed -n '/Jiles-Atherton hysteresis/,/hysteresis work/p' "$WORK/ofe.log" | awk '$1 ~ /^[0-9]+$/'; }
+jv_work() {	# jv_work <ラベル> : 端子の仕事 = 磁気の仕事
+	res=$(awk '/hysteresis work/ { a = $6 + 0; b = $11 + 0 }
+		END { if (a == 0) { printf "NG (no work line)"; exit }
+		      d = (a - b) / a; if (d < 0) d = -d
+		      printf "%s (terminals %.6e, magnetic %.6e, %.1e)", (d < 1e-6) ? "OK" : "NG", a, b, d }' "$WORK/ofe.log")
+	echo "  $1 : terminal work = magnetic work (int H.dB) : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+# (a) (b)
+(cd "$WORK" && "$OFE" -n 2 plate_line_ja.ofe > /dev/null 2>&1) || { echo "  plate_line_ja : the run failed -> NG" >&2; status=1; }
+jv_table > "$WORK/jv_s.txt"
+jv_work "scalar J-A, plate line"
+awk '/^analysis/{print "javector = 1"} {print}' "$SRC/plate_line_ja.ofe" > "$WORK/jv_plate.ofe"
+(cd "$WORK" && "$OFE" -n 2 jv_plate.ofe > /dev/null 2>&1) || { echo "  jv_plate : the run failed -> NG" >&2; status=1; }
+jv_table > "$WORK/jv_v.txt"
+jv_work "vector J-A, plate line"
+res=$(awk 'NR == FNR { b[FNR] = $4; l[FNR] = $5; it[FNR] = $6; h[FNR] = $3; n = FNR; next }
+	{ m++; dh = $3 - h[FNR]; if (dh < 0) dh = -dh; s = h[FNR]; if (s < 0) s = -s
+	  if (($4 != b[FNR]) || ($5 != l[FNR]) || ($6 != it[FNR]) || !(dh <= 1e-6 + 1e-6 * s)) bad++ }
+	END { if ((n == 0) || (m != n)) printf "NG (%d vs %d rows)", n, m; else printf "%s (%d rows, %d differ)", bad ? "NG" : "OK", n, bad + 0 }' \
+	"$WORK/jv_s.txt" "$WORK/jv_v.txt")
+echo "  one-directional field : vector J-A == scalar J-A (B, L, iterations; H to 1e-6 A/m) : $res"
+case "$res" in NG*) status=1 ;; esac
+#     過渡解析 (渦電流 + J-A、plate_line_ja_eddy.ofe) でも 1 方向の場ならスカラーと一致する
+#     (反復の経路が少し違うので打ち切りの範囲、実測 4e-9。許容 1e-6)
+cp "$SRC/plate_line_ja_eddy.ofe" "$WORK/"
+(cd "$WORK" && "$OFE" -n 2 plate_line_ja_eddy.ofe > /dev/null 2>&1) || { echo "  plate_line_ja_eddy : the run failed -> NG" >&2; status=1; }
+cp "$WORK/ofe_transient.csv" "$WORK/jv_ts.csv"
+awk '/^analysis/{print "javector = 1"} {print}' "$SRC/plate_line_ja_eddy.ofe" > "$WORK/jv_eddy.ofe"
+(cd "$WORK" && "$OFE" -n 2 jv_eddy.ofe > /dev/null 2>&1) || { echo "  jv_eddy : the run failed -> NG" >&2; status=1; }
+res=$(awk -F, 'NR == FNR { if (FNR > 1) { l[FNR] = $3; b[FNR] = $5 }; n = FNR; next }
+	FNR > 1 { m++; for (k = 0; k < 2; k++) { a = (k ? b[FNR] : l[FNR]); c = (k ? $5 : $3); d = a - c; if (d < 0) d = -d; s = (a < 0) ? -a : a
+	          r = (s > 0) ? d / s : d; if (!(r <= e)) e = r } }
+	END { if ((n < 2) || (m != n - 1)) printf "NG (rows %d vs %d)", n - 1, m; else printf "%s (%d steps, max rel diff %.1e)", (e <= 1e-6) ? "OK" : "NG", m, e }' \
+	"$WORK/jv_ts.csv" "$WORK/ofe_transient.csv")
+echo "  transient (eddy currents + J-A), one-directional field : vector == scalar (Lambda, B_mean) : $res"
+case "$res" in NG*) status=1 ;; esac
+# (c) 回転磁界
+jv_rot() {	# jv_rot <1 回転の点数> > ofe : ja_rotating.ofe の掃引を書き換える (A = 1000、2 回転)
+	awk -v N="$1" 'BEGIN { pi = atan2(0, -1); A = 1000
+		for (k = 1; k <= 4; k++) { s1 = s1 " " A * k / 4; s2 = s2 " 0" }
+		for (k = 1; k <= 2 * N; k++) { t = 2 * pi * k / N; s1 = s1 " " sprintf("%.15g", A * cos(t)); s2 = s2 " " sprintf("%.15g", A * sin(t)) } }
+		/^currentsweep =/ { print "currentsweep =" s1; next } /^currentsweep2 =/ { print "currentsweep2 =" s2; next } { print }' "$SRC/ja_rotating.ofe"
+}
+for N in 24 48; do
+	jv_rot "$N" > "$WORK/jv_rot$N.ofe"
+	(cd "$WORK" && "$OFE" -n 2 "jv_rot$N.ofe" > /dev/null 2>&1) || { echo "  jv_rot$N : the run failed -> NG" >&2; status=1; }
+	if grep -q "did not converge" "$WORK/ofe.log"; then
+		echo "  rotating field ($N points per turn) : the hysteresis iteration did not converge -> NG" >&2; status=1
+	fi
+	jv_work "rotating field ($N points per turn)"
+	if [ "$N" = 24 ]; then
+		#   行列のテンソルの誤り (非対角の符号など) は答えを変えずに反復を遅くするだけなので
+		#   (実測 476 回 -> 769 回、仕事の恒等式は打ち切りの分 1.1e-6 で際どく落ちるだけ)、
+		#   反復の総数そのものを assert する (上限 600)
+		res=$(jv_table | awk '{ s += $NF } END { printf "%s (%d iterations, at most 600)", ((s > 0) && (s <= 600)) ? "OK" : "NG", s }')
+		echo "  rotating field (24 points per turn) : total fixed-point iterations (tensor tangent) : $res"
+		case "$res" in NG*) status=1 ;; esac
+	fi
+	set -- $(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -f "$SRC/ja_vector_fwd.awk" "$WORK/ofe.log")
+	eval "jv_e$N=\$1"
+	echo "  rotating field ($N points per turn) : |B_FEM - B_H-driven| / max|B| = $1 (max |B| = $2 T)"
+done
+#     sample の 24 点は jv_rot 24 と同じ掃引 (書き換えで同じ入力になること)
+awk '/^currentsweep/' "$SRC/ja_rotating.ofe" > "$WORK/jv_a.txt"
+awk '/^currentsweep/' "$WORK/jv_rot24.ofe" > "$WORK/jv_b.txt"
+cmp -s "$WORK/jv_a.txt" "$WORK/jv_b.txt" || { echo "  ja_rotating.ofe is not the 24-point sweep -> NG" >&2; status=1; }
+res=$(awk -v a="$jv_e24" -v b="$jv_e48" 'BEGIN { ok = (b <= 1e-2) && (a > 3 * b)
+	printf "%s (24 points %.2e, 48 points %.2e, ratio %.2f)", ok ? "OK" : "NG", a, b, (b > 0) ? a / b : 0 }')
+echo "  rotating field : FEM (B-driven) -> independent H-driven vector J-A as the turn is refined : $res"
+case "$res" in NG*) status=1 ;; esac
+# (d) 弾くべき入力 (理由まで grep する)
+awk '!/^conductor = 2/' "$SRC/ja_rotating.ofe" > "$WORK/jvx_1p.ofe"
+th_reject "currentsweep2 with one port" jvx_1p.ofe "needs exactly two ports"
+awk '/^currentsweep2/{print "currentsweep2 = 0 0"; next} {print}' "$SRC/ja_rotating.ofe" > "$WORK/jvx_n.ofe"
+th_reject "currentsweep2 with a different number of points" jvx_n.ofe "as many points as currentsweep"
+awk '/^ja =/{next} /^currentsweep =/{next} /^javector/{next} /^japrobe/{next} /^jasub/{next} {print}' "$SRC/ja_rotating.ofe" > "$WORK/jvx_noja.ofe"
+th_reject "currentsweep2 without a hysteretic material" jvx_noja.ofe "currentsweep2 needs a hysteretic"
+
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
 # 警告が (a) 罠のケースで必ず出て (b) 正しいケースでは 1 件も出ないことを両方見る
@@ -4713,6 +4807,9 @@ lint_expect "radiationtemptable (clean)" thrt.ofe no
 #   (thpf*.ofe は [thermal h(x)] 節で作ったもの)
 lint_expect "convectionprofile (clean)" thpf_s.ofe no
 lint_expect "radiationprofile (clean)" thpf_rs.ofe no
+lint_expect "javector + currentsweep2 + japrobe (clean)" ja_rotating.ofe no
+awk '/^ja =/{next} /^currentsweep/{next} /^jasub/{next} {print}' "$SRC/ja_rotating.ofe" | awk '!/^conductor = 2/' > "$WORK/lint_jv_noja.ofe"
+lint_expect "javector / japrobe without ja" lint_jv_noja.ofe yes
 awk '/^convection =/{next} /^thermal/{print "heatsink = 0 20"} {print}' "$WORK/thpf_s.ofe" > "$WORK/lint_pf_noconv.ofe"
 lint_expect "convectionprofile without convection" lint_pf_noconv.ofe yes
 awk '/^thermal/{next} {print}' "$WORK/thpf_s.ofe" | awk '!/^kthermal|^convection = /' > "$WORK/lint_pf_noth.ofe"

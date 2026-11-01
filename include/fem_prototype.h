@@ -151,6 +151,10 @@ double bh_b_of_h(const material_t *, int, double);
 void assemble_newton(crs_t *, const double *, double *);
 void assemble_ja(const double *, double *, double *);
 void ja_eval(const ja_t *, double, double, double, double, double *, double *, double *);
+void ja_eval_vec(const ja_t *, const double [2], const double [2], const double [2], const double [2], const double [2], double [2], double [2], double [2][2]);
+void ja_commit(int64_t);
+void assemble_nu6(crs_t *, const double *);
+double ja_linear_energy(const double *);
 
 // solver_cg.c
 int solver_cg(const crs_t *, const double *, double *, const unsigned char *,
