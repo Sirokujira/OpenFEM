@@ -221,16 +221,18 @@ EXTERN int32_t *Tri2;			// [3*NTri] 2 次のときのみ (1 次では NULL)
 // 頂点以外の 7 節点 (局所 3..9) が入る。並びは Gmsh の tet20 / tri10 (unstruct.c の
 // TET3_A / TRI3_A、gmsh の出力を分類した実測の表)。3 次でない三角形の Tri3 は -1
 EXTERN int32_t *Tet3;			// [TET_HO_MAX*NTet] 3 次・4 次のときのみ (3 次は先頭 16 個)
-#define TRI_NMAX (21)		// 三角形 1 個の最大節点数 (5 次の tri21)
-#define TET_NMAX (56)		// 四面体 1 個の最大節点数 (5 次の tet56)
+#define TRI_NMAX (36)		// 三角形 1 個の最大節点数 (7 次の tri36)
+#define TET_NMAX (120)		// 四面体 1 個の最大節点数 (7 次の tet120)
 #define ELEM_NMAX (125)		// 3 次元要素 1 個の最大節点数 (4 次の hexa125)
 #define HEXP_NMAX (125)		// 六面体 1 個の節点数の上限 (4 次の hexa125)
 #define PRISMP_NMAX (75)	// 角柱 1 個の節点数の上限 (4 次の prism75)
 #define HEX2_W (117)		// Hex2 の 1 要素あたりの欄数 (頂点以外、4 次で 117)
 #define PRISM2_W (69)		// Prism2 の 1 要素あたりの欄数 (頂点以外、4 次で 69)
 #define QUAD2_W (21)		// Quad2 の 1 面あたりの欄数 (頂点以外、25 節点四角形で 21)
-#define TET_HO_MAX (52)		// Tet3 の 1 要素あたりの幅 (頂点以外の節点、3 次 16 / 4 次 31 / 5 次 52)
-#define TRI_HO_MAX (18)		// Tri3 の 1 要素あたりの幅 (頂点以外の節点、3 次 7 / 4 次 12 / 5 次 18)
+#define TET_HO_MAX (116)		// Tet3 の 1 要素あたりの幅 (頂点以外の節点、3 次 16 / 4 次 31 / 5 次 52 / 6 次 80 / 7 次 116)
+#define TRI_HO_MAX (33)		// Tri3 の 1 要素あたりの幅 (頂点以外の節点、3 次 7 / 4 次 12 / 5 次 18 / 6 次 25 / 7 次 33)
+#define GL_NMAX (10)		// 1 次元 Gauss-Legendre の最大点数 (7 次の自己検証で 9)
+#define QTRI_MAX (100)		// 三角形の Duffy 則の最大点数 (GL_NMAX²)
 EXTERN int32_t *Tri3;			// [TRI_HO_MAX*NTri] 常に確保 (3 次は先頭 7 個、使わない欄は -1)
 // 辺 (3 次元渦電流の辺要素で使う)。辺は節点番号の小さい方から大きい方へ向ける
 EXTERN int NEdge;

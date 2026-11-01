@@ -71,12 +71,12 @@ void monitor2(FILE *fp, int nthread)
 	}
 	else if (MeshMode && (MeshDim == 2)) {
 		fprintf(fp, "Mesh = %s (unstructured 2-D cross-section, %s triangles)\n", MeshFile,
-			((TetOrder == 5) ? "21-node quintic" : (TetOrder == 4) ? "15-node quartic" : (TetOrder == 3) ? "10-node cubic" : (TetOrder >= 2) ? "6-node quadratic" : "3-node linear"));
+			((TetOrder == 7) ? "36-node septic" : (TetOrder == 6) ? "28-node sextic" : (TetOrder == 5) ? "21-node quintic" : (TetOrder == 4) ? "15-node quartic" : (TetOrder == 3) ? "10-node cubic" : (TetOrder >= 2) ? "6-node quadratic" : "3-node linear"));
 		fprintf(fp, "Nodes = %lld, Triangles = %d\n", (long long)nnode, NTri);
 	}
 	else if (MeshMode) {
 		fprintf(fp, "Mesh = %s (unstructured, %s tetrahedra)\n", MeshFile,
-			((TetOrder == 5) ? "56-node quintic" : (TetOrder == 4) ? "35-node quartic" : (TetOrder == 3) ? "20-node cubic" : (TetOrder >= 2) ? "10-node quadratic" : "4-node linear"));
+			((TetOrder == 7) ? "120-node septic" : (TetOrder == 6) ? "84-node sextic" : (TetOrder == 5) ? "56-node quintic" : (TetOrder == 4) ? "35-node quartic" : (TetOrder == 3) ? "20-node cubic" : (TetOrder >= 2) ? "10-node quadratic" : "4-node linear"));
 		fprintf(fp, "Nodes = %lld, Tetrahedra = %d, Triangles = %d\n",
 			(long long)nnode, NTet, NTri);
 	}

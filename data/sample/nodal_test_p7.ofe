@@ -1,0 +1,19 @@
+OpenFEM 1 0
+title = nodal element (P7) self test, anisotropic epsilon
+#
+# 7 次四面体 (120 節点、gmsh の型 72) の自己検証 (analysis = P)。直線要素の小さな箱
+# (box_p7.msh、box_ho.geo を gmsh_geo_order.py で 7 次にしたもの、24 要素) で
+#   (a) K 1 = 0、(b) 1 次〜7 次の φ で φᵀKφ = ∫(∇φ)ᵀε(∇φ) dV、(e) 重心の勾配、(d) 対称性
+# を機械精度で見る。**7 次特有の基底を検査できるのは (j) の septic の φ だけ**。厳密値は解析的な ∇φ を
+# 別の積分則 (Duffy + 9 点) で積分したもので、要素行列 (8 点) と独立。
+# 局所節点の並びは gmsh の並びの再帰の規則 (unstruct.c の tet_rule、gmsh_ho_order.py で gmsh の出力と全項一致)
+#
+mesh = box_p7.msh
+material = 1.0 0.0
+anisoepsr = 2 5.0 3.5 2.5 0.8 0.6 1.3
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end

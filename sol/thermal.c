@@ -407,7 +407,7 @@ static struct {
 	// 中心だけで決めないため (rx_vis_curved)
 	double *spx;
 } RX;
-#define RX_MAXV (32)				// 面の境界の点の最大数 (5 次で 3 x 10 = 30)
+#define RX_MAXV (48)				// 面の境界の点の最大数 (7 次の三角形で 3 x 14 = 42、4 次の四角形で 4 x 8 = 32)
 #define RX_NS (9)
 
 
@@ -714,7 +714,7 @@ static double surf_tri_ho(crs_t *B, double *g, const double *t, int rad, int f,
 			if (nd[l] == cn[k]) fa[k] = l;
 		}
 	}
-	double mu[64][3], wq[64];		// 5 次で 7 x 7 = 49 点
+	double mu[QTRI_MAX][3], wq[QTRI_MAX];		// 7 次で 9 x 9 = 81 点
 	const int nq = tri_quad_pub(TetOrder + 2, mu, wq);
 	static double me[TET_NMAX][TET_NMAX];
 	double ge[TET_NMAX], qsum = 0;
@@ -1700,7 +1700,7 @@ static int rx_build_tet(FILE *fp_log)
 			an[0] = (t1[1] * t2[2]) - (t1[2] * t2[1]);
 			an[1] = (t1[2] * t2[0]) - (t1[0] * t2[2]);
 			an[2] = (t1[0] * t2[1]) - (t1[1] * t2[0]);
-			double st[64][2], wq[64];
+			double st[QTRI_MAX][2], wq[QTRI_MAX];
 			const int nq = face_quad_pub(k, TetOrder + 2, st, wq);
 			for (int q = 0; q < nq; q++) {
 				double xq[3];
@@ -1776,7 +1776,7 @@ static int rx_build_tet(FILE *fp_log)
 		RX.area[i] = ar;
 		if (RX.spx != NULL) {
 			const int ks = ((nd[3] < 0) ? 3 : 4);
-			double st[64][2], wq[64];
+			double st[QTRI_MAX][2], wq[QTRI_MAX];
 			const int ns = face_quad_pub(ks, 3, st, wq);
 			for (int q = 0; (q < ns) && (q < RX_NS); q++) {
 				double nv[ELEM_NMAX], t1[3], t2[3], *sp = &RX.spx[(((size_t)i * RX_NS) + q) * 6];
@@ -1817,7 +1817,7 @@ static int rx_build_tet(FILE *fp_log)
 			int32_t key[4];
 			rx_key(cn, k, key);
 			// 格子点 (a, b) の物理座標 : 媒介変数 (a/m, b/m)
-			double lp[(2 * 5 + 1) * (2 * 5 + 1)][3];
+			double lp[(2 * 7 + 1) * (2 * 7 + 1)][3];
 			for (int aa = 0; aa <= m; aa++) {
 				for (int bb = 0; bb <= m; bb++) {
 					if ((k == 3) && (aa + bb > m)) continue;
@@ -1880,9 +1880,9 @@ static int rx_build_tet(FILE *fp_log)
 			const int e = TFaceEl[fc];
 			const int32_t *cn = &TFace[fc * 4];
 			const int k = ((cn[3] < 0) ? 3 : 4);
-			double st[64][2], wq[64];
+			double st[QTRI_MAX][2], wq[QTRI_MAX];
 			const int nq = face_quad_pub(k, 7, st, wq);
-			double xq[64][3], nq3[64][3], wa[64], aa = 0, w2 = 0;
+			double xq[QTRI_MAX][3], nq3[QTRI_MAX][3], wa[QTRI_MAX], aa = 0, w2 = 0;
 			for (int q = 0; q < nq; q++) {
 				double nv[ELEM_NMAX], t1[3], t2[3];
 				elem3d_face_point(e, cn, k, st[q][0], st[q][1], nv, xq[q], t1, t2);
@@ -1931,7 +1931,7 @@ static void rx_emean_tet(const double *tn)
 			const int k = ((nd[3] < 0) ? 3 : 4);
 			int32_t en[ELEM_NMAX];
 			elem3d_nodes(e, en);
-			double st[64][2], wq[64];
+			double st[QTRI_MAX][2], wq[QTRI_MAX];
 			const int nq = face_quad_pub(k, TetOrder + 2, st, wq);
 			for (int q = 0; q < nq; q++) {
 				double nv[ELEM_NMAX], x[3], t1[3], t2[3], tg = 0;

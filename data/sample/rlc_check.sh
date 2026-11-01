@@ -3664,6 +3664,76 @@ mesh_reject "56-node tetrahedra with 15-node electrode triangles" p5x_tri.ofe
 sed 's/^analysis = .*/analysis = E/' "$WORK/box_p5.ofe" > "$WORK/p5x_e.ofe"
 th_reject "analysis E on a 56-node tetrahedral mesh" p5x_e.ofe "need a first-order mesh"
 
+# ---- 6 次 / 7 次要素 (gmsh の tet84 = 型 71 / tet120 = 型 72 / tri28 = 型 42 / tri36 = 型 43) ----
+#
+# 並びは表でなく gmsh の並びの**再帰の規則** (unstruct.c の tet_rule / tri_rule : 頂点、辺、面に次数 p−3 の三角形、
+# 内部に次数 p−4 の四面体)。規則は gmsh 4.15.2 の出力 (立方体の 1140 要素 / 540 面) を重心座標で分類したものと
+# 2〜7 次の全項で一致し (gmsh_ho_order.py)、起動時に 3〜5 次の実測の表と全項一致することを確かめる。積分は
+# Duffy + p+1 点 (8 点以上の Gauss-Legendre は Newton で根を求める。以前は表に無い点数を黙って 5 点に落としていた)。
+#   (a) 小さな箱 (box_ho.geo、24 要素) の平行平板 : C が閉形式に全桁、バイナリ 2.2 (6 次) / 4.1 (7 次) で rlc.csv が一致
+#   (b) analysis = P : 6 次 (i) / 7 次 (j) の φ の恒等式と重心の勾配 (**その次数特有の基底を見るのはこれだけ**)
+#   (c) 曲がった同軸 (6 次、h = 0.8mm) : 幾何誤差が h⁸ なので、**倍の要素の大きさで 4 次 (h = 0.4mm) に勝つ**
+#       (実測 C' −2.4e-6 / 体積 +4.7e-7 に対し 4 次 +8.5e-6 / −9.5e-7)
+#   (d) 断面 2 次元の 400 MHz の表皮効果 (10 MHz では 5 次が rlc.csv の桁 (3e-10) に届いていて差が見えない) :
+#       R の誤差が 4 次 8.0e-4、5 次 5.4e-5、6 次 8.2e-7、7 次 5.0e-8 (実測)。6 次は 5 次の 10 倍、7 次は 6 次の 5 倍よい
+#   (e) 6 次の四面体の面に 5 次の三角形、E は弾く
+echo "[order-6/7] 84 / 120-node tetrahedra, 28 / 36-node triangles (gmsh tet84 / tet120 / tri28 / tri36)"
+for m in box_p6 box_p6_bin_22 box_p7 box_p7_bin_41 coax_p6 plate2d_p6 plate2d_p7; do cp "$SRC/$m.msh" "$WORK/"; done
+for f in box_p6:box_p6_bin_22 box_p7:box_p7_bin_41; do
+	a=${f%%:*}; b=${f#*:}
+	sed "s/^mesh = .*/mesh = $a.msh/" "$SRC/box_p3.ofe" > "$WORK/$a.ofe"
+	(cd "$WORK" && "$OFE" -n 2 "$a.ofe" > /dev/null && "$OFE_POST" > /dev/null)
+	compare "C ($a box, 24 elements) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/p67a.csv"
+	sed "s/^mesh = .*/mesh = $b.msh/" "$WORK/$a.ofe" > "$WORK/p67f.ofe"
+	rm -f "$WORK/rlc.csv"
+	(cd "$WORK" && "$OFE" -n 2 p67f.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/p67f.csv" 2> /dev/null
+	if [ -s "$WORK/p67f.csv" ] && cmp -s "$WORK/p67a.csv" "$WORK/p67f.csv"; then echo "  $b == ASCII 2.2 -> OK"
+	else echo "  $b differs from ASCII 2.2 (or did not run) -> NG" >&2; status=1; fi
+done
+for p in 6:i:sextic 7:j:septic; do
+	o=${p%%:*}; r=${p#*:}; c=${r%%:*}; w=${r#*:}
+	run_case "nodal_test_p$o"
+	if grep -q "($c) $w" "$WORK/ofe.log" && grep -q "centroid gradient ($w" "$WORK/ofe.log" && grep -q "result : passed" "$WORK/ofe.log"; then
+		echo "  P$o self test ($w field identity, machine precision) : $(awk -v c="($c)" '$1 == c { print $NF; exit }' "$WORK/ofe.log") -> OK"
+	else
+		echo "  P$o self test : the $w-field identity was not run or failed -> NG" >&2
+		status=1
+	fi
+done
+set -- $(p4c coax_p6)
+res=$(awk -v c="$1" -v v="$2" -v c4="$c4" -v v4="$v4" 'function ab(x) { return (x < 0) ? -x : x }
+	BEGIN { ce = 2 * atan2(0, -1) * 8.8541878128e-12 * 2.1 / log(3); ve = atan2(0, -1) * (1.5e-3 ^ 2 - 0.5e-3 ^ 2) * 0.1e-3
+	e = (c - ce) / ce; w = (v - ve) / ve; e4 = (c4 - ce) / ce; w4 = (v4 - ve) / ve
+	ok = (c != "") && (ab(e) <= 1e-5) && (ab(w) <= 2e-6) && (ab(e) < ab(e4)) && (ab(w) < ab(w4))
+	printf "%s (P6 h = 0.8mm : C %+.2e, volume %+.2e; P4 h = 0.4mm : C %+.2e, volume %+.2e)", ok ? "OK" : "NG", e, w, e4, w4 }')
+echo "  curved coax, order 6 at twice the element size beats order 4 (geometry error h^8) : $res"
+case "$res" in NG*) status=1 ;; esac
+set -- $(awk 'BEGIN { pi = atan2(0, -1); mu = 4e-7 * pi; s = 5.8e7; W = 1e-3; t = 0.05e-3; d = 0.2e-3
+	om = 2 * pi * 4e8; de = sqrt(2 / (om * mu * s)); a = t / de
+	S = (exp(2 * a) - exp(-2 * a)) / 2; C = (exp(2 * a) + exp(-2 * a)) / 2
+	k = 1 / (de * s * W * (C - cos(2 * a)))
+	printf "%.12e", 2 * k * (S + sin(2 * a)) }')
+r400=$1
+for o in 5 6 7; do
+	sed -e "s/plate2d.msh/plate2d_p$o.msh/" -e "s/^frequency = .*/frequency = 4e8/" "$SRC/plate2d_ac.ofe" > "$WORK/p67ac.ofe"
+	rm -f "$WORK/rlc.csv"
+	(cd "$WORK" && "$OFE" -n 2 p67ac.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	e=$(awk -v a="$(value_of Rf)" -v r="$r400" 'BEGIN { if (a == "") { print "nan"; exit } d = (a - r) / r; if (d < 0) d = -d; printf "%.3e", d }')
+	eval "r4h_$o=\$e"
+done
+res=$(awk -v a="$r4h_5" -v b="$r4h_6" -v c="$r4h_7" 'BEGIN {
+	ok = (b <= 2e-6) && (c <= 2e-7) && (a > 10 * b) && (b > 5 * c)
+	printf "%s (R error : P5 %.1e, P6 %.1e, P7 %.1e)", ok ? "OK" : "NG", a, b, c }')
+echo "  2-D, 400 MHz skin effect : order 6 within 2e-6 and 10x better than order 5, order 7 within 2e-7 and 5x better than order 6 : $res"
+case "$res" in NG*) status=1 ;; esac
+awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 42) { s = $1 " 25"; for (i = 3; i <= 3 + $3 + 21; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p6.msh" > "$WORK/box_p6_tri21.msh"
+sed 's/^mesh = .*/mesh = box_p6_tri21.msh/' "$WORK/box_p6.ofe" > "$WORK/p6x_tri.ofe"
+th_reject "84-node tetrahedra with 21-node electrode triangles" p6x_tri.ofe "21-node (order 5) triangles are supported only as the faces of 56-node"
+sed 's/^analysis = .*/analysis = E/' "$WORK/box_p6.ofe" > "$WORK/p6x_e.ofe"
+th_reject "analysis E on an 84-node tetrahedral mesh" p6x_e.ofe "need a first-order mesh"
+
 # ---- 熱連成の六面体・角柱・ピラミッド (1 次、混在可) ----
 #
 # 剛性・発熱・質量・要素の温度を 1 つの積分点 API (unstruct.c の elem3d_ip) で組む
