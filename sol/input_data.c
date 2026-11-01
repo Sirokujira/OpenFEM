@@ -1689,7 +1689,7 @@ int input_data(FILE *fp)
 	}
 	else if (TransientOn && (Analysis == ANALYSIS_A)) {
 		// 3 次元渦電流の過渡解析 (A-φ、後退 Euler、ポート 1 を voltage x waveform で電圧駆動)。
-		// 線形の材料だけ (B-H / J-A は未対応)、周波数掃引とは併用しない
+		// 線形か J-A (ヒステリシス) の材料 (B-H は未対応)、周波数掃引とは併用しない
 		if (NPort != 1) {
 			printf("%s\n", "*** transient with analysis A needs exactly one port");
 			return 1;
@@ -1703,8 +1703,8 @@ int input_data(FILE *fp)
 			return 1;
 		}
 		for (int m = 0; m < NMaterial; m++) {
-			if ((Material[m].nbh[0] > 0) || Material[m].ja.on) {
-				printf("%s\n", "*** transient with analysis A supports linear materials only (no bh / ja)");
+			if (Material[m].nbh[0] > 0) {
+				printf("%s\n", "*** transient with analysis A supports linear or hysteretic (ja) materials only (no bh)");
 				return 1;
 			}
 		}
@@ -1879,10 +1879,14 @@ int input_data(FILE *fp)
 						"(not per-axis curves)");
 					return 1;
 				}
-				if (Material[m].ja.on) {
-					printf("%s\n", "*** the ja key cannot be combined with analysis A");
+				if (Material[m].ja.on && !TransientOn) {
+					printf("%s\n", "*** the ja key with analysis A needs transient (hysteresis is solved in the time domain)");
 					return 1;
 				}
+			}
+			// 3 次元のヒステリシスは常にベクトル J-A (スカラーの射影は 3 次元では停滞するので持たない)
+			if (JaVector) {
+				input_warn("javector has no effect with analysis A (the 3-D hysteresis is always the vector J-A)");
 			}
 			if (nl3 && (NPort != 1)) {
 				printf("%s\n", "*** a nonlinear (bh) model requires exactly one port "

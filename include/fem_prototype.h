@@ -154,6 +154,9 @@ void assemble_newton(crs_t *, const double *, double *);
 void assemble_ja(const double *, double *, double *);
 void ja_eval(const ja_t *, double, double, double, double, double *, double *, double *);
 void ja_eval_vec(const ja_t *, const double [2], const double [2], const double [2], const double [2], const double [2], double [2], double [2], double [2][2]);
+void ja_eval_vec3(const ja_t *, const double [3], const double [3], const double [3],
+	const double [3], const double [3], double [3], double [3], double [6]);
+double ja_vec3_selftest(const ja_t *);
 void ja_commit(int64_t);
 void assemble_nu6(crs_t *, const double *);
 double ja_linear_energy(const double *);

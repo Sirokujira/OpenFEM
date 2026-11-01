@@ -951,7 +951,7 @@ static struct {
 反復の打ち切りを除いて厳密 (ログに出す)。DC の極限 (V 一定で十分長い時間) では ΔA = 0 になり、
 節点の式は GᵀTG φ = 0 そのもの (= analysis R の導電行列、Whitney の恒等式) なので I = V / R_dc。
 */
-static void assemble_eddy3d_tr(crs_t *K, crs_t *M, double dt)
+static void assemble_eddy3d_tr(crs_t *K, crs_t *M, double dt, int skipja)
 {
 	crs_zero(K);
 	crs_zero(M);
@@ -995,7 +995,7 @@ static void assemble_eddy3d_tr(crs_t *K, crs_t *M, double dt)
 			for (int l = 0; l < nedge; l++) {
 				const int64_t p = crs_find_en(K, ed[k], ed[l]);
 				const double w = sg[k] * sg[l];
-				K->val[p] += w * (se[k][l] + (te[k][l] / dt));
+				K->val[p] += w * ((skipja && Material[m].ja.on) ? (te[k][l] / dt) : (se[k][l] + (te[k][l] / dt)));
 				M->val[p] += w * te[k][l] / dt;
 			}
 		}
@@ -1036,6 +1036,255 @@ static double ed_wave(double t)
 }
 
 
+/*
+ヒステリシス (ja) の 3 次元過渡解析。J-A の材料の要素は**1 次四面体**に限る (∇×W が要素内で一定なので
+B と J-A の状態が要素に 1 つ)。各刻みは静磁場の過渡解析と同じ固定点反復:
+
+	F(x) = K_l x − M [A^n; 0] + Σ_e V_e H_e(B_e)・c_k   (K_l は J-A の要素の S を除いた行列)
+	(K_l + S(N_e)) δ = −F,   N_e = dH/dB の対称部分 (テンソル、正定値)
+
+H(B) は確定済みの状態から積分し直す。仕事の恒等式の磁気の仕事は Σ V_e H_e・ΔB_e。
+J-A は常に 3 成分のベクトル J-A (ja_eval_vec3。場が 1 方向ならスカラーに厳密に退化する)。
+**スカラーの射影 (断面 2 次元の既定) は 3 次元では使わない**: 1 次元の解でも Whitney の辺要素の B は
+横方向の成分を持ち、帰路の中央 (B ≈ 0) で向きが乱れる。射影 B・d でも符号付きの |B| でも H の向きが
+不連続になり、固定点が 1e-7〜1e-6 の残差で停滞した (実測)。ベクトル J-A は滑らかなので停滞しない。
+*/
+typedef struct {
+	int nj;				// J-A の四面体の数
+	int *el;			// [nj] 要素番号
+	int32_t *ed;		// [nj*6] 辺 (全体番号)
+	double *vol;		// [nj]
+	double *cv;			// [nj*18] 符号込みの ∇×W_k (k = 0..5)
+	double *b, *h, *m, *d;		// [nj*3] 確定済みの状態 (d は最初に磁化した向き)
+	double *bn, *hn, *mn, *dn;	// [nj*3] 反復中
+	double *nu6;		// [nj*6] 行列の傾き
+} ed_ja_t;
+
+
+static int ed_ja_open(ed_ja_t *J, FILE *fp_log)
+{
+	const int nelem = edge_elem_count();
+	int nj = 0;
+	for (int e = 0; e < nelem; e++) {
+		if (!Material[edge_elem_mat(e)].ja.on) continue;
+		if (edge_elem_kind(e) != MESHELEM_TET) {
+			fprintf(fp_log, "*** hysteresis (ja) with analysis A + transient needs first-order tetrahedra "
+				"for the hysteretic material\n");
+			return 1;
+		}
+		nj++;
+	}
+	J->nj = nj;
+	const size_t s1 = (size_t)(nj > 0 ? nj : 1);
+	J->el = (int *)malloc(s1 * sizeof(int));
+	J->ed = (int32_t *)malloc(s1 * 6 * sizeof(int32_t));
+	J->vol = (double *)malloc(s1 * sizeof(double));
+	J->cv = (double *)malloc(s1 * 18 * sizeof(double));
+	double **v3[8] = {&J->b, &J->h, &J->m, &J->d, &J->bn, &J->hn, &J->mn, &J->dn};
+	for (int q = 0; q < 8; q++) *v3[q] = (double *)calloc(s1 * 3, sizeof(double));
+	J->nu6 = (double *)calloc(s1 * 6, sizeof(double));
+	int j = 0;
+	for (int e = 0; e < nelem; e++) {
+		if (!Material[edge_elem_mat(e)].ja.on) continue;
+		double g[4][3], vol;
+		J->el[j] = e;
+		J->vol[j] = 0;
+		for (int q = 0; q < 18; q++) J->cv[(j * 18) + q] = 0;
+		const int32_t *ed = &TetEdge[EdgeOff[e]];
+		const signed char *sg = &TetEdgeSgn[EdgeOff[e]];
+		for (int k = 0; k < 6; k++) J->ed[(j * 6) + k] = ed[k];
+		if (!tet_grad_pub(&Tet[e * 4], g, &vol)) {
+			J->vol[j] = vol;
+			for (int k = 0; k < 6; k++) {
+				const int a = EDGE_NODE3[k][0], c = EDGE_NODE3[k][1];
+				double *cv = &J->cv[(j * 18) + (k * 3)];
+				cv[0] = 2 * sg[k] * ((g[a][1] * g[c][2]) - (g[a][2] * g[c][1]));
+				cv[1] = 2 * sg[k] * ((g[a][2] * g[c][0]) - (g[a][0] * g[c][2]));
+				cv[2] = 2 * sg[k] * ((g[a][0] * g[c][1]) - (g[a][1] * g[c][0]));
+			}
+		}
+		j++;
+	}
+	fprintf(fp_log, "  hysteresis : vector J-A on %d tetrahedra (nlsolver = %d %.3e %.3f)\n",
+		nj, NlMaxiter, NlTol, NlRelax);
+	// 3 成分のベクトル J-A の自己検証 (向きを固定した経路でスカラーの J-A と一致)
+	for (int m = 0; m < NMaterial; m++) {
+		if (!Material[m].ja.on) continue;
+		fprintf(fp_log, "  J-A model check (material %d) : 3-D vector J-A along a fixed direction == scalar J-A : "
+			"max |dH| / max |H| = %.3e\n", m, ja_vec3_selftest(&Material[m].ja));
+	}
+	return 0;
+}
+
+
+static void ed_ja_close(ed_ja_t *J)
+{
+	free(J->el); free(J->ed); free(J->vol); free(J->cv);
+	free(J->b); free(J->h); free(J->m); free(J->d);
+	free(J->bn); free(J->hn); free(J->mn); free(J->dn);
+	free(J->nu6);
+}
+
+
+// x の A から各要素の B を作り、確定済みの状態から H (反復中の状態) と行列の傾きを求める
+static void ed_ja_eval(ed_ja_t *J, const double *x)
+{
+	const int nj = J->nj;
+	int j;
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+	for (j = 0; j < nj; j++) {
+		const ja_t *ja = &Material[edge_elem_mat(J->el[j])].ja;
+		double bv[3] = {0, 0, 0};
+		for (int k = 0; k < 6; k++) {
+			const double a = x[J->ed[(j * 6) + k]];
+			for (int c = 0; c < 3; c++) bv[c] += a * J->cv[(j * 18) + (k * 3) + c];
+		}
+		const double bmag = sqrt((bv[0] * bv[0]) + (bv[1] * bv[1]) + (bv[2] * bv[2]));
+		const double *dir = &J->d[j * 3];
+		double *dn = &J->dn[j * 3];
+		const int haved = ((dir[0] != 0) || (dir[1] != 0) || (dir[2] != 0));
+		for (int c = 0; c < 3; c++) dn[c] = ((bmag > 1e-12) ? (bv[c] / bmag) : 0);
+		double *nu6 = &J->nu6[j * 6];
+		double *hv = &J->hn[j * 3];
+		double dref[3] = {1, 0, 0};
+		if (haved) { dref[0] = dir[0]; dref[1] = dir[1]; dref[2] = dir[2]; }
+		else if (bmag > 1e-12) { dref[0] = dn[0]; dref[1] = dn[1]; dref[2] = dn[2]; }
+		ja_eval_vec3(ja, &J->b[j * 3], &J->h[j * 3], &J->m[j * 3], bv, dref, hv, &J->mn[j * 3], nu6);
+		for (int c = 0; c < 3; c++) J->bn[(j * 3) + c] = bv[c];
+	}
+}
+
+
+// 刻みの磁気の仕事 Σ V_e H_e・(B_e − B_e^n) (J-A の要素の分)
+static double ed_ja_work(const ed_ja_t *J)
+{
+	double w = 0;
+	for (int j = 0; j < J->nj; j++) {
+		double s = 0;
+		for (int c = 0; c < 3; c++) s += J->hn[(j * 3) + c] * (J->bn[(j * 3) + c] - J->b[(j * 3) + c]);
+		w += J->vol[j] * s;
+	}
+	return w;
+}
+
+
+static void ed_ja_commit(ed_ja_t *J)
+{
+	const int nj = J->nj;
+	memcpy(J->b, J->bn, (size_t)nj * 3 * sizeof(double));
+	memcpy(J->h, J->hn, (size_t)nj * 3 * sizeof(double));
+	memcpy(J->m, J->mn, (size_t)nj * 3 * sizeof(double));
+	for (int j = 0; j < nj; j++) {
+		double *d = &J->d[j * 3];
+		if ((d[0] == 0) && (d[1] == 0) && (d[2] == 0)) {
+			for (int c = 0; c < 3; c++) d[c] = J->dn[(j * 3) + c];
+		}
+	}
+}
+
+
+// 残差 r = −F(x) (固定の行は 0) と、その相対ノルム
+static double ed_ja_resid(const ed_ja_t *J, const crs_t *Kl, const double *rhs, const unsigned char *fix,
+	const double *x, double *r, double bref)
+{
+	const int n = (int)Kl->n;
+	crs_spmv(Kl, x, r, NULL);
+	for (int i = 0; i < n; i++) r[i] = rhs[i] - r[i];
+	for (int j = 0; j < J->nj; j++) {
+		const double *hv = &J->hn[j * 3];
+		for (int k = 0; k < 6; k++) {
+			const double *cv = &J->cv[(j * 18) + (k * 3)];
+			r[J->ed[(j * 6) + k]] -= J->vol[j] * ((hv[0] * cv[0]) + (hv[1] * cv[1]) + (hv[2] * cv[2]));
+		}
+	}
+	double s = 0;
+	for (int i = 0; i < n; i++) {
+		if (fix[i]) r[i] = 0;
+		s += r[i] * r[i];
+	}
+	return ((bref > 0) ? (sqrt(s) / bref) : sqrt(s));
+}
+
+
+// 1 刻みの固定点反復。x は前の刻みの解で入り、収束した解で出る。戻り値は反復回数 (失敗は -1)
+static int ed_ja_step(ed_ja_t *J, const crs_t *Kl, crs_t *Kt, const double *rhs, const unsigned char *fix,
+	const double *xd, double *x, double *r, double *del, double *xbest, double bref, int st, FILE *fp_log)
+{
+	const int n = (int)Kl->n;
+	const int64_t nnz = Kl->rowptr[n];
+	for (int i = 0; i < n; i++) {
+		if (fix[i]) x[i] = xd[i];
+	}
+	int it, conv = 0, nback = 0;
+	double rnorm = 0, rbest = 0, lrel = NlRelax;
+	for (it = 1; it <= NlMaxiter; it++) {
+		ed_ja_eval(J, x);
+		rnorm = ed_ja_resid(J, Kl, rhs, fix, x, r, bref);
+		if (rnorm < NlTol) {
+			conv = 1;
+			break;
+		}
+		// 発散の検出。H(B) は確定済みの状態で枝が切り替わる折れ点を持ち、反転の近くでは固定点が
+		// 2 つの値を往復する (実測: 残差 0.05 と 0.12 の往復が 40 回続いた)。往復は最良の 4 倍程度に
+		// 収まるので、静磁場の過渡解析 (mag_transient) の「10 倍」では検出できない。3 次元には
+		// 準静的な掃引との一致という制約が無いので、**残差が最良を越えた最初の回**に最良の反復へ
+		// 戻して両方の枝の大きい方の傾きにする (以後 5 回程度で収束)。それでも 10 倍を越えたら
+		// 更新を半分にする
+		if ((it == 1) || (rnorm < rbest)) {
+			rbest = rnorm;
+			memcpy(xbest, x, (size_t)n * sizeof(double));
+		}
+		else if ((!JaSafeSlope || (rnorm > (10 * rbest))) && (nback < 30)) {
+			memcpy(x, xbest, (size_t)n * sizeof(double));
+			if (!JaSafeSlope) JaSafeSlope = 1;
+			else lrel /= 2;
+			nback++;
+			continue;
+		}
+		memcpy(Kt->val, Kl->val, (size_t)nnz * sizeof(double));
+		for (int j = 0; j < J->nj; j++) {
+			const double *nu = &J->nu6[j * 6];
+			const double *cv = &J->cv[j * 18];
+			for (int k = 0; k < 6; k++) {
+				const double *ck = &cv[k * 3];
+				// ν c_k (対称テンソル xx yy zz xy yz zx)
+				const double nc[3] = {
+					(nu[0] * ck[0]) + (nu[3] * ck[1]) + (nu[5] * ck[2]),
+					(nu[3] * ck[0]) + (nu[1] * ck[1]) + (nu[4] * ck[2]),
+					(nu[5] * ck[0]) + (nu[4] * ck[1]) + (nu[2] * ck[2])};
+				for (int l = 0; l < 6; l++) {
+					const double *cl = &cv[l * 3];
+					const int64_t p = crs_find_en(Kt, J->ed[(j * 6) + k], J->ed[(j * 6) + l]);
+					Kt->val[p] += J->vol[j] * ((nc[0] * cl[0]) + (nc[1] * cl[1]) + (nc[2] * cl[2]));
+				}
+			}
+		}
+		// 内側の許容は刻みの駆動 bref に対する絶対値にする (converg × bref)。反復が進むと r が小さく
+		// なり、ゲージの零空間に丸めで漏れる成分 (∇×∇ψ = 0 の丸め) が ‖r‖ に対して無視できなく
+		// なるので、‖r‖ に対する相対の許容では CG が止まらない (実測、3 回目で非収束)
+		double tol = ((rnorm > 0) ? (Solver.converg / rnorm) : Solver.converg);
+		if (tol > 0.1) tol = 0.1;
+		if (tol < Solver.converg) tol = Solver.converg;
+		for (int i = 0; i < n; i++) del[i] = 0;
+		const int li = solver_cg(Kt, r, del, fix, Solver.maxiter, Solver.nout, tol, NULL, "a3j");
+		if (li < 0) {
+			fprintf(fp_log, "*** linear solver did not converge (step %d)\n", st);
+			JaSafeSlope = 0;
+			return -1;
+		}
+		for (int i = 0; i < n; i++) x[i] += lrel * del[i];
+	}
+	JaSafeSlope = 0;
+	if (!conv) {
+		fprintf(fp_log, "*** transient : the iteration did not converge at step %d (residual = %.3e)\n", st, rnorm);
+		return -1;
+	}
+	return it;
+}
+
+
 int solve_eddy3d_transient(FILE *fp_log)
 {
 	int ierr = 0;
@@ -1048,6 +1297,10 @@ int solve_eddy3d_transient(FILE *fp_log)
 	const int ne = NEdge, nn = NNode, n = ne + nn;
 	const int nelem = edge_elem_count();
 	const double dt = TransientTime / TransientSteps;
+	int hyst = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].ja.on) hyst = 1;
+	}
 	fprintf(fp_log, "  nodes = %d, elements = %d, edges = %d, unknowns = %d\n", nn, nelem, ne, n);
 	fprintf(fp_log, "  t_end = %.6e [s], %d steps (dt = %.6e [s]), voltage = %.6e [V]%s\n",
 		TransientTime, TransientSteps, dt, Volt, ((WaveN > 0) ? " x waveform" : " (step)"));
@@ -1055,7 +1308,7 @@ int solve_eddy3d_transient(FILE *fp_log)
 	crs_t K, M;
 	crs_alloc_edge_node(&K);
 	crs_alloc_edge_node(&M);
-	assemble_eddy3d_tr(&K, &M, dt);
+	assemble_eddy3d_tr(&K, &M, dt, hyst);
 
 	unsigned char *fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));
 	unsigned char *wall = (unsigned char *)calloc((size_t)ne, sizeof(unsigned char));
@@ -1090,6 +1343,14 @@ int solve_eddy3d_transient(FILE *fp_log)
 	double *w1 = (double *)malloc((size_t)n * sizeof(double));
 	double *u = (double *)calloc((size_t)n, sizeof(double));
 	double *z = (double *)malloc((size_t)n * sizeof(double));
+	ed_ja_t J;
+	memset(&J, 0, sizeof(J));
+	if (hyst && ed_ja_open(&J, fp_log)) ierr = 1;
+	crs_t Kt;
+	memset(&Kt, 0, sizeof(Kt));
+	if (hyst) crs_alloc_edge_node(&Kt);
+	double bref = 0;
+	long fptotal = 0;
 
 	FILE *fcsv = fopen("ofe_transient.csv", "w");
 	if (fcsv) fprintf(fcsv, "t [s],V [V],I [A],W_in [J],W_mag [J],W_joule [J],iter\n");
@@ -1107,15 +1368,30 @@ int solve_eddy3d_transient(FILE *fp_log)
 		}
 		crs_spmv(&K, xd, w1, NULL);
 		for (int i = 0; i < n; i++) b[i] = (fix[i] ? 0 : (rhs[i] - w1[i]));
-		// 初期値は前の刻みの解 (固定の行は 0)
-		for (int i = 0; i < n; i++) u[i] = (fix[i] ? 0 : x[i]);
-		const int it = solver_cg(&K, b, u, fix, Solver.maxiter, Solver.nout, Solver.converg, NULL, "a3t");
-		if (it < 0) {
-			fprintf(fp_log, "*** linear solver did not converge (step %d)\n", st);
-			ierr = 1;
-			break;
+		int it;
+		if (!hyst) {
+			// 初期値は前の刻みの解 (固定の行は 0)
+			for (int i = 0; i < n; i++) u[i] = (fix[i] ? 0 : x[i]);
+			it = solver_cg(&K, b, u, fix, Solver.maxiter, Solver.nout, Solver.converg, NULL, "a3t");
+			if (it < 0) {
+				fprintf(fp_log, "*** linear solver did not converge (step %d)\n", st);
+				ierr = 1;
+				break;
+			}
+			for (int i = 0; i < n; i++) x[i] = u[i] + xd[i];
 		}
-		for (int i = 0; i < n; i++) x[i] = u[i] + xd[i];
+		else {
+			double bn = 0;
+			for (int i = 0; i < n; i++) bn += b[i] * b[i];
+			bn = sqrt(bn);
+			if (bn > bref) bref = bn;
+			it = ed_ja_step(&J, &K, &Kt, rhs, fix, xd, x, b, u, z, bref, st, fp_log);
+			if (it < 0) {
+				ierr = 1;
+				break;
+			}
+			fptotal += it;
+		}
 		// 端子電流 : 電極の節点の反作用 (K x - M [A^n; 0])
 		crs_spmv(&K, x, w1, NULL);
 		double cur = 0;
@@ -1132,19 +1408,29 @@ int solve_eddy3d_transient(FILE *fp_log)
 		for (int i = 0; i < ne; i++) zmx += z[i] * w1[i];
 		crs_spmv(&K, x, w1, NULL);
 		for (int i = 0; i < ne; i++) zkx += z[i] * w1[i];
+		if (hyst) zkx += ed_ja_work(&J);
 		win += v * cur * dt;
 		wjou += zmz;
 		wmag += zkx - zmx;
+		if (hyst) ed_ja_commit(&J);
 		if (fcsv) fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%.8e,%d\n", t, v, cur, win, wmag, wjou, it);
 		if ((st == TransientSteps) || ((st % ((TransientSteps >= 20) ? (TransientSteps / 20) : 1)) == 0)) {
 			fprintf(fp_log, "  %6d %13.6e %13.6e %13.6e %6d\n", st, t, v, cur, it);
 		}
 	}
 	if (fcsv) fclose(fcsv);
+	if (hyst && !ierr) {
+		fprintf(fp_log, "  hysteresis (vector J-A on %d tetrahedra) : fixed-point iterations = %ld (%d steps)\n",
+			J.nj, fptotal, TransientSteps);
+	}
 	fprintf(fp_log, "  energy : terminals = %.12e, magnetic work = %.12e, joule = %.12e [J] "
 		"(terminals - magnetic - joule = %.3e)\n", win, wmag, wjou, win - wmag - wjou);
 	free(x); free(xo); free(xd); free(rhs); free(b); free(w1); free(u); free(z);
 	free(fix); free(wall); free(cond);
+	if (hyst) {
+		ed_ja_close(&J);
+		crs_free(&Kt);
+	}
 	crs_free(&K);
 	crs_free(&M);
 	edge_free();

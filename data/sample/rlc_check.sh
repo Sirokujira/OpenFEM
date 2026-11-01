@@ -5038,6 +5038,109 @@ case "$res" in NG*) status=1 ;; esac
 grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 10 0.5"} {print}' > "$WORK/a3tx_cn.ofe"
 th_reject "A + transient with theta = 0.5" a3tx_cn.ofe "theta = 1 (backward Euler) only"
 
+# ---- 3 次元渦電流 + ヒステリシスの過渡解析 (analysis = A + transient + ja、ベクトル J-A、四面体) ----
+#
+# 各刻みを固定点反復 (行列は dH/dB の対称部分のテンソル、残差は確定済みの状態から積分した H) で解く。
+#   (a) ほぼ線形の J-A (c -> 1、k 大、|He| < 1e-4 a で Langevin が線形) は μr = 1 + c Ms/(3a) の線形の
+#       過渡解析に反復の打ち切りの範囲で一致し、行列の傾きが厳密なので 1 刻み 2 回で収束する
+#       (曲率・体積・残差の組み立ての検査。傾きの誤りは答えを変えず回数だけ増やす)
+#   (b) 準静的 (σ を下げて 1 Hz、t/δ ~ 0.02) の正弦波の 2 周期目のヒステリシス損 Σ V_e H・ΔB が、
+#       Ampere の H_y(z) = J (z − t/2) の各点で H 駆動の順方向の J-A を awk で独立に積分した損
+#       (ja_bar_loop.awk、FEM と同じ刻みで H を取り同じ右端の和) に 0.5% 以内 (実測 −0.07%)。
+#       状態の確定・反転の扱い・H の積分の向きの誤りはここで落ちる (線形の (a) は履歴を見ない)
+#   (c) 電圧の段差を保つと I -> G_dc V (磁気が DC を壊さない)、(d) 仕事の恒等式
+#   (e) 3 成分のベクトル J-A を向きを固定した経路で動かすとスカラーの J-A と H が丸めまで一致
+#       (起動時の自己検証。Heun の刻みの次数の誤りは損では 1e-6 しか動かずここでだけ落ちる)
+#   (f) 剛体回転した格子で I(t) と固定点の回数が変わらないこと (行列のテンソルの非対角の検査)
+echo "[A + ja] 3-D eddy current with hysteresis (vector Jiles-Atherton on tetrahedra, backward Euler)"
+# (a)
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^voltage/{print "voltage = 1e-4"; next}
+	/^analysis/{print "transient = 2e-4 50"; print "mur = 2 50"} {print}' > "$WORK/aja_lin.ofe"
+(cd "$WORK" && "$OFE" -n 2 aja_lin.ofe > /dev/null 2>&1 && cp ofe_transient.csv aja_lin.csv) || { echo "  aja_lin : the run failed -> NG" >&2; status=1; }
+jms=$(awk 'BEGIN { printf "%.15g", 49 * 3e8 / 0.999999 }')
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk -v ms="$jms" '/^frequency/{next} /^voltage/{print "voltage = 1e-4"; next}
+	/^analysis/{print "transient = 2e-4 50"; print "ja = 2 " ms " 1e8 0 1e6 0.999999"; print "nlsolver = 50 1e-9 1"} {print}' > "$WORK/aja_nl.ofe"
+(cd "$WORK" && "$OFE" -n 2 aja_nl.ofe > /dev/null 2>&1) || { echo "  aja_nl : the run failed -> NG" >&2; status=1; }
+res=$(paste -d, "$WORK/aja_lin.csv" "$WORK/ofe_transient.csv" | awk -F, 'NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
+	END { printf "%s (%d steps, max %.1e)", ((n == 50) && (m < 1e-7)) ? "OK" : "NG", n, m }')
+echo "  near-linear J-A (c = 1 - 1e-6, |He| < 1e-4 a) == linear mur = 1 + c Ms/(3a) : I(t) : $res"
+case "$res" in NG*) status=1 ;; esac
+nfp=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
+if [ "${nfp:-0}" -ge 50 ] && [ "${nfp:-0}" -le 100 ]; then
+	echo "  near-linear J-A : fixed-point iterations = $nfp (exact tangent : at most 2 per step) -> OK"
+else
+	echo "  near-linear J-A : fixed-point iterations = ${nfp:-none} (expected 50..100) -> NG"; status=1
+fi
+a3_energy "near-linear J-A"
+# (b) 2 周期、1 周期 32 刻み
+awk 'BEGIN { pi = atan2(0, -1); s = "waveform ="
+	for (k = 0; k <= 64; k++) { t = k / 32; s = s sprintf(" %.12e %.15g", t, sin(2 * pi * t)) } print s }' > "$WORK/aja_wf.txt"
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk -v wf="$WORK/aja_wf.txt" '/^frequency/{next} /^material/{print "material = 1.0 1e5"; next}
+	/^voltage/{print "voltage = 0.04"; next}
+	/^analysis/{ while ((getline l < wf) > 0) print l; print "transient = 2 64"; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"; print "nlsolver = 200 1e-7 1" } {print}' > "$WORK/aja_qs.ofe"
+(cd "$WORK" && "$OFE" -n 2 aja_qs.ofe > /dev/null 2>&1) || { echo "  aja_qs : the run failed -> NG" >&2; status=1; }
+a3_energy "quasi-static sine, 2 periods"
+wfem=$(awk -F, 'NR == 33 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/ofe_transient.csv")
+# J0 = σ V0 / L (準静的なので電流密度は一様)、面積 = L W
+wref=$(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=32 -f "$SRC/ja_bar_loop.awk")
+compare "quasi-static hysteresis loss of the 2nd period == forward J-A along H_y(z) = J (z - t/2) (awk) [J]" "$wfem" "$wref" 5e-3
+nfp=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
+if [ "${nfp:-0}" -ge 64 ] && [ "${nfp:-0}" -le 1100 ]; then
+	echo "  quasi-static sine : fixed-point iterations = $nfp (64 steps, at most 1100) -> OK"
+else
+	echo "  quasi-static sine : fixed-point iterations = ${nfp:-none} (expected 64..1100) -> NG"; status=1
+fi
+# (c) 段差を保つ (σ = 1e5、J-A の μr ~ 1000 で τ ~ 1.3e-5 s。20 刻み x 1e-4 s で DC)
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^material/{print "material = 1.0 1e5"; next} /^voltage/{print "voltage = 0.04"; next}
+	/^analysis/{print "transient = 2e-3 20"; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"; print "nlsolver = 200 1e-9 1"} {print}' > "$WORK/aja_dc.ofe"
+(cd "$WORK" && "$OFE" -n 2 aja_dc.ofe > aja_dc.out 2>&1 && cp ofe_transient.csv aja_dc.csv && cp ofe.log aja_dc.log) || { echo "  aja_dc : the run failed -> NG" >&2; status=1; }
+# 未使用キーの警告は両方向 : 正しいケースで 0 件、javector (3 次元は常にベクトル J-A) で 1 件
+nw0=$(grep -c "\*\*\* warning" "$WORK/aja_dc.out" || true)
+awk '/^analysis/{print "javector = 1"} {print}' "$WORK/aja_dc.ofe" > "$WORK/aja_jv.ofe"
+nw1=$(cd "$WORK" && "$OFE" -n 2 aja_jv.ofe 2>&1 | grep -c "javector has no effect with analysis A" || true)
+if [ "$nw0" = 0 ] && [ "$nw1" = 1 ]; then
+	echo "  input lint : no warning for A + ja, one for javector with A -> OK"
+else
+	echo "  input lint : warnings A + ja = $nw0 (expected 0), javector with A = $nw1 (expected 1) -> NG"; status=1
+fi
+a3_energy "voltage step with hysteresis"
+ilast=$(awk -F, 'NR > 1 { i = $3 } END { print i }' "$WORK/ofe_transient.csv")
+idc=$(awk -v g="$gdc" 'BEGIN { printf "%.12e", g * (1e5 / 5.8e7) * 0.04 }')
+compare "voltage step held with hysteresis : I(t_end) == G_dc V [A]" "$ilast" "$idc" 1e-9
+res=$(awk '/J-A model check/ { v = $NF + 0; n++ } END { printf "%s (%.1e)", ((n == 1) && (v < 1e-12)) ? "OK" : "NG", v }' "$WORK/aja_dc.log")
+echo "  3-D vector J-A along a fixed direction == scalar J-A (same Heun steps, H to rounding) : $res"
+case "$res" in NG*) status=1 ;; esac
+# (f) 剛体回転した格子 : 物理は同じなので I(t) が一致し、固定点の回数も増えない。軸に平行な格子では
+#     B が 1 軸に揃って行列のテンソルの非対角が 0 になり、非対角の誤り (符号・添字) は答えも回数も
+#     変えない (実測で素通り)。回すと非対角が効くので、誤りは回数の増加 (か非収束) で見える
+awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+	{ print }' "$SRC/bar_tet.msh" > "$WORK/bar_tet_rot.msh"
+nfp0=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/aja_dc.log")
+sed 's/^mesh = .*/mesh = bar_tet_rot.msh/' "$WORK/aja_dc.ofe" > "$WORK/aja_dcr.ofe"
+(cd "$WORK" && "$OFE" -n 2 aja_dcr.ofe > /dev/null 2>&1) || { echo "  aja_dcr : the run failed -> NG" >&2; status=1; }
+res=$(paste -d, "$WORK/aja_dc.csv" "$WORK/ofe_transient.csv" | awk -F, 'NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
+	END { printf "%s (%d steps, max %.1e)", ((n == 20) && (m < 1e-6)) ? "OK" : "NG", n, m }')
+echo "  rigidly rotated mesh (hysteresis, voltage step) : I(t) == axis-aligned mesh : $res"
+case "$res" in NG*) status=1 ;; esac
+nfp=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
+res=$(awk -v a="${nfp:-0}" -v b="${nfp0:-0}" 'BEGIN { printf "%s", ((a > 0) && (b > 0) && (a <= 1.2 * b + 5)) ? "OK" : "NG" }')
+echo "  rigidly rotated mesh : fixed-point iterations = ${nfp:-none} (axis-aligned ${nfp0:-none}, at most 1.2x + 5) -> $res"
+case "$res" in NG*) status=1 ;; esac
+# (e) 弾くべき入力
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^analysis/{print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"} {print}' > "$WORK/ajax_fd.ofe"
+th_reject "ja with analysis A in the frequency domain" ajax_fd.ofe "needs transient"
+cp "$SRC/bar_prismtet.ofe" "$SRC/bar_prismtet.msh" "$WORK/"
+grep -v '^#' "$SRC/bar_prismtet.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"} {print}' > "$WORK/ajax_pt.ofe"
+if (cd "$WORK" && "$OFE" -n 2 ajax_pt.ofe > /dev/null 2>&1); then
+	echo "  ja on prisms with A + transient : not rejected -> NG"; status=1
+elif grep -q "needs first-order tetrahedra" "$WORK/ofe.log"; then
+	echo "  ja on prisms with A + transient : rejected -> OK"
+else
+	echo "  ja on prisms with A + transient : rejected for a different reason -> NG"; status=1
+fi
+
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
 # 警告が (a) 罠のケースで必ず出て (b) 正しいケースでは 1 件も出ないことを両方見る

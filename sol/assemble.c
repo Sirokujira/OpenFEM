@@ -619,6 +619,237 @@ void ja_eval_vec(const ja_t *ja, const double b0[2], const double h0[2], const d
 }
 
 
+// ---- ベクトル Jiles-Atherton (3 次元、3 成分) ----
+//
+// 式は面内 2 成分の版 (ja_chi_vec / ja_eval_vec) と同じものを 3 成分で書いたもの
+// (3 次元渦電流の過渡解析 analysis = A + transient の四面体が使う)。面内 2 成分の版は
+// 既存の答えをビット単位で変えないためにそのまま残す。
+
+static int inv3j(const double a[3][3], double r[3][3])
+{
+	const double d = (a[0][0] * ((a[1][1] * a[2][2]) - (a[1][2] * a[2][1])))
+	               - (a[0][1] * ((a[1][0] * a[2][2]) - (a[1][2] * a[2][0])))
+	               + (a[0][2] * ((a[1][0] * a[2][1]) - (a[1][1] * a[2][0])));
+	if (d == 0) return 1;
+	r[0][0] = ((a[1][1] * a[2][2]) - (a[1][2] * a[2][1])) / d;
+	r[0][1] = ((a[0][2] * a[2][1]) - (a[0][1] * a[2][2])) / d;
+	r[0][2] = ((a[0][1] * a[1][2]) - (a[0][2] * a[1][1])) / d;
+	r[1][0] = ((a[1][2] * a[2][0]) - (a[1][0] * a[2][2])) / d;
+	r[1][1] = ((a[0][0] * a[2][2]) - (a[0][2] * a[2][0])) / d;
+	r[1][2] = ((a[0][2] * a[1][0]) - (a[0][0] * a[1][2])) / d;
+	r[2][0] = ((a[1][0] * a[2][1]) - (a[1][1] * a[2][0])) / d;
+	r[2][1] = ((a[0][1] * a[2][0]) - (a[0][0] * a[2][1])) / d;
+	r[2][2] = ((a[0][0] * a[1][1]) - (a[0][1] * a[1][0])) / d;
+	return 0;
+}
+
+
+// 帯磁率テンソル χ (3x3)。db は駆動の向き (δ_M の判定に使う)
+static void ja_chi_vec3(const ja_t *ja, const double h[3], const double m[3], const double db[3],
+	double chi[3][3])
+{
+	double he[3];
+	for (int i = 0; i < 3; i++) he[i] = h[i] + (ja->alpha * m[i]);
+	const double hn = sqrt((he[0] * he[0]) + (he[1] * he[1]) + (he[2] * he[2]));
+	double man, dman;
+	ja_langevin(ja, hn, &man, &dman);
+	double e[3] = {1, 0, 0};
+	if (hn > 0) {
+		for (int i = 0; i < 3; i++) e[i] = he[i] / hn;
+	}
+	const double sec = ((hn > (1e-4 * ja->a)) ? (man / hn) : dman);
+	double can[3][3];
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) can[i][j] = (dman * e[i] * e[j]) + (sec * (((i == j) ? 1 : 0) - (e[i] * e[j])));
+	}
+	double f[3];
+	for (int i = 0; i < 3; i++) f[i] = (sec * he[i]) - m[i];
+	const double fn = sqrt((f[0] * f[0]) + (f[1] * f[1]) + (f[2] * f[2]));
+	double irr = 0, fh[3] = {0, 0, 0};
+	if ((fn > 0) && (((f[0] * db[0]) + (f[1] * db[1]) + (f[2] * db[2])) > 0)) {
+		for (int i = 0; i < 3; i++) fh[i] = f[i] / fn;
+		const double den = ja->k - (ja->alpha * fn);
+		if (fabs(den) > 0) irr = (1 - ja->c) * fn / den;
+		double cf = 0;
+		for (int i = 0; i < 3; i++) {
+			for (int j = 0; j < 3; j++) cf += fh[i] * can[i][j] * fh[j];
+		}
+		const double along = irr + (ja->c * cf);
+		if (along < 0) irr -= along;
+	}
+	double x[3][3], a[3][3], ai[3][3];
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			x[i][j] = (irr * fh[i] * fh[j]) + (ja->c * can[i][j]);
+			a[i][j] = ((i == j) ? 1 : 0) - (ja->alpha * ja->c * can[i][j]);
+		}
+	}
+	if (inv3j(a, ai)) {
+		for (int i = 0; i < 3; i++) {
+			for (int j = 0; j < 3; j++) chi[i][j] = x[i][j];
+		}
+		return;
+	}
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) chi[i][j] = (ai[i][0] * x[0][j]) + (ai[i][1] * x[1][j]) + (ai[i][2] * x[2][j]);
+	}
+}
+
+
+// dH/dB = (μ0 (I + χ))⁻¹
+static void ja_dhdb_vec3(const double chi[3][3], double nd[3][3])
+{
+	double a[3][3];
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) a[i][j] = MU0 * (((i == j) ? 1 : 0) + chi[i][j]);
+	}
+	if (inv3j(a, nd)) {
+		for (int i = 0; i < 3; i++) {
+			for (int j = 0; j < 3; j++) nd[i][j] = ((i == j) ? (1 / MU0) : 0);
+		}
+	}
+}
+
+
+// 3x3 の対称部分の最大固有値 (Jacobi 法。対称 3x3 なので数回で収束する)
+static double ja_symmax3(const double a[3][3])
+{
+	double s[3][3];
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) s[i][j] = (a[i][j] + a[j][i]) / 2;
+	}
+	for (int sweep = 0; sweep < 50; sweep++) {
+		const double off = (s[0][1] * s[0][1]) + (s[0][2] * s[0][2]) + (s[1][2] * s[1][2]);
+		const double dg = (s[0][0] * s[0][0]) + (s[1][1] * s[1][1]) + (s[2][2] * s[2][2]);
+		if (!(off > (1e-30 * dg))) break;
+		for (int p = 0; p < 2; p++) {
+			for (int q = p + 1; q < 3; q++) {
+				if (s[p][q] == 0) continue;
+				const double th = (s[q][q] - s[p][p]) / (2 * s[p][q]);
+				const double t = ((th >= 0) ? 1.0 : -1.0) / (fabs(th) + sqrt((th * th) + 1));
+				const double c = 1 / sqrt((t * t) + 1), sn = t * c;
+				for (int k = 0; k < 3; k++) {
+					const double skp = s[k][p], skq = s[k][q];
+					s[k][p] = (c * skp) - (sn * skq);
+					s[k][q] = (sn * skp) + (c * skq);
+				}
+				for (int k = 0; k < 3; k++) {
+					const double spk = s[p][k], sqk = s[q][k];
+					s[p][k] = (c * spk) - (sn * sqk);
+					s[q][k] = (sn * spk) + (c * sqk);
+				}
+			}
+		}
+	}
+	double mx = s[0][0];
+	if (s[1][1] > mx) mx = s[1][1];
+	if (s[2][2] > mx) mx = s[2][2];
+	return mx;
+}
+
+
+// 状態 (b0, h0, m0) から b まで積分して H, M と、行列に使う微分磁気抵抗率のテンソル
+// ns (xx yy zz xy yz zx の並び、dH/dB の対称部分、正定値) を返す。
+// dref は db = 0 のときの駆動の向き (ja_eval_vec と同じ)
+void ja_eval_vec3(const ja_t *ja, const double b0[3], const double h0[3], const double m0[3],
+	const double b[3], const double dref[3], double hout[3], double mout[3], double ns[6])
+{
+	const int nsub = ((JaSub > 0) ? JaSub : 20);
+	double db[3], dd[3];
+	for (int i = 0; i < 3; i++) dd[i] = db[i] = (b[i] - b0[i]) / nsub;
+	if ((dd[0] == 0) && (dd[1] == 0) && (dd[2] == 0)) {
+		for (int i = 0; i < 3; i++) dd[i] = dref[i];
+	}
+
+	double h[3], m[3];
+	for (int i = 0; i < 3; i++) { h[i] = h0[i]; m[i] = m0[i]; }
+	for (int s = 0; s < nsub; s++) {
+		double c1[3][3], n1[3][3], c2[3][3], n2[3][3], dh1[3], dm1[3], hp[3], mp[3], dh2[3], dm2[3];
+		ja_chi_vec3(ja, h, m, dd, c1);
+		ja_dhdb_vec3(c1, n1);
+		for (int i = 0; i < 3; i++) dh1[i] = (n1[i][0] * db[0]) + (n1[i][1] * db[1]) + (n1[i][2] * db[2]);
+		for (int i = 0; i < 3; i++) dm1[i] = (c1[i][0] * dh1[0]) + (c1[i][1] * dh1[1]) + (c1[i][2] * dh1[2]);
+		for (int i = 0; i < 3; i++) { hp[i] = h[i] + dh1[i]; mp[i] = m[i] + dm1[i]; }
+		ja_chi_vec3(ja, hp, mp, dd, c2);
+		ja_dhdb_vec3(c2, n2);
+		for (int i = 0; i < 3; i++) dh2[i] = (n2[i][0] * db[0]) + (n2[i][1] * db[1]) + (n2[i][2] * db[2]);
+		for (int i = 0; i < 3; i++) dm2[i] = (c2[i][0] * dh2[0]) + (c2[i][1] * dh2[1]) + (c2[i][2] * dh2[2]);
+		for (int i = 0; i < 3; i++) {
+			h[i] += (dh1[i] + dh2[i]) / 2;
+			m[i] += (dm1[i] + dm2[i]) / 2;
+		}
+	}
+
+	double cf[3][3], nf[3][3];
+	ja_chi_vec3(ja, h, m, dd, cf);
+	ja_dhdb_vec3(cf, nf);
+	if (JaSafeSlope) {
+		double c2[3][3], n2[3][3];
+		const double dr[3] = {-dd[0], -dd[1], -dd[2]};
+		ja_chi_vec3(ja, h, m, dr, c2);
+		ja_dhdb_vec3(c2, n2);
+		if (ja_symmax3(n2) > ja_symmax3(nf)) {
+			for (int i = 0; i < 3; i++) {
+				for (int j = 0; j < 3; j++) nf[i][j] = n2[i][j];
+			}
+		}
+	}
+	double sy[3][3];
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) sy[i][j] = (nf[i][j] + nf[j][i]) / 2;
+	}
+	// 正定値か (Sylvester の主小行列式)。でなければ最大固有値の等方テンソル
+	const double d1 = sy[0][0], d2 = (sy[0][0] * sy[1][1]) - (sy[0][1] * sy[1][0]);
+	const double d3 = (sy[0][0] * ((sy[1][1] * sy[2][2]) - (sy[1][2] * sy[2][1])))
+	                - (sy[0][1] * ((sy[1][0] * sy[2][2]) - (sy[1][2] * sy[2][0])))
+	                + (sy[0][2] * ((sy[1][0] * sy[2][1]) - (sy[1][1] * sy[2][0])));
+	if ((d1 > 0) && (d2 > 0) && (d3 > 0)) {
+		ns[0] = sy[0][0];
+		ns[1] = sy[1][1];
+		ns[2] = sy[2][2];
+		ns[3] = sy[0][1];
+		ns[4] = sy[1][2];
+		ns[5] = sy[2][0];
+	}
+	else {
+		double t = ja_symmax3(nf);
+		if (!(t > 0)) t = 1 / MU0;
+		ns[0] = ns[1] = ns[2] = t;
+		ns[3] = ns[4] = ns[5] = 0;
+	}
+	for (int i = 0; i < 3; i++) { hout[i] = h[i]; mout[i] = m[i]; }
+}
+
+
+
+// ベクトル J-A (3 成分) の自己検証 : 向きを固定した B の経路 (u = (1, 2, 2)/3 に沿って往復) では
+// スカラーの ja_eval と同じ Heun の刻みになるので、H が丸めを除いて一致し、横成分は 0 になる。
+// 戻り値は max |H_vec − H_s u| / max |H_s| (式の誤りは刻みの次数の誤りまで含めて 1e-6 以上になる)
+double ja_vec3_selftest(const ja_t *ja)
+{
+	static const double bp[8] = {0.3, 0.9, 1.4, 0.6, -0.4, -1.3, -0.2, 0.8};
+	const double u[3] = {1.0 / 3, 2.0 / 3, 2.0 / 3};
+	const int safe = JaSafeSlope;
+	JaSafeSlope = 0;
+	double bs = 0, hs = 0, ms = 0, bv[3] = {0, 0, 0}, hv[3] = {0, 0, 0}, mv[3] = {0, 0, 0};
+	double emax = 0, hmax = 0;
+	for (int q = 0; q < 8; q++) {
+		double h, m, dhdb, bn[3], hn[3], mn[3], ns[6];
+		ja_eval(ja, bs, hs, ms, bp[q], &h, &m, &dhdb);
+		for (int i = 0; i < 3; i++) bn[i] = bp[q] * u[i];
+		ja_eval_vec3(ja, bv, hv, mv, bn, u, hn, mn, ns);
+		for (int i = 0; i < 3; i++) {
+			const double d = fabs(hn[i] - (h * u[i]));
+			if (d > emax) emax = d;
+		}
+		if (fabs(h) > hmax) hmax = fabs(h);
+		bs = bp[q]; hs = h; ms = m;
+		for (int i = 0; i < 3; i++) { bv[i] = bn[i]; hv[i] = hn[i]; mv[i] = mn[i]; }
+	}
+	JaSafeSlope = safe;
+	return ((hmax > 0) ? (emax / hmax) : emax);
+}
+
 // 線形材料 (J-A でないセル) の磁気エネルギー ½ ∫ ν |∇A|² dV (2x2x2 Gauss、assemble_ja と同じ ν)。
 // 線形のセルでは台形則の ∫ H・ΔB が厳密に telescoping するので、掃引の仕事の収支には
 // 最後の状態のこの値を足せばよい
