@@ -66,6 +66,53 @@ static int th_emat(int64_t c)
 }
 
 
+// 対流の h の温度依存 (convectiontemptable)。h(T) = h f(T) の f と df/dT (折れ線、
+// 範囲の外は端の値で傾き 0)。表が無ければ対流は線形 (従来の経路)
+static int th_convnl(void)
+{
+	return ((ConvH > 0) && (ConvTabN > 0));
+}
+
+
+static int th_nonlin(void)
+{
+	return ((RadEps > 0) || th_convnl());
+}
+
+
+static double conv_tab(double t, double *slope)
+{
+	const int nt = ConvTabN;
+	*slope = 0;
+	if (t <= ConvTabT[0]) return ConvTabF[0];
+	for (int k = 0; k < (nt - 1); k++) {
+		if (t <= ConvTabT[k + 1]) {
+			*slope = (ConvTabF[k + 1] - ConvTabF[k]) / (ConvTabT[k + 1] - ConvTabT[k]);
+			return ConvTabF[k] + ((t - ConvTabT[k]) * (*slope));
+		}
+	}
+	return ConvTabF[nt - 1];
+}
+
+
+// 面の熱流 q(T) とその接線 (rad = 1 : 輻射、rad = 3 : h(T) の対流)。
+// 絶対温度が正でなければ *bad を立てる (輻射のみ)
+static void surf_q(int rad, double hc, double ta, double tg, double *qv, double *dq, int *bad)
+{
+	if (rad == 1) {
+		const double tk = tg + KELVIN, ta4 = pow(ta + KELVIN, 4);
+		if (tk <= 0) *bad = 1;
+		*qv = hc * STEFAN * (tk * tk * tk * tk - ta4);
+		*dq = 4 * hc * STEFAN * tk * tk * tk;
+		return;
+	}
+	double fp;
+	const double fv = conv_tab(tg, &fp);
+	*qv = hc * fv * (tg - ta);
+	*dq = hc * (fv + (fp * (tg - ta)));
+}
+
+
 // 露出面の直方体の許容幅 (形状判定 setup.c と同じく解析領域の大きさの EPS 倍)
 static double SurfEps;
 
@@ -161,8 +208,8 @@ static int surf_in(const surfbc_t *bc, double xc, double yc, double zc)
 // どの行にも入らなければ NULL (断熱)
 static const surfbc_t *surf_bc(int rad, double xc, double yc, double zc, int *idx)
 {
-	const surfbc_t *list = (rad ? RadBC : ConvBC);
-	const int nb = (rad ? NRad : NConv);
+	const surfbc_t *list = ((rad == 1) ? RadBC : ConvBC);
+	const int nb = ((rad == 1) ? NRad : NConv);
 	for (int e = nb - 1; e >= 0; e--) {
 		if (surf_in(&list[e], xc, yc, zc)) {
 			if (idx) *idx = e;
@@ -278,7 +325,6 @@ static double surf_faces_grid(crs_t *B, double *g, const double *t, const double
 				}
 			}
 			else {
-				const double ta4 = pow(ta + KELVIN, 4);
 				for (int m = 0; m < 4; m++) {
 					for (int mm = 0; mm < 4; mm++) me[m][mm] = 0;
 				}
@@ -290,11 +336,9 @@ static double surf_faces_grid(crs_t *B, double *g, const double *t, const double
 						      * ((m & 1) ? gp[gb] : (1 - gp[gb]));
 						tg += nn[m] * t[nd[m]];
 					}
-					const double tk = tg + KELVIN;
-					if (tk <= 0) bad = 1;
 					const double w = area / 4;
-					const double qv = hc * STEFAN * (tk * tk * tk * tk - ta4);
-					const double dq = 4 * hc * STEFAN * tk * tk * tk;
+					double qv, dq;
+					surf_q(rad, hc, ta, tg, &qv, &dq, &bad);
 					qsum += w * qv;
 					for (int m = 0; m < 4; m++) {
 						ge[m] += w * (dq * tg - qv) * nn[m];
@@ -324,7 +368,7 @@ static double surf_faces_grid(crs_t *B, double *g, const double *t, const double
 	}
 
 	if (bad) return -1e300;
-	return ((t || (rad == 1)) ? qsum : (double)nface);
+	return ((t || (rad == 1) || (rad == 3)) ? qsum : (double)nface);
 }
 
 
@@ -381,7 +425,6 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 			}
 		}
 		else {
-			const double ta4 = pow(ta + KELVIN, 4);
 			for (int m = 0; m < 3; m++) {
 				for (int mm = 0; mm < 3; mm++) me[m][mm] = 0;
 			}
@@ -391,11 +434,9 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 					nn[m] = ((m == gq) ? (2.0 / 3) : (1.0 / 6));
 					tg += nn[m] * t[nd[m]];
 				}
-				const double tk = tg + KELVIN;
-				if (tk <= 0) bad = 1;
 				const double w = area / 3;
-				const double qv = hc * STEFAN * (tk * tk * tk * tk - ta4);
-				const double dq = 4 * hc * STEFAN * tk * tk * tk;
+				double qv, dq;
+				surf_q(rad, hc, ta, tg, &qv, &dq, &bad);
 				qsum += w * qv;
 				for (int m = 0; m < 3; m++) {
 					ge[m] += w * (dq * tg - qv) * nn[m];
@@ -418,7 +459,7 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 	}
 
 	if (bad) return -1e300;
-	return ((t || (rad == 1)) ? qsum : (double)nface);
+	return ((t || (rad == 1) || (rad == 3)) ? qsum : (double)nface);
 }
 
 
@@ -693,11 +734,13 @@ static int th_radlin(FILE *fp_log, crs_t *B, const double *b0, double *gr,
 	const int64_t nnz = B->rowptr[B->n];
 	for (int64_t e = 0; e < nnz; e++) B->val[e] = b0[e];
 	for (int64_t i = 0; i < B->n; i++) gr[i] = 0;
-	if (surf_faces(B, gr, tn, kcell, 1, NULL) < -1e299) {
+	if ((RadEps > 0) && (surf_faces(B, gr, tn, kcell, 1, NULL) < -1e299)) {
 		fprintf(fp_log, "*** thermal : the absolute temperature became non-positive "
 			"on a radiating face (iteration %d)\n", it);
 		return 1;
 	}
+	// h(T) の対流も同じく線形化する (表が無ければ対流は b0 と gc に入っている)
+	if (th_convnl()) surf_faces(B, gr, tn, kcell, 3, NULL);
 	return 0;
 }
 
@@ -782,7 +825,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	// 段差の両側の発熱を解き直さずに作れる)
 	double cur = th_current(0, 0), p1 = 0;
 	if (!ierr) ierr = th_electric(fp_log, A, scell, fix, phi, work, diag, q, 0, 1.0, &g, f1);
-	if (!ierr && (RadEps > 0)) ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, 0);
+	if (!ierr && th_nonlin()) ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, 0);
 	if (!ierr) {
 		r = 1 / g;
 		p1 = 0;
@@ -793,7 +836,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		ptot = cur * cur * p1;
 		crs_spmv(B, tn, work, NULL);
 		for (int i = 0; i < n; i++) resold[i] = work[i] - f[i] - gc[i] - gr[i];
-		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0, NULL) : 0);
+		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, (th_convnl() ? 3 : 0), NULL) : 0);
 		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1, NULL) : 0);
 		for (int i = 0; i < n; i++) t0[i] = tn[i];
 		fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%.8e\n", 0.0, r, cur * r, tmax,
@@ -825,7 +868,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 				p1 += f1[i];
 			}
 			ptot = cur * cur * p1;
-			if ((RadEps > 0) && ((ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, tag)) != 0)) break;
+			if (th_nonlin() && ((ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, tag)) != 0)) break;
 
 			// 系の行列 S = M/Δt + θ B、右辺 = M T^n/Δt + θ (f + g) - (1-θ) R(T^n)
 			for (int64_t e = 0; e < nnz; e++) S.val[e] = M.val[e] / dts + th * B->val[e];
@@ -889,7 +932,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		}
 		crs_spmv(B, tn, work, NULL);
 		for (int i = 0; i < n; i++) resold[i] = work[i] - f[i] - gc[i] - gr[i];
-		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0, NULL) : 0);
+		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, (th_convnl() ? 3 : 0), NULL) : 0);
 		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1, NULL) : 0);
 		ejoule += dts * ((th * ptot) + ((1 - th) * pold));
 		econv += dts * ((th * qconv) + ((1 - th) * qcold));
@@ -983,7 +1026,7 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		for (int i = 0; i < n; i++) ptot += f[i];
 		// 輻射 : いまの温度のまわりで Newton 線形化して行列と右辺に入れる。
 		// σ(T) の Picard 反復と同じ回で回すので、収束すれば両方の不動点になる
-		if ((RadEps > 0) && ((ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, it)) != 0)) break;
+		if (th_nonlin() && ((ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, it)) != 0)) break;
 		for (int i = 0; i < n; i++) {
 			if (!fixt[i]) tn[i] = 0;
 		}
@@ -1013,7 +1056,7 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 				qsink += f[i] + gc[i] + gr[i] - crs_row_dot(B, i, tn);
 			}
 		}
-		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, 0, NULL) : 0);
+		qconv = ((ConvH > 0) ? surf_faces(NULL, NULL, tn, kcell, (th_convnl() ? 3 : 0), NULL) : 0);
 		qrad = ((RadEps > 0) ? surf_faces(NULL, NULL, tn, kcell, 1, NULL) : 0);
 
 		tmax = th_celltemp(tn, kcell, tcell);
@@ -1111,6 +1154,11 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 		}
 		fprintf(fp_log, "\n");
 	}
+	if (th_convnl()) {
+		fprintf(fp_log, "  convection h(T) = h f(T), f :");
+		for (int k = 0; k < ConvTabN; k++) fprintf(fp_log, " (%g, %g)", ConvTabT[k], ConvTabF[k]);
+		fprintf(fp_log, " (Newton-linearized each iteration)\n");
+	}
 	fflush(fp_log);
 
 	double *tcell = (double *)malloc((size_t)nc * sizeof(double));
@@ -1171,7 +1219,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 		u[i] = 0;
 	}
 	int64_t nface = 0;
-	if (ConvH > 0) {
+	if ((ConvH > 0) && !th_convnl()) {
 		surf_faces(&B, gc, NULL, kcell, 0, NULL);
 	}
 	if ((NConv + NRad) > 0) {
@@ -1201,7 +1249,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	// 輻射は温度に依るので、反復ごとに伝導 + 対流の行列 (b0) に接線を足し直す
 	const int64_t nnz = B.rowptr[n];
 	double *b0 = NULL;
-	if (RadEps > 0) {
+	if (th_nonlin()) {
 		b0 = (double *)malloc((size_t)nnz * sizeof(double));
 		for (int64_t e = 0; e < nnz; e++) b0[e] = B.val[e];
 	}

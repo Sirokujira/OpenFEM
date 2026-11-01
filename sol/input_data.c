@@ -277,6 +277,7 @@ int input_data(FILE *fp)
 	}
 	ConvH = 0;
 	RadEps = 0;
+	ConvTabN = 0;
 	NConv = 0;
 	NRad = 0;
 	TransientOn = 0;
@@ -970,6 +971,27 @@ int input_data(FILE *fp)
 				NConv++;
 			}
 		}
+		else if (!strcmp(strkey, "convectiontemptable")) {
+			// convectiontemptable = <T1> <f1> <T2> <f2> ...
+			//   対流の h を面の温度 T の関数にする : h(T) = h f(T) (すべての convection 行に
+			//   掛かる、折れ線で範囲の外は端の値)。自然対流 h ∝ (T - T_a)^(1/4) などを書く。
+			//   対流が非線形になるので輻射と同じく Picard の各回で Newton 線形化する
+			if ((nval < 2) || ((nval % 2) != 0) || ((nval / 2) > MAXTEMPTAB) || (ConvTabN > 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int nt = nval / 2;
+			for (int k = 0; k < nt; k++) {
+				ConvTabT[k] = atof(token[2 + (2 * k)]);
+				ConvTabF[k] = atof(token[3 + (2 * k)]);
+				// 温度は狭義単調増加、倍率は 0 以上 (自然対流は T = T_a で h = 0)
+				if ((ConvTabF[k] < 0) || ((k > 0) && (ConvTabT[k] <= ConvTabT[k - 1]))) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+			}
+			ConvTabN = nt;
+		}
 		else if (!strcmp(strkey, "thermal")) {
 			// thermal = <I [A]> [<maxiter> [<tol>]]  : 電気-熱連成 (定常、analysis = R)
 			//   ポートに電流 I を流したときの Joule 発熱で温度分布を解き、
@@ -1502,6 +1524,11 @@ int input_data(FILE *fp)
 				"radiation; otherwise there is no steady state");
 			return 1;
 		}
+		// h(T) の表は convection の行に掛かる倍率なので、行が無ければ読まれない
+		if ((ConvTabN > 0) && (NConv < 1)) {
+			input_warn("convectiontemptable has no effect without convection (it scales "
+				"the h of the convection lines)");
+		}
 		// 電流の流れる材料が熱を通さないと、その要素の発熱が逃げられない
 		for (int m = 0; m < NMaterial; m++) {
 			if ((Material[m].sigma > 0) && (Material[m].kth <= 0)) {
@@ -1545,6 +1572,10 @@ int input_data(FILE *fp)
 		if (NConv > 0) {
 			input_warn("convection has no effect without thermal (it is only read by "
 				"the electro-thermal coupling)");
+		}
+		if (ConvTabN > 0) {
+			input_warn("convectiontemptable has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
 		}
 		if (NRad > 0) {
 			input_warn("radiation has no effect without thermal (it is only read by "

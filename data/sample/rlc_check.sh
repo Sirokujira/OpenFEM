@@ -3457,6 +3457,85 @@ th_reject "AC heating with a nonlinear (bh) material" tacx_bh.ofe "linear materi
 awk '/^analysis/{print "analysis = A"; print "frequency = 1e3"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/tacx_grid.ofe"
 th_reject "AC heating on the structured grid" tacx_grid.ofe "requires an unstructured mesh"
 
+# ---- 対流の h(T) (convectiontemptable) ----
+#
+# h(T) = h f(T) (折れ線) で対流が非線形になり、輻射と同じく Picard の各回で Newton
+# 線形化する。側面だけから冷やす一様な棒は温度が一様のままなので、釣り合いの
+# 代数方程式 (f は同じ折れ線) を二分法で解いた値と機械精度で比べられる。
+echo "[thermal h(T)] convection with a temperature-dependent h (convectiontemptable)"
+cp "$SRC/thermal_natconv.ofe" "$WORK/"
+th_convt() {	# th_convt <I> <α> <表 "T1 f1 T2 f2 ..."> -> "R T" (thermal_conv.ofe の棒)
+	awk -v I="$1" -v a="$2" -v tab="$3" 'BEGIN {
+		nt = split(tab, v, " ") / 2; for (k = 1; k <= nt; k++) { tt[k] = v[2 * k - 1]; ff[k] = v[2 * k] }
+		r0 = 1e-6; T0 = 0; Ta = 30; h = 200; L = 0.01; A = 5e-7; P = 3e-3; J = I / A
+		lo = Ta; hi = 5000
+		for (it = 0; it < 300; it++) {
+			T = (lo + hi) / 2
+			if (T <= tt[1]) f = ff[1]; else if (T >= tt[nt]) f = ff[nt]; else { for (k = 1; k < nt; k++) if (T <= tt[k + 1]) { f = ff[k] + (T - tt[k]) / (tt[k + 1] - tt[k]) * (ff[k + 1] - ff[k]); break } }
+			F = J * J * r0 * (1 + a * (T - T0)) * A - P * h * f * (T - Ta)
+			if (F > 0) lo = T; else hi = T
+		}
+		printf "%.12e %.12e", r0 * (1 + a * (T - T0)) * L / A, T }'
+}
+nctab=$(awk '/^convectiontemptable/ { for (i = 3; i <= NF; i++) printf "%s ", $i; exit }' "$SRC/thermal_natconv.ofe")
+# (1) 自然対流の表 (thermal_natconv.ofe)。許容 1e-9 : Picard 反復の打ち切りの分
+th_run thermal_natconv.ofe
+set -- $(th_convt 6 4e-3 "$nctab")
+compare "h(T), natural convection, uniform bar : R [ohm]" "$(th_r)" "$1" 1e-9
+compare "h(T), natural convection, uniform bar : T [degC]" "$(th_t)" "$2" 1e-9
+th_energy "h(T), natural convection"
+th_nface "h(T) (sides only)" 160
+# (2) f ≡ 1 の表は表なし (線形の対流) と一致する (経路が違うので許容は反復の打ち切りの分)
+th_run thermal_conv.ofe
+rlin=$(th_r); tlin=$(th_t)
+awk '/^convectiontemptable/{print "convectiontemptable = 0 1 1000 1"; next} {print}' \
+	"$SRC/thermal_natconv.ofe" > "$WORK/thct1.ofe"
+th_run thct1.ofe
+compare "h(T) with f = 1 == constant h : R [ohm]" "$(th_r)" "$rlin" 1e-9
+compare "h(T) with f = 1 == constant h : T [degC]" "$(th_t)" "$tlin" 1e-9
+# (3) α = 0 なら非線形は対流だけ。Newton 線形化なら 6 回 (実測)。接線の f'(T)(T - T_a) を
+#     落としても (割線にしても) 同じ不動点に遅く収束するだけなので、回数を assert する
+awk '/^tempco/{print "tempco = 2 0 0"; next} {print}' "$SRC/thermal_natconv.ofe" > "$WORK/thct_a0.ofe"
+th_run thct_a0.ofe
+set -- $(th_convt 6 0 "$nctab")
+compare "h(T), alpha = 0 : T [degC]" "$(th_t)" "$2" 1e-9
+nit=$(awk '/converged in/ { print $3; exit }' "$WORK/ofe.log")
+if [ -n "$nit" ] && [ "$nit" -le 7 ]; then
+	echo "  Newton on h(T) (alpha = 0) : converged in $nit iterations (<= 7) -> OK"
+else
+	echo "  Newton on h(T) (alpha = 0) : ${nit:-?} iterations (> 7) -> NG" >&2
+	status=1
+fi
+# (4) 恒等式 : ヒートシンク + h(T) の対流 + 輻射の首のある導体 (構造格子)、
+#     四面体のフィン、過渡 (CN)、面ごとの係数 (下面だけ冷やす板)
+awk '/^thermal/{print "convection = 100 30"; print "convectiontemptable = 30 0.5 300 2"; print "radiation = 0.9 10"} {print}' \
+	"$SRC/thermal_neck.ofe" > "$WORK/thct_neck.ofe"
+th_run thct_neck.ofe
+th_energy "h(T) : thermal_neck, sinks + h(T) convection + radiation"
+th_nface "h(T) : thermal_neck" 552
+awk '/^thermal/{print "convection = 20 30"; print "convectiontemptable = 20 0.5 120 3"} {print}' \
+	"$SRC/thermal_tet.ofe" > "$WORK/thct_tet.ofe"
+th_run thct_tet.ofe
+th_energy "h(T) : tetrahedral fin"
+awk '/^thermal/{print; print "heatcap = 2 3.4e6"; print "transient = 2 50 0.5"; next} {print}' \
+	"$SRC/thermal_natconv.ofe" > "$WORK/thct_tr.ofe"
+th_run thct_tr.ofe
+th_balance "h(T) : transient (CN)"
+awk '/^convection = 500/{print; print "convectiontemptable = 20 0.8 100 1.5"; next} {print}' \
+	"$SRC/thermal_plate.ofe" > "$WORK/thct_plate.ofe"
+th_run thct_plate.ofe
+th_energy "h(T) : per-face convection (bottom face only)"
+# (5) 弾くべき入力と警告
+awk '/^convectiontemptable/{print "convectiontemptable = 100 1 50 2"; next} {print}' \
+	"$SRC/thermal_natconv.ofe" > "$WORK/thctx_dec.ofe"
+th_reject "convectiontemptable with decreasing temperatures" thctx_dec.ofe "invalid convectiontemptable data"
+awk '/^convectiontemptable/{print "convectiontemptable = 30 1 100"; next} {print}' \
+	"$SRC/thermal_natconv.ofe" > "$WORK/thctx_odd.ofe"
+th_reject "convectiontemptable with an odd number of values" thctx_odd.ofe "invalid convectiontemptable data"
+awk '/^convectiontemptable/{print "convectiontemptable = 30 -1 100 1"; next} {print}' \
+	"$SRC/thermal_natconv.ofe" > "$WORK/thctx_neg.ofe"
+th_reject "convectiontemptable with a negative factor" thctx_neg.ofe "invalid convectiontemptable data"
+
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
 # 警告が (a) 罠のケースで必ず出て (b) 正しいケースでは 1 件も出ないことを両方見る
@@ -3509,6 +3588,10 @@ lint_expect "tempcotable + analysis=C"     lint_sigtab.ofe    yes
 awk '/^analysis = /{print "conductortempcotable = 1 20 1 120 1.3"} {print}' \
     "$SRC/bar_eddy.ofe" > "$WORK/lint_ctab_a.ofe"
 lint_expect "conductortempcotable + analysis=A" lint_ctab_a.ofe yes
+awk '/^convection =/{next} /^thermal/{print "heatsink = 0 20"} {print}' "$SRC/thermal_natconv.ofe" > "$WORK/lint_ctt_noconv.ofe"
+lint_expect "convectiontemptable without convection" lint_ctt_noconv.ofe yes
+awk '/^thermal/{next} {print}' "$SRC/thermal_natconv.ofe" | awk '!/^kthermal|^convection = /' > "$WORK/lint_ctt_noth.ofe"
+lint_expect "convectiontemptable without thermal" lint_ctt_noth.ofe yes
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
@@ -3517,7 +3600,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
          thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
-         plate_line_bh_ac bar_air_bh thermal_tet thermal_ac; do
+         plate_line_bh_ac bar_air_bh thermal_tet thermal_ac thermal_natconv; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

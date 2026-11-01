@@ -232,6 +232,9 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
   電流の波形 (`waveform`) は刻みの中で f(t_n⁺) と f(t_{n+1}⁻) を使い、段差では
   次の刻みの R(T^n) の発熱を右極限に入れ替える (f = I² f1 なので解き直さない)。
   **そうしないと段差をまたいだ台形則で CN が 1 次に落ちる** (次数を assert)。
+  h(T) (`convectiontemptable`) は輻射と同じ Newton 線形化の経路 (`surf_q()`、rad = 3)。
+  表があると対流は定数の行列 `b0` / 右辺 `gc` に入れず、毎回線形化する (二重計上しない)。
+  接線の誤りは輻射と同じく反復回数でしか見えない (α = 0 で 6 回、上限 7)。
   面ごとの係数 (`convection` / `radiation` に直方体) は面の**中心**で引き、**あとの行
   ほど優先**する (`surf_bc()`)。直方体の許容幅は `geometry` と同じ EPS × 領域の大きさ
   (格子の最上面は `pos + d·n` の丸めで利用者の数と 1 ulp ずれ得る)。
