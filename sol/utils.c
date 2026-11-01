@@ -73,12 +73,20 @@ void monitor2(FILE *fp, int nthread)
 		fprintf(fp, "Mesh = %s (unstructured 2-D cross-section, %s triangles)\n", MeshFile,
 			((TetOrder == 7) ? "36-node septic" : (TetOrder == 6) ? "28-node sextic" : (TetOrder == 5) ? "21-node quintic" : (TetOrder == 4) ? "15-node quartic" : (TetOrder == 3) ? "10-node cubic" : (TetOrder >= 2) ? "6-node quadratic" : "3-node linear"));
 		fprintf(fp, "Nodes = %lld, Triangles = %d\n", (long long)nnode, NTri);
+		if (MeshRaisedElem > 0) {
+			fprintf(fp, "Mixed orders : %d triangles of order %d and up raised to order %d (%d nodes added)\n",
+				MeshRaisedElem, MeshRaisedFrom, TetOrder, MeshRaisedNode);
+		}
 	}
 	else if (MeshMode) {
 		fprintf(fp, "Mesh = %s (unstructured, %s tetrahedra)\n", MeshFile,
 			((TetOrder == 7) ? "120-node septic" : (TetOrder == 6) ? "84-node sextic" : (TetOrder == 5) ? "56-node quintic" : (TetOrder == 4) ? "35-node quartic" : (TetOrder == 3) ? "20-node cubic" : (TetOrder >= 2) ? "10-node quadratic" : "4-node linear"));
 		fprintf(fp, "Nodes = %lld, Tetrahedra = %d, Triangles = %d\n",
 			(long long)nnode, NTet, NTri);
+		if (MeshRaisedElem > 0) {
+			fprintf(fp, "Mixed orders : %d tetrahedra of order %d and up raised to order %d (%d nodes added)\n",
+				MeshRaisedElem, MeshRaisedFrom, TetOrder, MeshRaisedNode);
+		}
 	}
 	else {
 		fprintf(fp, "Cells = %d x %d x %d = %lld\n", Nx, Ny, Nz, (long long)ncell);

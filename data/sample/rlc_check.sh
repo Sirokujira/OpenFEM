@@ -3734,6 +3734,68 @@ th_reject "84-node tetrahedra with 21-node electrode triangles" p6x_tri.ofe "21-
 sed 's/^analysis = .*/analysis = E/' "$WORK/box_p6.ofe" > "$WORK/p6x_e.ofe"
 th_reject "analysis E on an 84-node tetrahedral mesh" p6x_e.ofe "need a first-order mesh"
 
+# ---- 次数の違う四面体 / 三角形が面を共有する格子 (低い次数を最高次数 P に上げる、unstruct.c の ho_raise) ----
+#
+# 辺・面の節点は「全体の頂点番号と多重指数の組」を鍵に隣と共有し、新しい節点は元の要素の q 次の写像の上に置く。
+# 格子は gmsh 製の一様な高次の格子の一部を mesh_downgrade.awk で低い次数に落としたもの (使われない節点は残る)。
+#   (a) 箱 (z の下半分を落とす : 界面が場を横切るので、界面が裂けると C が変わる) : 1/2・1/3・2/4 の 3 通りで
+#       C が閉形式に全桁、analysis = P の P 次の場の恒等式。**P の恒等式は界面の裂け目を見ない** (要素毎の和。鍵の
+#       頂点番号を並べ替えない誤りでも通る、実測) ので C と (c) が要る
+#   (b) 曲がった同軸 (coax_p4 の x < 0 を 2 次に落とす) : 新しい節点は 2 次の写像の上 (実測 −1.7e-4。同じ頂点の
+#       一様な 2 次 +1.4e-4、1 次 −4.1e-3)。許容 5e-4。頂点だけから置く誤りは格子が裏返って弾かれる (実測)
+#   (c) 断面 2 次元 (plate2d_p3 の y < 0 を 1 次に落とす) : 直線の三角形なので上げた格子は一様な 3 次と同じ離散問題に
+#       なり、400 MHz の rlc.csv が一様な 3 次とバイト一致
+#   (d) 三角形が四面体の最高次数より高い、六面体と一緒に使う、は弾く
+echo "[mixed orders] tetrahedra / triangles of different orders sharing faces (raised to the highest order)"
+cp "$SRC/mesh_downgrade.awk" "$SRC/box_p2.msh" "$SRC/box_p3.msh" "$SRC/box_p4.msh" "$SRC/coax_p4.msh" "$SRC/plate2d_p3.msh" "$WORK/"
+mx_down() {	# mx_down <入力> <出力> <列> <しきい値> <四面体の型> <三角形の型> <1|2>
+	awk -v col="$3" -v xc="$4" -v tf="$5" -v ff="$6" -v to="$7" -f "$WORK/mesh_downgrade.awk" "$WORK/$1" > "$WORK/$2"
+}
+for c in box_p2:11:9:1:1:2:c:quadratic box_p3:29:21:1:1:3:f:cubic box_p4:30:23:2:2:4:g:quartic; do
+	IFS=: read -r m tf ff to q p lt fw <<EOF2
+$c
+EOF2
+	mx_down "$m.msh" mx_$m.msh 4 1e-4 "$tf" "$ff" "$to"
+	sed -e "s/^mesh = .*/mesh = mx_$m.msh/" "$SRC/box_p3.ofe" > "$WORK/mx.ofe"
+	(cd "$WORK" && "$OFE" -n 2 mx.ofe > /dev/null && "$OFE_POST" > /dev/null) || { echo "  mx_$m : the run failed -> NG" >&2; status=1; }
+	if grep -q "Mixed orders : [0-9]* tetrahedra of order $q and up raised to order $p" "$WORK/ofe.log"; then
+		echo "  mx_$m : $(grep 'Mixed orders' "$WORK/ofe.log" | sed 's/^Mixed orders : //') -> OK"
+	else echo "  mx_$m : the order-$q tetrahedra were not raised to order $p -> NG" >&2; status=1; fi
+	compare "mx_$m (orders $q and $p, interface across the field) : C (parallel plate) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+	sed -e "s/^analysis = .*/analysis = P/" "$WORK/mx.ofe" > "$WORK/mxp.ofe"
+	(cd "$WORK" && "$OFE" -n 2 mxp.ofe > /dev/null 2>&1)
+	if grep -q "($lt) $fw" "$WORK/ofe.log" && grep -q "result : passed" "$WORK/ofe.log"; then
+		echo "  mx_$m (analysis P) : order-$p field identity on the raised mesh ($(awk -v c="($lt)" '$1 == c { print $NF; exit }' "$WORK/ofe.log")) -> OK"
+	else echo "  mx_$m (analysis P) : the order-$p field identity failed or did not run -> NG" >&2; status=1; fi
+done
+mx_down coax_p4.msh mx_coax24.msh 2 0 30 23 2
+sed "s/^mesh = .*/mesh = mx_coax24.msh/" "$SRC/coax_p2.ofe" > "$WORK/mxc.ofe"
+rm -f "$WORK/rlc.csv"
+(cd "$WORK" && "$OFE" -n 2 mxc.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  mx_coax24 : the run failed -> NG" >&2; status=1; }
+compare "curved coax, half order 2 raised to order 4 : C' [F/m]" "$(value_of C)" 1.063416612e-10 5e-4
+mx_down plate2d_p3.msh mx_plate13.msh 3 0 -1 21 1
+for m in plate2d_p3 mx_plate13; do
+	sed -e "s/plate2d.msh/$m.msh/" -e "s/^frequency = .*/frequency = 4e8/" "$SRC/plate2d_ac.ofe" > "$WORK/mxa.ofe"
+	rm -f "$WORK/rlc.csv"
+	(cd "$WORK" && "$OFE" -n 2 mxa.ofe > /dev/null && "$OFE_POST" > /dev/null) || { echo "  $m : the run failed -> NG" >&2; status=1; }
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/$m.mx.csv" 2> /dev/null
+done
+if [ -s "$WORK/plate2d_p3.mx.csv" ] && cmp -s "$WORK/plate2d_p3.mx.csv" "$WORK/mx_plate13.mx.csv"; then
+	echo "  2-D, triangles of orders 1 and 3 (raised to 3) == uniform order 3 : rlc.csv identical at 400 MHz -> OK"
+else echo "  2-D mixed-order plate differs from the uniform order-3 plate -> NG" >&2; status=1; fi
+mx_down box_p4.msh mx_t1.msh 4 1e-4 30 -1 2
+mx_down mx_t1.msh mx_tri.msh 4 1 30 -1 1
+sed "s/^mesh = .*/mesh = mx_tri.msh/" "$SRC/box_p3.ofe" > "$WORK/mxr1.ofe"
+th_reject "mixed-order tetrahedra (1 and 2) with 15-node electrode triangles" mxr1.ofe "a triangle is order 4 but the highest tetrahedron order is 2"
+mx_down box_p2.msh mx_h0.msh 4 1e-4 11 9 1
+awk '/^\$Nodes/ { print; getline; n = $1; print n + 8; next }
+	/^\$EndNodes/ { for (i = 0; i < 8; i++) printf "%d %.6g %.6g %.6g\n", n + 1 + i, 5e-3 + (i % 2) * 1e-4, 5e-3 + (int(i / 2) % 2) * 1e-4, int(i / 4) * 1e-4; print; next }
+	/^\$Elements/ { print; getline; m = $1; print m + 1; next }
+	/^\$EndElements/ { printf "%d 5 2 1 1 %d %d %d %d %d %d %d %d\n", m + 1, n + 1, n + 2, n + 4, n + 3, n + 5, n + 6, n + 8, n + 7; print; next }
+	{ print }' "$WORK/mx_h0.msh" > "$WORK/mx_hex.msh"
+sed "s/^mesh = .*/mesh = mx_hex.msh/" "$SRC/box_p3.ofe" > "$WORK/mxr2.ofe"
+th_reject "mixed-order tetrahedra with a hexahedron" mxr2.ofe "tetrahedra of different orders are supported only in a tetrahedral mesh"
+
 # ---- 熱連成の六面体・角柱・ピラミッド (1 次、混在可) ----
 #
 # 剛性・発熱・質量・要素の温度を 1 つの積分点 API (unstruct.c の elem3d_ip) で組む
