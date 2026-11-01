@@ -578,6 +578,37 @@ res=$(awk '/direct : profile/ { for (i = 1; i <= NF; i++) if ($i == "bandwidth")
 	                  ((bw < 1632 / 4) ? "OK" : "NG"), bw }' "$WORK/ofe.log")
 echo "  RCM reduces the profile : $res"
 case "$res" in NG*) status=1 ;; esac
+# **Sloan と RCM の小さい方を使っていること。** 並べ替えは性能のためだけなので
+# 値の一致では何も検査できない。使ったプロファイル (分解の報告) が両者の最小値に
+# 一致することを、Sloan が勝つ格子 (構造格子 3 次元) と RCM が勝つ格子 (2 次四面体)
+# の両方で見る。性能そのものも assert する: 構造格子では RCM の 0.85 倍未満
+# (実測 0.80。Sloan の優先度の更新を 1 つ落とすと 0.89、距離の符号を逆にすると
+# 0.90 で、どちらも答えは正しいまま)、四面体 (box_tet) ではプロファイルが 19611 以下
+# (並べ替えは浮動小数点を使わない整数の計算なので OS に依らず決まる。擬似周辺節点の
+# 探索を外すと 20011。**構造格子では次数最小の節点 (角) が最初から周辺なので、
+# この誤りは非構造格子でしか出ない**。並べ替えを改良して小さくなるのは構わない)
+ord_check() {	# ord_check <ケース> <期待する勝者> [<上限の比>] [<プロファイルの上限>]
+	sed 's/^analysis = /direct = 1\nanalysis = /' "$SRC/$1.ofe" > "$WORK/dord.ofe"
+	if ! (cd "$WORK" && "$OFE" -n 2 dord.ofe > /dev/null 2>&1); then
+		echo "  ordering on $1 : the run failed -> NG" >&2; status=1; return
+	fi
+	res=$(awk -v want="$2" -v lim="${3:-0}" -v cap="${4:-0}" '
+		/ordering : RCM profile/ && (w == "") { for (i = 1; i <= NF; i++) { if (($i == "RCM") && (r == "")) r = $(i+3); if (($i == "Sloan") && (s == "")) s = $(i+3) }
+		                                        w = $NF }
+		/direct : profile =/ && (u == "") { for (i = 1; i <= NF; i++) if ($i == "profile") u = $(i+2) }
+		END { if ((r == "") || (u == "")) { printf "NG (no report)"; exit }
+		      m = ((s + 0) < (r + 0)) ? s : r
+		      ok1 = ((u + 0) == (m + 0)) && (w == want)
+		      ok2 = ((lim == 0) || ((u + 0) < lim * (r + 0))) && ((cap == 0) || ((u + 0) <= (cap + 0)))
+		      ok = ok1 && ok2
+		      printf "%s (RCM %d, Sloan %d, used %d by %s)", ok ? "OK" : "NG", r, s, u, w }' "$WORK/ofe.log")
+	echo "  ordering on $1 : the smaller of RCM / Sloan : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+ord_check parallel_plate Sloan 0.85
+for m in "$SRC"/*.msh; do [ -f "$m" ] && cp "$m" "$WORK/"; done
+ord_check box_tet Sloan 0 19611
+ord_check box_p2 RCM
 
 # 複素対称系 (F / A) の直接解法 (スカイライン **LDL^T**)。
 #

@@ -1,7 +1,7 @@
 /*
 solver_direct.c
 
-直接解法 (RCM 並べ替え + スカイライン分解)。
+直接解法 (RCM / Sloan 並べ替え + スカイライン分解)。
 
 反復解法しか無いと、悪条件な問題 (高コントラストな材料、扁平な要素) で
 収束しないときに逃げ道が無い。`direct = 1` でこちらに切り替える。
@@ -25,7 +25,9 @@ Dirichlet の扱いは反復解法と完全に同じにする:
 
 なぜスカイラインか: 並べ替え無しの疎 Cholesky は 3 次元格子で充填が爆発する。
 RCM は帯幅 (プロファイル) を減らす古典的な並べ替えで、実装が短く検算しやすい。
-AMD + 一般疎分解の方が速いが、コード量と検証コストに見合わない。
+Sloan 法 (距離とフロントの増え方の重み付け) も作り、プロファイルの小さい方を使う。
+AMD + 一般疎分解の方が速いが、コード量と検証コストに見合わない
+(AMD は一般疎分解の充填を減らす並べ替えで、プロファイルを減らすものではない)。
 プロファイルが大きすぎるときは黙って落ちずに**見積もりを出して断る**。
 */
 
@@ -95,6 +97,171 @@ static void rcm_order(const crs_t *A, const unsigned char *fix, int32_t *perm)
 }
 
 
+// 幅優先探索の距離 (到達しない節点は -1)。戻り値は最も遠い距離 (離心率)
+static int bfs_dist(const crs_t *A, int s, int *dist, int *queue)
+{
+	const int n = (int)A->n;
+	for (int i = 0; i < n; i++) dist[i] = -1;
+	int nq = 0, head = 0, ecc = 0;
+	queue[nq++] = s;
+	dist[s] = 0;
+	while (head < nq) {
+		const int r = queue[head++];
+		if (dist[r] > ecc) ecc = dist[r];
+		for (int64_t p = A->rowptr[r]; p < A->rowptr[r + 1]; p++) {
+			const int c = A->col[p];
+			if (dist[c] < 0) {
+				dist[c] = dist[r] + 1;
+				queue[nq++] = c;
+			}
+		}
+	}
+	return ecc;
+}
+
+
+/*
+Sloan のプロファイル削減 (Sloan 1986)。perm[k] = k 番目に並ぶ元の節点番号。
+
+擬似周辺節点の組 (s, e) を George-Liu の反復で選び、e からの距離 d(i) と
+「いま番号を付けたらフロントがどれだけ増えるか」(現在次数) を重み付けした
+優先度 P(i) = W1 d(i) - W2 (現在次数 + 1) の最大の節点から番号を付ける
+(W1 = 1, W2 = 2 は Sloan の推奨値)。RCM が距離 (層) だけで決めるのに対し、
+フロントの増え方を見るのでプロファイルが小さくなりやすい。連結成分ごとに行う。
+優先度の最大は待ち行列を線形に探す (フロントの幅しか無いので十分速い)。
+*/
+static void sloan_order(const crs_t *A, int32_t *perm)
+{
+	const int n = (int)A->n;
+	enum { INACTIVE = 0, PREACTIVE, ACTIVE, POSTACTIVE };
+	int *dist = (int *)malloc((size_t)n * sizeof(int));
+	int *dist2 = (int *)malloc((size_t)n * sizeof(int));
+	int *qbuf = (int *)malloc((size_t)n * sizeof(int));
+	int *deg = (int *)malloc((size_t)n * sizeof(int));
+	long long *prio = (long long *)malloc((size_t)n * sizeof(long long));
+	unsigned char *st = (unsigned char *)malloc((size_t)n);
+	unsigned char *done = (unsigned char *)malloc((size_t)n);
+	int *cand = (int *)malloc((size_t)n * sizeof(int));
+	memset(done, 0, (size_t)n);
+	memset(st, INACTIVE, (size_t)n);
+	for (int i = 0; i < n; i++) {
+		int d = 0;
+		for (int64_t p = A->rowptr[i]; p < A->rowptr[i + 1]; p++) {
+			if (A->col[p] != i) d++;
+		}
+		deg[i] = d;
+	}
+	const long long W1 = 1, W2 = 2;
+
+	int nk = 0;
+	while (nk < n) {
+		// 未処理の成分で次数最小の節点から、擬似周辺節点を探す (George-Liu)
+		int s = -1;
+		for (int i = 0; i < n; i++) {
+			if (!done[i] && ((s < 0) || (deg[i] < deg[s]))) s = i;
+		}
+		int ecc = bfs_dist(A, s, dist, qbuf);
+		int e = s;
+		for (;;) {
+			// 最も遠い層で次数最小の節点
+			int best = -1;
+			for (int i = 0; i < n; i++) {
+				if ((dist[i] == ecc) && ((best < 0) || (deg[i] < deg[best]))) best = i;
+			}
+			const int ecc2 = bfs_dist(A, best, dist2, qbuf);
+			e = best;
+			if (ecc2 > ecc) {
+				// 離心率が伸びたので始点を取り替えて続ける
+				s = best;
+				ecc = ecc2;
+				for (int i = 0; i < n; i++) dist[i] = dist2[i];
+				continue;
+			}
+			break;
+		}
+		// 終点 e からの距離
+		bfs_dist(A, e, dist, qbuf);
+
+		// この成分の節点に優先度を付ける
+		int ncomp = 0;
+		for (int i = 0; i < n; i++) {
+			if (dist[i] >= 0) {
+				prio[i] = (W1 * dist[i]) - (W2 * (deg[i] + 1));
+				ncomp++;
+			}
+		}
+		int nc = 0;
+		cand[nc++] = s;
+		st[s] = PREACTIVE;
+		while (nc > 0) {
+			// 待ち行列で優先度最大 (同点は先に入った方)
+			int ib = 0;
+			for (int a = 1; a < nc; a++) {
+				if (prio[cand[a]] > prio[cand[ib]]) ib = a;
+			}
+			const int i = cand[ib];
+			cand[ib] = cand[--nc];
+			if (st[i] == PREACTIVE) {
+				for (int64_t p = A->rowptr[i]; p < A->rowptr[i + 1]; p++) {
+					const int j = A->col[p];
+					if (j == i) continue;
+					prio[j] += W2;
+					if (st[j] == INACTIVE) {
+						st[j] = PREACTIVE;
+						cand[nc++] = j;
+					}
+				}
+			}
+			st[i] = POSTACTIVE;
+			done[i] = 1;
+			perm[nk++] = (int32_t)i;
+			for (int64_t p = A->rowptr[i]; p < A->rowptr[i + 1]; p++) {
+				const int j = A->col[p];
+				if ((j == i) || (st[j] != PREACTIVE)) continue;
+				st[j] = ACTIVE;
+				prio[j] += W2;
+				for (int64_t q = A->rowptr[j]; q < A->rowptr[j + 1]; q++) {
+					const int k = A->col[q];
+					if ((k == j) || (st[k] == POSTACTIVE)) continue;
+					prio[k] += W2;
+					if (st[k] == INACTIVE) {
+						st[k] = PREACTIVE;
+						cand[nc++] = k;
+					}
+				}
+			}
+		}
+		(void)ncomp;
+	}
+
+	free(dist); free(dist2); free(qbuf); free(deg); free(prio); free(st); free(done); free(cand);
+}
+
+
+// 並べ替え perm でのプロファイル (スカイラインの要素数)。固定節点の行と列は落とす
+static int64_t profile_of(const crs_t *A, const unsigned char *fix, const int32_t *perm,
+	int32_t *ip)
+{
+	const int n = (int)A->n;
+	for (int k = 0; k < n; k++) ip[perm[k]] = (int32_t)k;
+	int64_t np = 0;
+	for (int k = 0; k < n; k++) {
+		const int32_t r = perm[k];
+		int32_t f = k;
+		if (!(fix != NULL && fix[r])) {
+			for (int64_t p = A->rowptr[r]; p < A->rowptr[r + 1]; p++) {
+				const int32_t c = A->col[p];
+				if (fix != NULL && fix[c]) continue;
+				const int32_t kc = ip[c];
+				if ((kc < f) && (kc <= k)) f = kc;
+			}
+		}
+		np += k - f + 1;
+	}
+	return np;
+}
+
+
 /*
 並べ替えとスカイラインの形を作る (実・複素で共通)。
 
@@ -111,6 +278,21 @@ static int64_t skyline_setup(const crs_t *A, const unsigned char *fix, size_t nb
 	int32_t *ip = (int32_t *)malloc((size_t)n * sizeof(int32_t));
 	for (int i = 0; i < n; i++) perm[i] = (int32_t)i;
 	rcm_order(A, fix, perm);
+	// Sloan も作って、プロファイルの小さい方を使う (どちらでも分解は厳密なので
+	// 答えは丸めの程度しか変わらない。並べ替えは性能のためだけ)
+	int32_t *perm2 = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+	sloan_order(A, perm2);
+	const int64_t prcm = profile_of(A, fix, perm, ip);
+	const int64_t pslo = profile_of(A, fix, perm2, ip);
+	const int use_sloan = (pslo < prcm);
+	if (use_sloan) {
+		int32_t *t = perm; perm = perm2; perm2 = t;
+	}
+	free(perm2);
+	if (fp_log != NULL) {
+		fprintf(fp_log, "  %-10s ordering : RCM profile = %lld, Sloan profile = %lld -> %s\n",
+			label, (long long)prcm, (long long)pslo, (use_sloan ? "Sloan" : "RCM"));
+	}
 	for (int k = 0; k < n; k++) ip[perm[k]] = (int32_t)k;
 
 	// 行毎のスカイライン先頭列 (並べ替え後)
