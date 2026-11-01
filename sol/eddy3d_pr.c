@@ -25,7 +25,7 @@ f の上で 0 になり (λ_i (i ∉ f) が掛かるか、φ_σ の σ が f の
 
 未知数の並び : [辺 r x NEdge | 面 r(r−1) x NFace | 内部 r(r−1)(r−2)/2 x NTet | φ (NNode)]。
 
-対応するのは周波数領域の線形材料・ゲージなし・反復解法・場の出力 (それ以外は setup で弾く)。
+対応するのは周波数領域の線形材料・ゲージなし・反復解法・場の出力・交流の発熱 (thermal + A) (それ以外は setup で弾く)。
 */
 
 #include "fem.h"
@@ -464,7 +464,7 @@ static int pr_open(FILE *fp_log)
 
 
 // 組み立て : [S + jωT, TG; GᵀT, GᵀTG/(jω)] (節点の式を jω で割った複素対称形、1 次・2 次と同じ)
-static int pr_assemble(FILE *fp_log)
+static int pr_assemble(FILE *fp_log, const double *sigelem)
 {
 	const int nt = PR.nt, nA = PR.nA, nP = PR.nP;
 	const double omega = PR.omega;
@@ -483,7 +483,7 @@ static int pr_assemble(FILE *fp_log)
 		const int m = elem3d_mat(e);
 		double nu[6];
 		material_coef_pub(m, 3, nu);
-		const double sig = Material[m].sigma;
+		const double sig = ((sigelem != NULL) ? sigelem[e] : Material[m].sigma);		// 熱連成なら σ(T)
 		pr_dofs(e, dof);
 		if (pr_element(e, nu, sig, se, te, ce, pe, wv, wc, nc)) { bad = 1; break; }
 		for (int k = 0; k < nA; k++) {
@@ -540,7 +540,7 @@ static void pr_row_dot_c(int32_t row, double *sr, double *si)
 
 
 // ポート jc を V = Volt で励振して解き (PR.ur / ui に解)、各導体へ流れ込む電流 qr + j qi を返す
-static int pr_solve_port(FILE *fp_log, int jc, const char *label, double qr[MAXPORT], double qi[MAXPORT])
+static int pr_solve_port(FILE *fp_log, int jc, FILE *fp_iter, const char *label, double qr[MAXPORT], double qi[MAXPORT])
 {
 	const int n = PR.n, nn = PR.nn, oV = PR.oV;
 	const double omega = PR.omega;
@@ -555,7 +555,7 @@ static int pr_solve_port(FILE *fp_log, int jc, const char *label, double qr[MAXP
 		PR.bi[i] = (PR.fix[i] ? 0 : -PR.w2[i]);
 	}
 	const int iter = solver_cocg(&PR.Kr, &PR.Ki, 1.0, PR.br, PR.bi, PR.ur, PR.ui, PR.fix,
-		Solver.maxiter, Solver.nout, Solver.converg, fp_log, label);
+		Solver.maxiter, Solver.nout, Solver.converg, fp_iter, label);
 	if (iter < 0) {
 		fprintf(fp_log, "*** the high-order A-phi solve did not converge (%s)\n", label);
 		return 1;
@@ -632,7 +632,7 @@ int solve_eddy3d_pr(FILE *fp_log)
 	fprintf(fp_log, "\n=== 3D eddy current (A-phi, order-%d Nedelec / nodal elements) ===\n", TetOrder);
 	if (pr_open(fp_log)) return 1;
 	const double omega = PR.omega;
-	ierr = pr_assemble(fp_log);
+	ierr = pr_assemble(fp_log, NULL);
 	double *yr = (double *)calloc((size_t)np * np, sizeof(double));
 	double *yi = (double *)calloc((size_t)np * np, sizeof(double));
 	if (!ierr) fprintf(fp_log, "  %-10s %8s %13s\n", "excite", "iter", "residual");
@@ -640,7 +640,7 @@ int solve_eddy3d_pr(FILE *fp_log)
 		char label[64];
 		sprintf(label, "port%d", jc);
 		double qr[MAXPORT], qi[MAXPORT];
-		if (pr_solve_port(fp_log, jc, label, qr, qi)) {
+		if (pr_solve_port(fp_log, jc, fp_log, label, qr, qi)) {
 			ierr = 1;
 			break;
 		}
@@ -681,6 +681,93 @@ int solve_eddy3d_pr(FILE *fp_log)
 	free(yr); free(yi);
 	pr_close();
 	return ierr;
+}
+
+
+/*
+交流の発熱 (thermal + A、3 次以上の四面体)。2 次 (eddy3d_p2_heat_*) と同じ形 : 要素の σ(T) で組み立て直して解き、
+端子電流が cur (実数の波高値) になるよう解を倍率し、損失 ½σ|e|² (e = jωA + ∇φ) を**組み立てと同じ積分点で**
+節点の形状関数に掛けて荷重 f にする。Σ_a N_a = 1 なので Σf = ∫½σ|e|² = ½|I|²R が厳密 (連成系の行の恒等式)。
+*/
+int eddy3d_pr_heat_open(FILE *fp_log)
+{
+	fprintf(fp_log, "  AC heating (analysis = A, order-%d Nedelec) : frequency = %.6e [Hz]\n", TetOrder, Freq);
+	return pr_open(fp_log);
+}
+
+
+int eddy3d_pr_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f,
+	double *zr, double *zi, int it)
+{
+	const int nt = PR.nt, nn = PR.nn, n = PR.n, nA = PR.nA, nP = PR.nP;
+	const double omega = PR.omega;
+	if (pr_assemble(fp_log, sigelem)) return 1;
+	char label[64];
+	sprintf(label, "A%d", it);
+	double qr[MAXPORT], qi[MAXPORT];
+	if (pr_solve_port(fp_log, 1, NULL, label, qr, qi)) return 1;
+	const double ir = qr[1], ii = qi[1];
+	const double den = (ir * ir) + (ii * ii);
+	if (den <= 0) {
+		fprintf(fp_log, "*** thermal : no current flows through the port\n");
+		return 1;
+	}
+	*zr = Volt * ir / den;
+	*zi = -Volt * ii / den;
+	const double sr = cur * ir / den, si = -cur * ii / den;
+	for (int i = 0; i < n; i++) {
+		const double xr = PR.ur[i], xi = PR.ui[i];
+		PR.ur[i] = (sr * xr) - (si * xi);
+		PR.ui[i] = (sr * xi) + (si * xr);
+	}
+	for (int i = 0; i < nn; i++) f[i] = 0;
+	double (*wv)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+	double (*wc)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+	int32_t *dof = (int32_t *)malloc(PR_NDMAX * sizeof(int32_t));
+	int bad = 0;
+	for (int e = 0; (e < nt) && !bad; e++) {
+		const double sg = sigelem[e];
+		if (sg <= 0) continue;
+		pr_dofs(e, dof);
+		int32_t nd[TET_NMAX];
+		tet_nodes(e, nd);
+		const int nq = elem3d_nip(e);
+		for (int q = 0; q < nq; q++) {
+			double nv[ELEM_NMAX], g[ELEM_NMAX][3], w;
+			if (elem3d_ip(e, q, nv, g, &w)) { bad = 1; break; }
+			pr_basis_core(e, nv, g, wv, wc);
+			// e = jω A + ∇φ : 実部 = −ω A_i + ∇φ_r、虚部 = ω A_r + ∇φ_i
+			double er[3] = {0, 0, 0}, ei[3] = {0, 0, 0};
+			for (int k = 0; k < nA; k++) {
+				const double ar = PR.ur[dof[k]], ai = PR.ui[dof[k]];
+				for (int c = 0; c < 3; c++) {
+					er[c] += -omega * ai * wv[k][c];
+					ei[c] += omega * ar * wv[k][c];
+				}
+			}
+			for (int a = 0; a < nP; a++) {
+				const double pr = PR.ur[dof[nA + a]], pi = PR.ui[dof[nA + a]];
+				for (int c = 0; c < 3; c++) {
+					er[c] += pr * g[a][c];
+					ei[c] += pi * g[a][c];
+				}
+			}
+			const double qd = 0.5 * sg * (dot3(er, er) + dot3(ei, ei)) * w;
+			for (int a = 0; a < nP; a++) f[nd[a]] += qd * nv[a];
+		}
+	}
+	free(wv); free(wc); free(dof);
+	if (bad) {
+		fprintf(fp_log, "*** AC heating : a degenerate element\n");
+		return 1;
+	}
+	return 0;
+}
+
+
+void eddy3d_pr_heat_close(void)
+{
+	pr_close();
 }
 
 

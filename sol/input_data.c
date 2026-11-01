@@ -288,6 +288,7 @@ int input_data(FILE *fp)
 	ProfAxis[0] = ProfAxis[1] = 0;
 	MpiSolve = 0;
 	ExprOn[0] = ExprOn[1] = 0;
+	ExprT[0] = ExprT[1] = 0;
 	ExprBad[0] = ExprBad[1] = 0;
 	ExprStr[0][0] = ExprStr[1][0] = '\0';
 	RadExchange = 0;
@@ -1086,6 +1087,7 @@ int input_data(FILE *fp)
 			}
 			strcpy(ExprStr[k], buf);
 			ExprOn[k] = 1;
+			ExprT[k] = expr_uses_t(&ExprF[k]);
 		}
 		else if (!strcmp(strkey, "radiationexchange")) {
 			// radiationexchange = 1 : 輻射を課した露出面どうしの相互放射 (灰色・拡散、形態係数は
@@ -1707,6 +1709,11 @@ int input_data(FILE *fp)
 		if ((ConvTabN > 0) && (NConv < 1)) {
 			input_warn("convectiontemptable has no effect without convection (it scales "
 				"the h of the convection lines)");
+		}
+		if (RadExchange && ExprT[1]) {
+			printf("%s\n", "*** radiationexchange cannot be combined with a radiationexpr that depends on T "
+				"(the radiosity matrix is built once for constant emissivities)");
+			return 1;
 		}
 		if (RadExchange && (RadTabN > 0)) {
 			printf("%s\n", "*** radiationexchange cannot be combined with radiationtemptable "

@@ -385,6 +385,7 @@ EXTERN int MpiSolve;				// 1 : mpirun で行列ベクトル積を行ブロック
 EXTERN int ExprOn[2];				// 面の係数の位置の式 (0 : 対流 h、1 : 輻射 ε) がある
 EXTERN expr_t ExprF[2];				// 位置の式 (面の中心で評価して倍率にする)
 EXTERN char ExprStr[2][EXPR_MAXLEN];	// 位置の式の文字列 (ログ用)
+EXTERN int ExprT[2];				// 式が面の温度 T を含む (Newton 線形化の経路で面ごと・温度ごとに評価)
 EXTERN int ExprBad[2];				// 位置の式が負・非有限 (輻射は ε f > 1 も) になった面の数
 EXTERN int RadExchange;			// 1 : 輻射の面どうしの相互放射 (形態係数、構造格子)
 EXTERN int RadTabN;				// 輻射の ε の温度依存の折れ線の点数 (0 : ε は一定)

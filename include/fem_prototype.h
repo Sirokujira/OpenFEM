@@ -118,6 +118,9 @@ int p2_face_id(const int32_t *, int, const int32_t [3]);
 // eddy3d_pr.c (3 次以上の Nedelec)
 int solve_eddy3d_pr(FILE *);
 int solve_edge_test_pr(FILE *);
+int eddy3d_pr_heat_open(FILE *);
+int eddy3d_pr_heat_solve(FILE *, const double *, double, double *, double *, double *, int);
+void eddy3d_pr_heat_close(void);
 const int *tet_ho_index(int);
 
 // assemble.c (公開した材料係数)
@@ -254,5 +257,7 @@ FILE *mpi_fopen_out(const char *, const char *);
 // expr.c
 int expr_compile(const char *, expr_t *);
 double expr_eval(const expr_t *, double, double, double);
+int expr_uses_t(const expr_t *);
+double expr_eval_t(const expr_t *, double, double, double, double, double *);
 
 #endif		// _FEM_PROTOTYPE_H_

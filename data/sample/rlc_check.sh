@@ -4647,6 +4647,31 @@ awk '/^heatsink/{next} /^thermal/{print; print "heatcap = 2 3.45e6"; print "tran
 	"$WORK/tac2.ofe" > "$WORK/tac2_tr.ofe"
 th_run tac2_tr.ofe
 th_balance "10-node tets, AC (alpha = 3.9e-3), adiabatic transient (CN)"
+# (2c) 3 次の四面体 (bar_ho3.msh) の交流の発熱 : 次数 r の Nedelec (eddy3d_pr.c)。2 次と同じ形 (損失を組み立てと同じ積分点で
+#      節点の形状関数に掛けるので Σf = ½I²R が厳密)。1 Hz の交流 = DC の熱連成 (1e-8)、α = 0 で R = 熱連成なしの 3 次の A、
+#      体積平均の温度上昇 = q L²/(12 k) (格子は gmsh の非構造なので断面の点の温度差は見ない)
+cp "$SRC/bar_ho3.msh" "$WORK/"
+sed 's/^mesh = .*/mesh = bar_ho3.msh/' "$SRC/thermal_ac.ofe" > "$WORK/tac3.ofe"
+awk '/^frequency/{next} /^awall/{next} /^analysis/{print "analysis = R"; next} /^thermal/{print "thermal = 7.5"; next} {print}' "$WORK/tac3.ofe" > "$WORK/tac3_dc.ofe"
+th_run tac3_dc.ofe
+rdc3=$(th_r); tdc3=$(th_t)
+awk '/^frequency/{print "frequency = 1"; next} /^thermal/{print "thermal = 10.606601717798213"; next} {print}' "$WORK/tac3.ofe" > "$WORK/tac3_lf.ofe"
+th_run tac3_lf.ofe
+compare "order-3 tets : AC at 1 Hz (7.5 sqrt 2 A peak) == DC thermal (7.5 A) : R [ohm]" "$(th_r)" "$rdc3" 1e-8
+compare "order-3 tets : AC at 1 Hz == DC thermal : T_max [degC]" "$(th_t)" "$tdc3" 1e-8
+th_energy "order-3 tets, AC at 1 Hz"
+awk '/^tempco/{print "tempco = 2 0 0"; next} /^thermal/{print "thermal = 100"; next} {print}' "$WORK/tac3.ofe" > "$WORK/tac3_a0.ofe"
+th_run tac3_a0.ofe
+ra03=$(th_r)
+tma03=$(awk '/T_mean/ { print $8; exit }' "$WORK/ofe.log")
+th_energy "order-3 tets, AC, 100 kHz, alpha = 0"
+set -- $(awk -v f=1e5 -v sig=5.8e7 -v k=400 -v I=100 -v R="$ra03" -f "$SRC/ac_heat.awk")
+compare "order-3 tets, AC, 100 kHz : volume-mean temperature rise == q L^2 / (12 k) [K]" \
+	"$(awk -v t="$tma03" 'BEGIN { printf "%.12e", t - 20 }')" "$2" 1e-6
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho3.msh"; next} {print}' > "$WORK/tac3_unc.ofe"
+th_run tac3_unc.ofe
+compare "order-3 tets, AC, alpha = 0 : R == the uncoupled order-3 A [ohm]" "$ra03" \
+	"$(awk '/Z\(1,1\)/ { print $3; exit }' "$WORK/ofe.log")" 1e-6
 # (4) 弾くべき入力
 awk '/^frequency/{print "frequencysweep = 1e4 1e5"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_sw.ofe"
 th_reject "AC heating with frequencysweep" tacx_sw.ofe "cannot be combined with frequencysweep"
@@ -5096,6 +5121,44 @@ awk '/^convection/{print; print "convectionexpr = x - 0.005"; next} {print}' "$S
 ex_runerr "convectionexpr negative on some faces" thexx_neg.ofe "is negative or not finite on 80 exposed faces"
 awk '/^convection/{print "radiation = 0.8 30"; print "radiationexpr = 1 + 100 * x"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thexx_eps.ofe"
 ex_runerr "radiationexpr with e f > 1" thexx_eps.ofe "radiationexpr = 1 + 100 \* x is negative or not finite (or e f > 1)"
+
+# ---- 温度と位置の両方に依る式 (convectionexpr / radiationexpr に T、sol/expr.c の expr_eval_t) ----
+#
+# T (面の温度 [degC]) を含む式は h(T) の表と同じ Newton の経路で面の位置・積分点の温度ごとに評価し、df/dT は
+# 前進型の自動微分 (2 重数) で厳密に作る。同じ関数を表と式の 2 通りに書いて比べる (閉形式が要らない) :
+#   (a) h(T) = h (1 + 0.002 (T − 20)) を直線の表 (−100..2000 の 2 点) と式で : R・T_max が 1e-11、反復回数が一致
+#   (b) 位置と温度の積 (0.5 + 1.5 step(x − 0.005)) (1 + 0.002 (T − 20)) を「位置の式 × 温度の表」と 1 つの式で
+#   (c) 輻射の ε(T) = 0.2 + 0.004 T を表と式で (傾きが小さいと接線の誤りが反復回数に出ないので急にしてある)
+# 接線の q f' を落とす変異は答えを変えず反復回数だけを変える (20 -> 13、22 -> 16、14 -> 12。実測) ので回数を assert する。
+#   (d) 弾くべき入力 : 面で負になる T の式 (実行時)、相互放射との併用
+echo "[thermal h(T, r) expression] convection / emissivity expressions in the face temperature T"
+cp "$SRC/thermal_conv.ofe" "$SRC/thermal_rad.ofe" "$WORK/"
+txr() {	# txr <ofe> : "R T_max 反復回数"
+	(cd "$WORK" && "$OFE" -n 2 "$1" > /dev/null 2>&1) || { echo "x x x"; return; }
+	awk '/^  R = / && !r { r = $3 } /^  T_max = / && !t { t = $3 } /converged in/ { n = $(NF - 1) } END { printf "%s %s %s", r, t, n }' "$WORK/ofe.log"
+}
+tx_same() {	# tx_same <ラベル> <表の ofe> <式の ofe>
+	set -- "$1" $(txr "$2") $(txr "$3")
+	res=$(awk -v r1="$2" -v t1="$3" -v n1="$4" -v r2="$5" -v t2="$6" -v n2="$7" 'BEGIN { if ((r1 == "x") || (r2 == "x")) { print "NG (a run failed)"; exit }
+		dr = r2 / r1 - 1; dt = t2 / t1 - 1; if (dr < 0) dr = -dr; if (dt < 0) dt = -dt
+		ok = ((dr < 1e-11) && (dt < 1e-11) && (n1 == n2) && (n1 > 1)) ? "OK" : "NG"
+		printf "%s (R %.1e, T_max %.1e, %d / %d iterations)", ok, dr, dt, n1, n2 }')
+	echo "  $1 : table == expression in T : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+awk '/^convection/{print; print "convectiontemptable = -100 0.76  2000 4.96"; next} {print}' "$WORK/thermal_conv.ofe" > "$WORK/txa_t.ofe"
+awk '/^convection/{print; print "convectionexpr = 1 + 0.002 * (T - 20)"; next} {print}' "$WORK/thermal_conv.ofe" > "$WORK/txa_e.ofe"
+tx_same "(a) h(T) = h (1 + 0.002 (T - 20))" txa_t.ofe txa_e.ofe
+awk '/^convection/{print; print "convectiontemptable = -100 0.76  2000 4.96"; print "convectionexpr = 0.5 + 1.5 * step(x - 0.005)"; next} {print}' "$WORK/thermal_conv.ofe" > "$WORK/txb_t.ofe"
+awk '/^convection/{print; print "convectionexpr = (0.5 + 1.5 * step(x - 0.005)) * (1 + 0.002 * (T - 20))"; next} {print}' "$WORK/thermal_conv.ofe" > "$WORK/txb_e.ofe"
+tx_same "(b) h(x, T) = h (0.5 + 1.5 step(x - 0.005)) (1 + 0.002 (T - 20))" txb_t.ofe txb_e.ofe
+awk '/^radiation =/{print; print "radiationtemptable = 0 0.2  200 1.0"; next} {print}' "$WORK/thermal_rad.ofe" > "$WORK/txc_t.ofe"
+awk '/^radiation =/{print; print "radiationexpr = 0.2 + 0.004 * T"; next} {print}' "$WORK/thermal_rad.ofe" > "$WORK/txc_e.ofe"
+tx_same "(c) e(T) = 0.2 + 0.004 T" txc_t.ofe txc_e.ofe
+awk '/^convection/{print; print "convectionexpr = (T - 1000) / 1000"; next} {print}' "$WORK/thermal_conv.ofe" > "$WORK/txx_neg.ofe"
+th_reject "convectionexpr in T that becomes negative on the faces" txx_neg.ofe "is negative or not finite at"
+awk '/^radiation =/{print; print "radiationexpr = 0.2 + 0.004 * T"; print "radiationexchange = 1"; next} {print}' "$WORK/thermal_rad.ofe" > "$WORK/txx_rx.ofe"
+th_reject "radiationexpr in T with radiationexchange" txx_rx.ofe "cannot be combined with a radiationexpr that depends on T"
 
 # ---- 面どうしの相互放射 (radiationexchange、構造格子) ----
 #
@@ -5819,7 +5882,7 @@ grep -q "not connected through awall" "$WORK/ofe.log" || { echo "  *** it was re
 #   (h) 辺要素の自己検証 (analysis = E) : 3〜7 次の直線の箱 (box_p3..p7) で、次数 r − 1 の一般の場 (Pra) と
 #       r' × q (q は r − 1 次の同次式、P_{r−1}³ に入らない、Prb) の σ 重み L2 射影の誤差 0・回転のエネルギー。
 #       3 次は異方性の ν と剛体回転した格子でも。曲がった格子 (coax_p3) は理由をつけて弾く
-#   (i) 対応しない組み合わせ (ゲージ・過渡解析・交流の発熱・B-H 曲線) は理由をつけて弾く (直接解法はゲージなしの A を
+#   (i) 対応しない組み合わせ (ゲージ・過渡解析・B-H 曲線) は理由をつけて弾く (交流の発熱は [thermal] の (2c)。直接解法はゲージなしの A を
 #       入力段が弾く)
 echo "[A order 3+] 3-D eddy current on tetrahedra of order 3 and up (order-r Nedelec / nodal elements)"
 cp "$SRC/bar_ho2.msh" "$SRC/bar_ho3.msh" "$SRC/bar_ho4.msh" "$SRC/bar_air_ho2.msh" "$SRC/bar_air_ho3.msh" "$WORK/"
@@ -5924,11 +5987,8 @@ grep -q "needs straight-sided elements" "$WORK/ofe.log" || { echo "  *** it was 
 grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho3.msh"; next} {print}' > "$WORK/prbase.ofe"
 awk '/^analysis/{print "gauge = 1"} {print}' "$WORK/prbase.ofe" > "$WORK/prx_g.ofe"
 th_reject "order-3 A with gauge = 1" prx_g.ofe "supports gauge = 0 and the iterative solver only"
-cp "$SRC/thermal_ac.ofe" "$WORK/"
-sed 's/^mesh = .*/mesh = bar_ho3.msh/' "$WORK/thermal_ac.ofe" > "$WORK/prx_th.ofe"
-th_reject "order-3 A with thermal" prx_th.ofe "supports the frequency domain (no transient / thermal)"
-awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"} {print}' "$WORK/prbase.ofe" > "$WORK/prx_t.ofe"
-th_reject "order-3 A in the time domain" prx_t.ofe "supports the frequency domain"
+awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"} {print}' "$WORK/prbase.ofe" > "$WORK/prx_tr.ofe"
+th_reject "order-3 A transient" prx_tr.ofe "supports the frequency domain and thermal (no A transient)"
 awk '/^region = 1 2/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "bh = 2 10000 1.2"; print "current = 1"; next} {print}' "$WORK/prbase.ofe" > "$WORK/prx_bh.ofe"
 th_reject "order-3 A with a B-H curve" prx_bh.ofe "supports linear materials"
 

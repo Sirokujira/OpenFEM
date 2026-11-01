@@ -72,8 +72,15 @@ static int th_emat(int64_t c)
 // 範囲の外は端の値で傾き 0)。表が無ければ対流は線形 (従来の経路)
 static int th_convnl(void)
 {
-	return ((ConvH > 0) && (ConvTabN > 0));
+	return ((ConvH > 0) && ((ConvTabN > 0) || ExprT[0]));		// h(T) の表か、T を含む convectionexpr
 }
+
+
+// T を含む式 (convectionexpr / radiationexpr) : surf_bc が面の位置を覚え、surf_q がその位置と面の温度で
+// f と df/dT を評価して熱流と接線に掛ける (h(T) の表と同じ Newton の経路)。負・非有限 (輻射は ε f > 1) に
+// なった点の数を ExprBadT に数え、線形化のあとで入力エラーにする
+static double ExprPos[2][3];
+static int ExprBadT[2];
 
 
 static int th_nonlin(void)
@@ -122,9 +129,26 @@ static void surf_q(int rad, double hc, double ta, double tg, double *qv, double 
 		return;
 	}
 	double fp;
-	const double fv = conv_tab(tg, &fp);
+	const double fv = ((ConvTabN > 0) ? conv_tab(tg, &fp) : 1);
+	if (ConvTabN < 1) fp = 0;
 	*qv = hc * fv * (tg - ta);
 	*dq = hc * (fv + (fp * (tg - ta)));
+}
+
+
+// surf_q に T を含む式の倍率を掛ける (q f、接線は q' f + q f')
+static void surf_q_expr(int rad, double hc, double tg, double *qv, double *dq)
+{
+	const int k = ((rad == 1) ? 1 : 0);
+	if (!ExprT[k]) return;
+	double fp;
+	double f = expr_eval_t(&ExprF[k], ExprPos[k][0], ExprPos[k][1], ExprPos[k][2], tg, &fp);
+	if (!((f >= 0) && (f <= 1e300)) || !((fp >= -1e300) && (fp <= 1e300)) || (k && ((hc * f) > 1))) {
+		ExprBadT[k]++;
+		f = fp = 0;
+	}
+	*dq = ((*dq) * f) + ((*qv) * fp);
+	*qv = (*qv) * f;
 }
 
 
@@ -363,6 +387,12 @@ static const surfbc_t *surf_bc(int rad, double xc, double yc, double zc, int *id
 			const double r[3] = {xc, yc, zc};
 			double sl;
 			prof[k] = list[e];
+			if (ExprT[k]) {
+				// T を含む式は面の温度が要るので、位置を覚えて surf_q_expr に任せる (折れ線はここで掛ける)
+				ExprPos[k][0] = xc; ExprPos[k][1] = yc; ExprPos[k][2] = zc;
+				if (ProfN[k] > 0) prof[k].c = list[e].c * tab_eval(ProfN[k], ProfX[k], ProfF[k], r[ProfAxis[k]], &sl);
+				return &prof[k];
+			}
 			if (!ExprOn[k]) {
 				prof[k].c = list[e].c * tab_eval(ProfN[k], ProfX[k], ProfF[k], r[ProfAxis[k]], &sl);
 				return &prof[k];
@@ -579,7 +609,7 @@ static double surf_faces_grid(crs_t *B, double *g, const double *t, const double
 						dq = 4 * RX.qii[fid] * STEFAN * tk * tk * tk;
 					}
 					else {
-						surf_q(rad, hc, ta, tg, &qv, &dq, &bad);
+						surf_q(rad, hc, ta, tg, &qv, &dq, &bad); surf_q_expr(rad, hc, tg, &qv, &dq);
 					}
 					qsum += w * qv;
 					for (int m = 0; m < 4; m++) {
@@ -673,7 +703,7 @@ static double surf_quad(crs_t *B, double *g, const double *t, int rad, const int
 				dq = 4 * RX.qii[fid] * STEFAN * tk * tk * tk;
 			}
 			else {
-				surf_q(rad, hc, ta, tg, &qv, &dq, bad);
+				surf_q(rad, hc, ta, tg, &qv, &dq, bad); surf_q_expr(rad, hc, tg, &qv, &dq);
 			}
 			qsum += w * qv;
 			for (int m = 0; m < 4; m++) {
@@ -752,7 +782,7 @@ static double surf_tri_ho(crs_t *B, double *g, const double *t, int rad, int f,
 				dq = 4 * RX.qii[fi] * STEFAN * tk * tk * tk;
 			}
 			else {
-				surf_q(rad, hc, ta, tg, &qv, &dq, bad);
+				surf_q(rad, hc, ta, tg, &qv, &dq, bad); surf_q_expr(rad, hc, tg, &qv, &dq);
 			}
 			qsum += w * qv;
 			for (int a = 0; a < nen; a++) {
@@ -819,7 +849,7 @@ static double surf_face_ho(crs_t *B, double *g, const double *t, int rad, int f,
 				dq = 4 * RX.qii[fi] * STEFAN * tk * tk * tk;
 			}
 			else {
-				surf_q(rad, hc, ta, tg, &qv, &dq, bad);
+				surf_q(rad, hc, ta, tg, &qv, &dq, bad); surf_q_expr(rad, hc, tg, &qv, &dq);
 			}
 			qsum += w * qv;
 			for (int a = 0; a < nen; a++) {
@@ -896,7 +926,7 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 					const double tg = (nn[0] * t[nd[0]]) + (nn[1] * t[nd[1]]);
 					const double w = len / 2;
 					double qv, dq;
-					surf_q(rad, hc, ta, tg, &qv, &dq, &bad);
+					surf_q(rad, hc, ta, tg, &qv, &dq, &bad); surf_q_expr(rad, hc, tg, &qv, &dq);
 					qsum += w * qv;
 					for (int m = 0; m < 2; m++) {
 						ge[m] += w * (dq * tg - qv) * nn[m];
@@ -1021,7 +1051,7 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 					dq = 4 * RX.qii[fi] * STEFAN * tk * tk * tk;
 				}
 				else {
-					surf_q(rad, hc, ta, tg, &qv, &dq, &bad);
+					surf_q(rad, hc, ta, tg, &qv, &dq, &bad); surf_q_expr(rad, hc, tg, &qv, &dq);
 				}
 				qsum += w * qv;
 				for (int m = 0; m < 3; m++) {
@@ -2331,6 +2361,9 @@ static int th_electric(FILE *fp_log, crs_t *A, const double *scell, unsigned cha
 		else if (MeshMode && (TetOrder == 2) && ((NHex + NPrism + NPyr) == 0)) {
 			if (eddy3d_p2_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
 		}
+		else if (MeshMode && (TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0)) {
+			if (eddy3d_pr_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
+		}
 		else if (eddy3d_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
 		if (zr <= 0) {
 			fprintf(fp_log, "*** thermal : non-passive impedance R = %.6e (iteration %d)\n",
@@ -2464,6 +2497,7 @@ static int th_radlin(FILE *fp_log, crs_t *B, const double *b0, double *gr,
 	for (int64_t e = 0; e < nnz; e++) B->val[e] = b0[e];
 	for (int64_t i = 0; i < B->n; i++) gr[i] = 0;
 	if (RX.on) rx_update(tn, kcell);	// 相互放射 : 他の面からの項を今の温度で
+	ExprBadT[0] = ExprBadT[1] = 0;
 	if ((RadEps > 0) && (surf_faces(B, gr, tn, kcell, 1, NULL) < -1e299)) {
 		fprintf(fp_log, "*** thermal : the absolute temperature became non-positive "
 			"on a radiating face (iteration %d)\n", it);
@@ -2471,6 +2505,14 @@ static int th_radlin(FILE *fp_log, crs_t *B, const double *b0, double *gr,
 	}
 	// h(T) の対流も同じく線形化する (表が無ければ対流は b0 と gc に入っている)
 	if (th_convnl()) surf_faces(B, gr, tn, kcell, 3, NULL);
+	for (int k = 0; k < 2; k++) {
+		if (ExprBadT[k] > 0) {
+			fprintf(fp_log, "*** thermal : %s = %s is negative or not finite%s at %d surface points "
+				"(iteration %d)\n", (k ? "radiationexpr" : "convectionexpr"), ExprStr[k],
+				(k ? " (or e f > 1)" : ""), ExprBadT[k], it);
+			return 1;
+		}
+	}
 	return 0;
 }
 
@@ -2854,6 +2896,9 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	// 10 節点四面体だけの格子の交流の発熱は 2 次の Nedelec (eddy3d_p2.c) で解く
 	const int p2tet = (MeshMode && (MeshDim == 3) && (TetOrder == 2) && ((NHex + NPrism + NPyr) == 0)
 		&& (Analysis & ANALYSIS_A));
+	// 3 次以上の四面体だけの格子の交流の発熱は次数 r の Nedelec (eddy3d_pr.c)
+	const int prtet = (MeshMode && (MeshDim == 3) && (TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0)
+		&& (Analysis & ANALYSIS_A));
 
 	fprintf(fp_log, "\n=== electro-thermal analysis ===\n");
 	// 非構造格子は 1 次の 3 次元要素 (四面体・六面体・角柱・ピラミッド、混在可)、高次の四面体、
@@ -2866,7 +2911,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 		}
 	}
 	else if ((Analysis & ANALYSIS_F) || (MeshMode && ((MeshDim != 3)
-	         || ((TetOrder >= 2) && ((Analysis & ANALYSIS_A) && !p2tet))))) {
+	         || ((TetOrder >= 2) && ((Analysis & ANALYSIS_A) && !p2tet && !prtet))))) {
 		if (Analysis & ANALYSIS_F) {
 			fprintf(fp_log, "*** AC heating with analysis F (thermal + F) needs a 2-D cross-section "
 				"mesh of 3-node triangles\n");
@@ -3057,7 +3102,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	// 交流 : A-φ の辺の情報と行列は反復の間持っておく
 	int ehopen = 0;
 	if (!ierr && th_ac() && !(MeshMode && (MeshDim == 2))) {
-		ierr = (p2tet ? eddy3d_p2_heat_open(fp_log) : eddy3d_heat_open(fp_log));
+		ierr = (p2tet ? eddy3d_p2_heat_open(fp_log) : prtet ? eddy3d_pr_heat_open(fp_log) : eddy3d_heat_open(fp_log));
 		ehopen = 1;
 	}
 	if (!ierr) {
@@ -3066,6 +3111,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	}
 	if (ehopen) {
 		if (p2tet) eddy3d_p2_heat_close();
+		else if (prtet) eddy3d_pr_heat_close();
 		else eddy3d_heat_close();
 	}
 	*xport = ThX;

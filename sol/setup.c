@@ -236,7 +236,7 @@ static int setup_unstruct(void)
 		}
 		const char *why = NULL;
 		if (nl) why = "linear materials (no bh / ja)";
-		else if (TransientOn || ThermalOn) why = "the frequency domain (no transient / thermal)";
+		else if (TransientOn && !ThermalOn) why = "the frequency domain and thermal (no A transient)";
 		else if (GaugeTree || Direct) why = "gauge = 0 and the iterative solver";
 		else if (Hdf5Out) why = "no hdf5 series";
 		if (why != NULL) {

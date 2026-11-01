@@ -8,7 +8,9 @@ expr.c
 	項     := 単項 (('*' | '/') 単項)*
 	単項   := ('-' | '+') 単項 | 累乗
 	累乗   := 一次 ('^' 単項)?          (右結合 : 2^-x, 2^3^2 = 2^9)
-	一次   := 数 | x | y | z | pi | 関数 '(' 式 (',' 式)? ')' | '(' 式 ')'
+	一次   := 数 | x | y | z | T | pi | 関数 '(' 式 (',' 式)? ')' | '(' 式 ')'
+	         (T は面の温度 [degC]。T を含む式は熱連成の Newton 線形化の経路に入り、df/dT は
+	          expr_eval_t の前進型の自動微分 (2 重数) で厳密に作る)
 	関数   : sin cos tan exp log sqrt abs tanh step (1 引数)、min max pow (2 引数)
 	         step(u) = (u >= 0 ? 1 : 0)
 
@@ -20,7 +22,7 @@ expr.c
 #include "fem_prototype.h"
 
 enum {
-	EX_NUM = 0, EX_X, EX_Y, EX_Z,
+	EX_NUM = 0, EX_X, EX_Y, EX_Z, EX_T,
 	EX_ADD, EX_SUB, EX_MUL, EX_DIV, EX_POW, EX_NEG,
 	EX_SIN, EX_COS, EX_TAN, EX_EXP, EX_LOG, EX_SQRT, EX_ABS, EX_TANH, EX_STEP,
 	EX_MIN, EX_MAX
@@ -85,6 +87,7 @@ static void ex_primary(exparse_t *p)
 			p->pos++;
 		}
 		name[n] = '\0';
+		if (!strcmp(name, "t")) { ex_emit(p, EX_T, 0); return; }		// 面の温度 T (名前は小文字に直してある)
 		if (!strcmp(name, "x")) { ex_emit(p, EX_X, 0); return; }
 		if (!strcmp(name, "y")) { ex_emit(p, EX_Y, 0); return; }
 		if (!strcmp(name, "z")) { ex_emit(p, EX_Z, 0); return; }
@@ -199,7 +202,7 @@ int expr_compile(const char *s, expr_t *e)
 	int depth = 0, dmax = 0;
 	for (int i = 0; i < e->n; i++) {
 		const int op = e->op[i];
-		if (op <= EX_Z) depth++;
+		if (op <= EX_T) depth++;
 		else if ((op >= EX_ADD) && (op <= EX_POW)) depth--;
 		else if ((op == EX_MIN) || (op == EX_MAX)) depth--;
 		if (depth > dmax) dmax = depth;
@@ -222,6 +225,7 @@ double expr_eval(const expr_t *e, double x, double y, double z)
 		case EX_X: st[sp++] = x; break;
 		case EX_Y: st[sp++] = y; break;
 		case EX_Z: st[sp++] = z; break;
+		case EX_T: st[sp++] = 0; break;		// 温度を含む式は expr_eval_t で評価する
 		case EX_ADD: sp--; st[sp - 1] = st[sp - 1] + st[sp]; break;
 		case EX_SUB: sp--; st[sp - 1] = st[sp - 1] - st[sp]; break;
 		case EX_MUL: sp--; st[sp - 1] = st[sp - 1] * st[sp]; break;
@@ -243,4 +247,77 @@ double expr_eval(const expr_t *e, double x, double y, double z)
 		}
 	}
 	return ((sp == 1) ? st[0] : 0);
+}
+
+
+// 式が温度 T を含むか
+int expr_uses_t(const expr_t *e)
+{
+	for (int i = 0; i < e->n; i++) {
+		if (e->op[i] == EX_T) return 1;
+	}
+	return 0;
+}
+
+
+// 温度 T [degC] での値と df/dT (前進型の自動微分 : 値 v と T についての微分 d を組で運ぶ)。値は expr_eval と
+// 同じ順の同じ演算なので、T を含まない式なら expr_eval と同じ double になる
+double expr_eval_t(const expr_t *e, double x, double y, double z, double t, double *dfdt)
+{
+	double v[EXPR_MAXSTACK], d[EXPR_MAXSTACK];
+	int sp = 0;
+	for (int i = 0; i < e->n; i++) {
+		const int op = e->op[i];
+		if (op <= EX_T) {
+			v[sp] = ((op == EX_NUM) ? e->val[i] : (op == EX_X) ? x : (op == EX_Y) ? y : (op == EX_Z) ? z : t);
+			d[sp] = ((op == EX_T) ? 1 : 0);
+			sp++;
+			continue;
+		}
+		if ((op >= EX_ADD) && (op <= EX_POW)) {
+			sp--;
+			const double a = v[sp - 1], da = d[sp - 1], b = v[sp], db = d[sp];
+			switch (op) {
+			case EX_ADD: v[sp - 1] = a + b; d[sp - 1] = da + db; break;
+			case EX_SUB: v[sp - 1] = a - b; d[sp - 1] = da - db; break;
+			case EX_MUL: v[sp - 1] = a * b; d[sp - 1] = (da * b) + (a * db); break;
+			case EX_DIV: v[sp - 1] = a / b; d[sp - 1] = ((da * b) - (a * db)) / (b * b); break;
+			default: {
+				// d(a^b) = b a^(b-1) a' + a^b ln(a) b' (b' = 0 なら第 2 項は無い : a <= 0 でもよい)
+				const double p = pow(a, b);
+				double dp = ((da != 0) ? (b * pow(a, b - 1) * da) : 0);
+				if (db != 0) dp += p * log(a) * db;
+				v[sp - 1] = p;
+				d[sp - 1] = dp;
+				break;
+			}
+			}
+			continue;
+		}
+		if ((op == EX_MIN) || (op == EX_MAX)) {
+			sp--;
+			const int take = ((op == EX_MIN) ? (v[sp] < v[sp - 1]) : (v[sp] > v[sp - 1]));
+			if (take) {
+				v[sp - 1] = v[sp];
+				d[sp - 1] = d[sp];
+			}
+			continue;
+		}
+		const double a = v[sp - 1], da = d[sp - 1];
+		switch (op) {
+		case EX_NEG: v[sp - 1] = -a; d[sp - 1] = -da; break;
+		case EX_SIN: v[sp - 1] = sin(a); d[sp - 1] = cos(a) * da; break;
+		case EX_COS: v[sp - 1] = cos(a); d[sp - 1] = -sin(a) * da; break;
+		case EX_TAN: { const double c = cos(a); v[sp - 1] = tan(a); d[sp - 1] = da / (c * c); break; }
+		case EX_EXP: v[sp - 1] = exp(a); d[sp - 1] = v[sp - 1] * da; break;
+		case EX_LOG: v[sp - 1] = log(a); d[sp - 1] = da / a; break;
+		case EX_SQRT: v[sp - 1] = sqrt(a); d[sp - 1] = da / (2 * v[sp - 1]); break;
+		case EX_ABS: v[sp - 1] = fabs(a); d[sp - 1] = ((a < 0) ? -da : da); break;
+		case EX_TANH: v[sp - 1] = tanh(a); d[sp - 1] = (1 - (v[sp - 1] * v[sp - 1])) * da; break;
+		case EX_STEP: v[sp - 1] = ((a >= 0) ? 1.0 : 0.0); d[sp - 1] = 0; break;
+		default: break;
+		}
+	}
+	*dfdt = ((sp == 1) ? d[0] : 0);
+	return ((sp == 1) ? v[0] : 0);
 }
