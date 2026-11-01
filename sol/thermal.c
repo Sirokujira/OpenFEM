@@ -661,6 +661,75 @@ static double surf_quad(crs_t *B, double *g, const double *t, int rad, const int
 }
 
 
+// 高次の四面体の露出面 f (曲がった三角形) : 親の四面体の形状関数を面に制限して
+// (反対側の頂点の λ = 0) 面の Duffy 積分 (各方向 p + 2 点) で対流・輻射・h(T) を組む。
+// 面積要素は等パラメトリック写像の |∂x/∂μ1 × ∂x/∂μ2|。接線・右辺・熱の評価点は同じ
+static double surf_tri_ho(crs_t *B, double *g, const double *t, int rad, int f,
+	double hc, double ta, int *bad)
+{
+	const int e = TFaceEl[f];
+	const int32_t *cn = &TFace[f * 4];
+	int32_t nd[TET_NMAX];
+	const int nen = tet_nodes(e, nd);
+	int fa[3];
+	for (int k = 0; k < 3; k++) {
+		fa[k] = 0;
+		for (int l = 0; l < 4; l++) {
+			if (nd[l] == cn[k]) fa[k] = l;
+		}
+	}
+	double mu[36][3], wq[36];
+	const int nq = tri_quad_pub(TetOrder + 2, mu, wq);
+	static double me[TET_NMAX][TET_NMAX];
+	double ge[TET_NMAX], qsum = 0;
+	for (int a = 0; a < nen; a++) {
+		ge[a] = 0;
+		for (int b = 0; b < nen; b++) me[a][b] = 0;
+	}
+	for (int q = 0; q < nq; q++) {
+		double nv[TET_NMAX], t1[3], t2[3];
+		tet_face_shape(e, fa, mu[q], nv, t1, t2);
+		const double cx = (t1[1] * t2[2]) - (t1[2] * t2[1]);
+		const double cy = (t1[2] * t2[0]) - (t1[0] * t2[2]);
+		const double cz = (t1[0] * t2[1]) - (t1[1] * t2[0]);
+		const double w = wq[q] * sqrt((cx * cx) + (cy * cy) + (cz * cz));
+		double tg = 0;
+		if (t) {
+			for (int a = 0; a < nen; a++) tg += nv[a] * t[nd[a]];
+		}
+		if (!rad) {
+			for (int a = 0; a < nen; a++) {
+				ge[a] += hc * ta * w * nv[a];
+				for (int b = 0; b < nen; b++) me[a][b] += hc * w * nv[a] * nv[b];
+			}
+			if (t) qsum += hc * w * (tg - ta);
+		}
+		else {
+			double qv, dq;
+			surf_q(rad, hc, ta, tg, &qv, &dq, bad);
+			qsum += w * qv;
+			for (int a = 0; a < nen; a++) {
+				ge[a] += w * ((dq * tg) - qv) * nv[a];
+				for (int b = 0; b < nen; b++) me[a][b] += w * dq * nv[a] * nv[b];
+			}
+		}
+	}
+	if (B) {
+		for (int a = 0; a < nen; a++) {
+			for (int b = 0; b < nen; b++) {
+				if (me[a][b] == 0) continue;
+				const int64_t pos = crs_find_tri(B, nd[a], nd[b]);
+				if (pos >= 0) B->val[pos] += me[a][b];
+			}
+		}
+	}
+	if (g) {
+		for (int a = 0; a < nen; a++) g[nd[a]] += ge[a];
+	}
+	return qsum;
+}
+
+
 // surf_faces_grid の四面体版 (露出面は tet_faces_build で作った三角形)。
 // 対流の面の質量は h A (1 + δ_ij) / 12、右辺は h T_amb A / 3、熱は
 // h A (3 節点の平均 - T_amb) (いずれも 1 次の三角形で厳密)。
@@ -775,6 +844,11 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 		if ((bc == NULL) || (bc->c <= 0)) continue;
 		nface++;
 		const double hc = bc->c, ta = bc->t;
+		if (TetOrder >= 2) {
+			// 高次の四面体 : 曲がった面を親の要素の形状関数で積分する
+			qsum += surf_tri_ho(B, g, t, rad, f, hc, ta, &bad);
+			continue;
+		}
 
 		const double ax = Xp[nd[1]] - Xp[nd[0]], ay = Yp[nd[1]] - Yp[nd[0]], az = Zp[nd[1]] - Zp[nd[0]];
 		const double bx = Xp[nd[2]] - Xp[nd[0]], by = Yp[nd[2]] - Yp[nd[0]], bz = Zp[nd[2]] - Zp[nd[0]];
@@ -1550,22 +1624,30 @@ static void rx_update(const double *tn, const double *kcell)
 // 四面体以外の 1 次要素 (六面体・角柱・ピラミッド) : 剛性と同じ積分点 (elem3d_ip) で
 // K_ij = Σ w c ∇N_i・∇N_j、発熱 f_i = Σ w σ|∇φ|² N_i、質量 M_ij = Σ w c N_i N_j、
 // 要素の温度 = Σ w N_i T_i / Σ w (1 次補間の体積平均)
+// 積分点の経路 (gen_*) で組む最初の要素。1 次の四面体は閉形式の経路 (tet_*) のまま
+// (従来の答えとバイト一致)、高次の四面体は積分点の経路に入れる
+static int gen_first(void)
+{
+	return ((TetOrder >= 2) ? 0 : NTet);
+}
+
+
 static void gen_assemble(crs_t *A, const double *coef, int mass)
 {
 	const int ne = elem3d_count();
-	for (int e = NTet; e < ne; e++) {
+	for (int e = gen_first(); e < ne; e++) {
 		const double c = coef[e];
 		if (c <= 0) continue;
 		int32_t nd[ELEM_NMAX];
 		const int nen = elem3d_nodes(e, nd);
 		const int nq = elem3d_nip(e);
-		double ke[8][8];
+		double ke[ELEM_NMAX][ELEM_NMAX];
 		for (int l = 0; l < nen; l++) {
 			for (int m = 0; m < nen; m++) ke[l][m] = 0;
 		}
 		int bad = 0;
 		for (int q = 0; q < nq; q++) {
-			double nv[8], g[8][3], w;
+			double nv[ELEM_NMAX], g[ELEM_NMAX][3], w;
 			if (elem3d_ip(e, q, nv, g, &w)) { bad = 1; break; }
 			for (int l = 0; l < nen; l++) {
 				for (int m = 0; m < nen; m++) {
@@ -1588,14 +1670,14 @@ static void gen_assemble(crs_t *A, const double *coef, int mass)
 static void gen_joule(const double *phi, const double *sig, double *f)
 {
 	const int ne = elem3d_count();
-	for (int e = NTet; e < ne; e++) {
+	for (int e = gen_first(); e < ne; e++) {
 		const double sg = sig[e];
 		if (sg <= 0) continue;
 		int32_t nd[ELEM_NMAX];
 		const int nen = elem3d_nodes(e, nd);
 		const int nq = elem3d_nip(e);
 		for (int q = 0; q < nq; q++) {
-			double nv[8], g[8][3], w;
+			double nv[ELEM_NMAX], g[ELEM_NMAX][3], w;
 			if (elem3d_ip(e, q, nv, g, &w)) break;
 			double ex = 0, ey = 0, ez = 0;
 			for (int l = 0; l < nen; l++) {
@@ -1618,7 +1700,7 @@ static double gen_mean(int e, const double *tn, double *vol)
 	const int nq = elem3d_nip(e);
 	double v = 0, ts = 0;
 	for (int q = 0; q < nq; q++) {
-		double nv[8], g[8][3], w;
+		double nv[ELEM_NMAX], g[ELEM_NMAX][3], w;
 		if (elem3d_ip(e, q, nv, g, &w)) break;
 		v += w;
 		if (tn) {
@@ -1660,7 +1742,7 @@ static void tet_assemble(crs_t *A, const double *coef)
 	}
 	crs_zero(A);
 	gen_assemble(A, coef, 0);
-	for (int e = 0; e < NTet; e++) {
+	for (int e = 0; (TetOrder < 2) && (e < NTet); e++) {
 		const double c = coef[e];
 		if (c <= 0) continue;
 		const int32_t *nd = &Tet[e * 4];
@@ -1684,7 +1766,7 @@ static void tet_joule(const double *phi, const double *sig, double *f)
 {
 	for (int i = 0; i < NNode; i++) f[i] = 0;
 	gen_joule(phi, sig, f);
-	for (int e = 0; e < NTet; e++) {
+	for (int e = 0; (TetOrder < 2) && (e < NTet); e++) {
 		const double sg = sig[e];
 		if (sg <= 0) continue;
 		const int32_t *nd = &Tet[e * 4];
@@ -1710,7 +1792,7 @@ static void tet_mass(crs_t *A, const double *coef)
 	}
 	crs_zero(A);
 	gen_assemble(A, coef, 1);
-	for (int e = 0; e < NTet; e++) {
+	for (int e = 0; (TetOrder < 2) && (e < NTet); e++) {
 		const double c = coef[e];
 		if (c <= 0) continue;
 		const int32_t *nd = &Tet[e * 4];
@@ -1898,7 +1980,7 @@ static double th_celltemp(const double *tn, const double *kcell, double *tcell)
 	}
 	if (MeshMode) {
 		// 四面体 : 4 節点の平均 (1 次補間の体積平均)
-		for (int e = 0; e < NTet; e++) {
+		for (int e = 0; (TetOrder < 2) && (e < NTet); e++) {
 			if (kcell[e] <= 0) continue;
 			double t = 0;
 			for (int l = 0; l < 4; l++) {
@@ -1909,7 +1991,7 @@ static double th_celltemp(const double *tn, const double *kcell, double *tcell)
 			tcell[e] = t;
 		}
 		const int ne = elem3d_count();
-		for (int e = NTet; e < ne; e++) {
+		for (int e = gen_first(); e < ne; e++) {
 			if (kcell[e] <= 0) continue;
 			double v;
 			tcell[e] = gen_mean(e, tn, &v);
@@ -1953,7 +2035,7 @@ static double th_tmean(const double *tcell, const double *scell)
 		return ((vsum > 0) ? (tsum / vsum) : Temperature);
 	}
 	if (MeshMode) {
-		for (int e = 0; e < NTet; e++) {
+		for (int e = 0; (TetOrder < 2) && (e < NTet); e++) {
 			if (scell[e] <= 0) continue;
 			double gr[4][3], v;
 			if (tet_grad_pub(&Tet[e * 4], gr, &v)) continue;
@@ -1961,7 +2043,7 @@ static double th_tmean(const double *tcell, const double *scell)
 			tsum += v * tcell[e];
 		}
 		const int ne = elem3d_count();
-		for (int e = NTet; e < ne; e++) {
+		for (int e = gen_first(); e < ne; e++) {
 			if (scell[e] <= 0) continue;
 			double v;
 			gen_mean(e, NULL, &v);
@@ -2391,7 +2473,8 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 			return 1;
 		}
 	}
-	else if ((Analysis & ANALYSIS_F) || (MeshMode && ((MeshDim != 3) || (TetOrder >= 2)
+	else if ((Analysis & ANALYSIS_F) || (MeshMode && ((MeshDim != 3)
+	         || ((TetOrder >= 2) && ((MeshElem != MESHELEM_TET) || (Analysis & ANALYSIS_A) || RadExchange))
 	         || (HexNen > 8) || (PrismNen > 6)))) {
 		if (Analysis & ANALYSIS_F) {
 			fprintf(fp_log, "*** AC heating with analysis F (thermal + F) needs a 2-D cross-section "
@@ -2399,7 +2482,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 			return 1;
 		}
 		fprintf(fp_log, "*** thermal on an unstructured mesh supports first-order 3-D elements "
-			"only (tetrahedra, hexahedra, prisms, pyramids; this mesh is %d-D, element "
+			"and higher-order tetrahedra (DC, without radiationexchange) only (this mesh is %d-D, element "
 			"order %d, %d-node hexahedra, %d-node prisms)\n",
 			MeshDim, TetOrder, HexNen, PrismNen);
 		return 1;

@@ -1970,10 +1970,18 @@ static const int TET4_A[35][4] = {
 };
 #define NQTETMAX (125)
 
-// 次数 TetOrder (3 / 4) の多重指数の表
+// 2 次 (10 節点) の多重指数 2λ (Gmsh の tet10 : 辺 (0,1) (1,2) (2,0) (3,0) (3,2) (3,1))。
+// 熱連成の積分点 (elem3d_ip) で次数によらない Lagrange の式を使うためのもの
+// (電気の 2 次の要素行列は従来の tet10_grad のまま)
+static const int TET2_A[10][4] = {
+	{2, 0, 0, 0}, {0, 2, 0, 0}, {0, 0, 2, 0}, {0, 0, 0, 2},
+	{1, 1, 0, 0}, {0, 1, 1, 0}, {1, 0, 1, 0}, {1, 0, 0, 1}, {0, 0, 1, 1}, {0, 1, 0, 1}
+};
+
+// 次数 TetOrder (2 / 3 / 4) の多重指数の表
 static const int *tet_ho_a(int i)
 {
-	return ((TetOrder == 4) ? TET4_A[i] : TET3_A[i]);
+	return ((TetOrder == 4) ? TET4_A[i] : (TetOrder == 3) ? TET3_A[i] : TET2_A[i]);
 }
 
 
@@ -3021,21 +3029,87 @@ static int pyr_shape(const int32_t *nd, int q, double g[5][3], double *det)
 // 剛性と**同じ積分点・同じ重み**で N・∇N・重み w を返す (そうすると Σ_i ∫σ|∇φ|²N_i =
 // φᵀKφ が丸めを除いて厳密になる)。四面体 1 点 (重心、∇N は一定)、六面体 2x2x2、
 // 角柱 6 点、ピラミッド 2x2x2 (立方体座標)。2 次要素は扱わない (戻り値 1)。
+// 高次の四面体 e の局所の面 (頂点 v_opp の反対側) 上の点 (面の重心座標 mu、面の頂点の
+// 局所番号 fa[3]) での形状関数 nv[] と、面の 2 つの接線方向の ∂x/∂μ1, ∂x/∂μ2 (面積要素 =
+// |t1 × t2|)。熱連成の露出面 (曲がった面) の積分に使う。戻り値は節点数
+int tet_face_shape(int e, const int fa[3], const double mu[3], double nv[TET_NMAX],
+	double t1[3], double t2[3])
+{
+	int32_t nd[TET_NMAX];
+	const int nen = tet_nodes(e, nd);
+	double lam[4] = {0, 0, 0, 0};
+	for (int k = 0; k < 3; k++) lam[fa[k]] = mu[k];
+	for (int c = 0; c < 3; c++) { t1[c] = 0; t2[c] = 0; }
+	for (int a = 0; a < nen; a++) {
+		double dl[4];
+		nv[a] = lagr_tet(TetOrder, tet_ho_a(a), lam, dl);
+		const double d1 = dl[fa[1]] - dl[fa[0]], d2 = dl[fa[2]] - dl[fa[0]];
+		const double p[3] = {Xp[nd[a]], Yp[nd[a]], Zp[nd[a]]};
+		for (int c = 0; c < 3; c++) {
+			t1[c] += d1 * p[c];
+			t2[c] += d2 * p[c];
+		}
+	}
+	return nen;
+}
+
+
+// 三角形の Duffy 積分点 (各方向 n 点、n = 3..6)。mu は重心座標、重みの合計は 1/2
+int tri_quad_pub(int n, double mu[][3], double *wq)
+{
+	double gp[6], gw[6];
+	gauss01(n, gp, gw);
+	int q = 0;
+	for (int a = 0; a < n; a++) {
+	for (int b = 0; b < n; b++) {
+		const double u = gp[a], v = gp[b];
+		mu[q][1] = u;
+		mu[q][2] = v * (1 - u);
+		mu[q][0] = 1 - mu[q][1] - mu[q][2];
+		wq[q] = gw[a] * gw[b] * (1 - u);
+		q++;
+	}
+	}
+	return q;
+}
+
+
 int elem3d_nip(int e)
 {
 	const int kind = elem3d_kind(e);
-	if (kind == MESHELEM_TET) return 1;
+	// 高次の四面体 : Duffy + 各方向 p + 2 点 (質量 N_i N_j の 2p 次が直線要素で厳密)
+	if (kind == MESHELEM_TET) return ((TetOrder >= 2) ? ((TetOrder + 2) * (TetOrder + 2) * (TetOrder + 2)) : 1);
 	if (kind == MESHELEM_HEX) return 8;
 	if (kind == MESHELEM_PRISM) return 6;
 	return 8;
 }
 
 
-int elem3d_ip(int e, int q, double nv[8], double g[8][3], double *w)
+int elem3d_ip(int e, int q, double nv[ELEM_NMAX], double g[ELEM_NMAX][3], double *w)
 {
 	const int kind = elem3d_kind(e);
+	if ((kind == MESHELEM_TET) && (TetOrder >= 2)) {
+		// 高次の四面体 (等パラメトリック) : 積分点を次数ごとに一度だけ作っておく
+		static double lq[216][4], wq[216];
+		static int nqo = 0, ordo = 0;
+		if (ordo != TetOrder) {
+			nqo = tet_quad_n(TetOrder + 2, lq, wq);
+			ordo = TetOrder;
+		}
+		if ((q < 0) || (q >= nqo)) return 1;
+		int32_t nd[TET_NMAX];
+		const int nen = tet_nodes(e, nd);
+		double gn[TET_NMAX][3], det;
+		if (tet20_grad(nd, lq[q], gn, &det)) return 1;
+		for (int a = 0; a < nen; a++) {
+			double dl[4];
+			nv[a] = lagr_tet(TetOrder, tet_ho_a(a), lq[q], dl);
+			for (int c = 0; c < 3; c++) g[a][c] = gn[a][c];
+		}
+		*w = wq[q] * fabs(det);
+		return 0;
+	}
 	if (kind == MESHELEM_TET) {
-		if (TetOrder >= 2) return 1;
 		double gg[4][3], vol;
 		if (tet_grad_pub(&Tet[e * 4], gg, &vol)) return 1;
 		for (int a = 0; a < 4; a++) {

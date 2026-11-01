@@ -3268,17 +3268,13 @@ awk '/^thermal/{print "frequency = 1e3"} {print}' "$SRC/thermal_bar.ofe" > "$WOR
 th_reject "thermal with frequency" thx_freq.ofe "DC coupling"
 awk '/^heatsink = 1/{print "heatsink = 3 20"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thx_badsink.ofe"
 th_reject "heatsink on a conductor that does not exist" thx_badsink.ofe "does not exist"
-#     非構造格子は 1 次の 3 次元要素だけ (2 次以上は黙って誤答にせず解く段で弾く。
-#     理由はログ。六面体・角柱・ピラミッドは [thermal 3-D elements] で検証する)
+#     高次の四面体でも解ける (閉形式は [thermal higher-order tet])。ここでは 2 次の箱の恒等式だけ
 cp "$SRC/box_p2.msh" "$WORK/"
 awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
 	/^analysis/{print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next}
 	{print}' "$SRC/box_p2.ofe" > "$WORK/thx_p2.ofe"
-mesh_reject "thermal on a second-order tetrahedral mesh" thx_p2.ofe
-if ! grep -q "first-order 3-D elements only" "$WORK/ofe.log"; then
-	echo "  *** it was rejected for a different reason than the element order" >&2
-	status=1
-fi
+th_run thx_p2.ofe
+th_energy "thermal on a second-order tetrahedral mesh"
 #     h = 0 の対流は熱の逃げ道にならない (ヒートシンクも無ければ定常解が無い)
 awk '/^convection/{print "convection = 0 30"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thx_h0.ofe"
 th_reject "convection with h = 0 and no heat sink" thx_h0.ofe "at least one heatsink"
@@ -3723,7 +3719,85 @@ cp "$SRC/bar_hex.msh" "$SRC/box_hex2.msh" "$WORK/"
 awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
 	/^analysis/{print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next}
 	{print}' "$SRC/box_hex2.ofe" > "$WORK/t3x_hex2.ofe"
-t3_reject "thermal on a 20-node hexahedral mesh" t3x_hex2.ofe "first-order 3-D elements only"
+t3_reject "thermal on a 20-node hexahedral mesh" t3x_hex2.ofe "first-order 3-D elements and higher-order tetrahedra"
+
+# ---- 熱連成の高次の四面体 (2〜4 次、等パラメトリック、曲がった面) ----
+#
+# 剛性・発熱・質量・要素の温度は積分点の経路 (elem3d_ip、Duffy + 各方向 p + 2 点)、露出面は
+# 親の四面体の形状関数を面に制限して積分する (thermal.c の surf_tri_ho)。σ(T) は要素内で一定
+# (要素の平均温度) なので、温度の解く精度が上がっても R は h² (定数は 1 次の 1/10)。高次の
+# 効き目は曲がった形 (面積・体積の幾何の誤差) に出る。
+echo "[thermal higher-order tet] electro-thermal coupling on 10/20/35-node tetrahedra (curved)"
+for m in thermal_tet20_p2 thermal_tet40_p2 coax_p3 coax_p4 cyl_p1 cyl_p2 cyl_p3; do cp "$SRC/$m.msh" "$WORK/"; done
+# (1) 直線の棒 (2 次) : 閉形式と誤差比。σ が要素内で一定なので h² (20 -> 40 で比 4.2、
+#     40 分割で R -1.9e-5、1 次の 1/10。実測)
+set -- $(th_exact 7.5 4e-3)
+rex=$1; tex=$2
+for nx in 20 40; do
+	awk -v m="thermal_tet${nx}_p2" '/^mesh/{print "mesh = " m ".msh"; next} {print}' "$SRC/thermal_tet.ofe" > "$WORK/tho_bar.ofe"
+	th_run tho_bar.ofe
+	eval "r$nx=\$(th_r)"
+done
+compare "P2 bar : R(I = 7.5 A, mL = 1.5) [ohm]" "$r40" "$rex" 1e-4
+th_energy "P2 bar"
+tt_order "P2 bar : second-order convergence of R (sigma constant per element)" "$r20" "$r40" "$rex"
+#     断熱の棒の過渡 (CN) : 2 次の頂点の ∫N は負 (-V/20) だが、発熱と質量の行和が同じ重みなので
+#     温度は一様のまま進み、θ 法の漸化式に機械精度で一致する
+awk '/^mesh/{print "mesh = thermal_tet40_p2.msh"; next} /^heatsink/{next}
+	/^thermal/{print "heatcap = 2 3.4e6"; print "transient = 10 100 0.5"} {print}' "$SRC/thermal_tet.ofe" > "$WORK/tho_ad.ofe"
+th_run tho_ad.ofe
+set -- $(th_adia 100 0.5)
+compare "P2 bar : adiabatic, CN : T == the discrete recurrence [degC]" "$(th_t)" "$2" 1e-9
+th_balance "P2 bar : adiabatic, CN"
+# (2) 曲がった同軸、内外の円筒が電極 (半径方向の電流、q ∝ 1/r²)、両方ヒートシンク、α = 0 :
+#       R = ln(b/a) / (2πσ l_z)、T(r) = T_s + (c/2)(ln r - ln a)(ln b - ln r)、c = (I/(2π l_z))²/(σk)
+#     R の誤差は静電の C' と同じ幾何の誤差 (3 次 h⁴ : 3.3e-4、4 次 h⁶ : 8.5e-6)。体積平均の
+#     温度上昇は 3 次 6.3e-4 / 4 次 2.5e-5 (実測)。許容は C' と同じ (3 次 5e-4、4 次 1e-4) と、
+#     温度にその 2 倍
+set -- $(awk 'BEGIN { pi = atan2(0, -1); a = 0.5e-3; b = 1.5e-3; lz = 0.1e-3; s = 1e6; k = 10; I = 30
+	c = (I / (2 * pi * lz)) ^ 2 / (s * k); sa = log(a); sb = log(b); n = 20000; num = 0; den = 0
+	for (i = 0; i < n; i++) { r = a + (b - a) * (i + 0.5) / n; x = log(r); num += r * (c / 2) * (x - sa) * (sb - x); den += r }
+	printf "%.12e %.12e", log(b / a) / (2 * pi * s * lz), num / den }')
+rcx=$1; tcx=$2
+for k in 3:5e-4:1e-3 4:1e-4:2e-4; do
+	o=${k%%:*}; rest=${k#*:}; rt=${rest%%:*}; tt=${rest#*:}
+	printf 'OpenFEM 1 0\ntitle = radial conduction heating in a coax\nmesh = coax_p%s.msh\nmaterial = 1.0 1e6\ntempco = 2 0 0\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\nheatsink = 0 20\nheatsink = 1 20\ntemperature = 20\nthermal = 30\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' "$o" > "$WORK/tho_cx.ofe"
+	th_run tho_cx.ofe
+	compare "P$o curved coax, radial current : R = ln(b/a) / (2 pi sigma l) [ohm]" "$(th_r)" "$rcx" "$rt"
+	compare "P$o curved coax, radial current : volume-mean temperature rise [K]" \
+		"$(awk -v t="$(t3_tm)" 'BEGIN { printf "%.12e", t - 20 }')" "$tcx" "$tt"
+	th_energy "P$o curved coax"
+done
+# (3) 円柱 (cyl_p*.msh、gmsh 製、半径 0.5mm) を曲がった側面だけから冷やす (端面は電極で
+#     断熱)、α = 0 : T(r) = T_s + q (R² - r²)/(4k)、T_s - T_a = P / (h 2πRL)、
+#     T_mean = T_s + q R²/(8k)。**曲がった面の積分を検査できるのはこれ** (面積の誤差が
+#     T_s に直接入る)。1 次は折れ線の面で +3.1%、2 次・3 次は h⁴ で 1e-4 (実測)。許容 5e-4、
+#     1 次との比 (> 50) も見る
+set -- $(awk 'BEGIN { pi = atan2(0, -1); R0 = 0.5e-3; L = 0.5e-3; s = 1e6; k = 10; h = 2000; I = 5
+	re = L / (s * pi * R0 * R0); P = I * I * re; ts = P / (h * 2 * pi * R0 * L); q = P / (pi * R0 * R0 * L)
+	printf "%.12e %.12e", re, ts + q * R0 * R0 / (8 * k) }')
+rcy=$1; tcy=$2
+for o in 1 2 3; do
+	printf 'OpenFEM 1 0\ntitle = cylinder cooled from its curved side\nmesh = cyl_p%s.msh\nmaterial = 1.0 1e6\ntempco = 2 0 0\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\nconvection = 2000 20\ntemperature = 20\nthermal = 5\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' "$o" > "$WORK/tho_cy.ofe"
+	th_run tho_cy.ofe
+	eval "ecy$o=\$(awk -v t=\"\$(t3_tm)\" -v e=\"\$tcy\" 'BEGIN { d = (t - 20 - e) / e; if (d < 0) d = -d; printf \"%.6e\", d }')"
+	th_nface "P$o cylinder : convection on the curved side only" 80
+	th_energy "P$o cylinder"
+	if [ "$o" != 1 ]; then
+		compare "P$o cylinder : R = L / (sigma pi R^2) [ohm]" "$(th_r)" "$rcy" 5e-4
+		compare "P$o cylinder, curved-side convection : volume-mean temperature rise [K]" \
+			"$(awk -v t="$(t3_tm)" 'BEGIN { printf "%.12e", t - 20 }')" "$tcy" 5e-4
+	fi
+done
+res=$(awk -v a="$ecy1" -v b="$ecy2" 'BEGIN { printf "%s (P1 %.2e vs P2 %.2e)", (a > 50 * b) ? "OK" : "NG", a, b }')
+echo "  cylinder : the curved P2 surface beats the P1 facets (geometry h^4 vs h^2) : $res"
+case "$res" in NG*) status=1 ;; esac
+# (4) 弾くべき入力 : 高次の四面体の交流の発熱 (A は 1 次格子だけ) と相互放射 (曲がった面)
+awk '/^thermal/{print "radiation = 0.8 10"; print "radiationexchange = 1"} {print}' "$WORK/tho_cy.ofe" > "$WORK/thox_rx.ofe"
+mesh_reject "radiationexchange on a higher-order tetrahedral mesh" thox_rx.ofe
+if ! grep -q "and higher-order tetrahedra (DC, without radiationexchange)" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than radiationexchange" >&2; status=1
+fi
 
 # ---- 交流の発熱 (thermal + analysis = A) ----
 #
@@ -4398,11 +4472,8 @@ th_reject "20-node tetrahedra with 3-node electrode triangles" p3x_tri.ofe "tria
 awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
 	/^analysis/{print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next} {print}' \
 	"$SRC/box_p3.ofe" > "$WORK/p3x_th.ofe"
-mesh_reject "thermal on a 20-node tetrahedral mesh" p3x_th.ofe
-if ! grep -q "first-order 3-D elements only" "$WORK/ofe.log"; then
-	echo "  *** it was rejected for a different reason than the element order" >&2
-	status=1
-fi
+th_run p3x_th.ofe
+th_energy "thermal on a 20-node tetrahedral mesh"
 
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
