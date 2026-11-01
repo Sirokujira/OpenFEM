@@ -2038,6 +2038,9 @@ static int th_electric(FILE *fp_log, crs_t *A, const double *scell, unsigned cha
 		if (MeshMode && (MeshDim == 2)) {
 			if (eddy2d_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
 		}
+		else if (MeshMode && (TetOrder == 2) && ((NHex + NPrism + NPyr) == 0)) {
+			if (eddy3d_p2_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
+		}
 		else if (eddy3d_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
 		if (zr <= 0) {
 			fprintf(fp_log, "*** thermal : non-passive impedance R = %.6e (iteration %d)\n",
@@ -2557,6 +2560,9 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	const int n = (int)num_node();
 	const int64_t nc = th_nelem();
 	int ierr = 0;
+	// 10 節点四面体だけの格子の交流の発熱は 2 次の Nedelec (eddy3d_p2.c) で解く
+	const int p2tet = (MeshMode && (MeshDim == 3) && (TetOrder == 2) && ((NHex + NPrism + NPyr) == 0)
+		&& (Analysis & ANALYSIS_A));
 
 	fprintf(fp_log, "\n=== electro-thermal analysis ===\n");
 	// 非構造格子は 1 次の 3 次元要素 (四面体・六面体・角柱・ピラミッド、混在可)、高次の四面体、
@@ -2569,7 +2575,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 		}
 	}
 	else if ((Analysis & ANALYSIS_F) || (MeshMode && ((MeshDim != 3)
-	         || ((TetOrder >= 2) && ((Analysis & ANALYSIS_A) || RadExchange))))) {
+	         || ((TetOrder >= 2) && (((Analysis & ANALYSIS_A) && !p2tet) || RadExchange))))) {
 		if (Analysis & ANALYSIS_F) {
 			fprintf(fp_log, "*** AC heating with analysis F (thermal + F) needs a 2-D cross-section "
 				"mesh of 3-node triangles\n");
@@ -2758,14 +2764,17 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	// 交流 : A-φ の辺の情報と行列は反復の間持っておく
 	int ehopen = 0;
 	if (!ierr && th_ac() && !(MeshMode && (MeshDim == 2))) {
-		ierr = eddy3d_heat_open(fp_log);
+		ierr = (p2tet ? eddy3d_p2_heat_open(fp_log) : eddy3d_heat_open(fp_log));
 		ehopen = 1;
 	}
 	if (!ierr) {
 		ierr = (TransientOn ? th_transient : th_steady)(fp_log, &A, &B, b0, kcell, tcell,
 			scell, fix, fixt, phi, work, diag, f, tn, rhs, u, gc, gr, q, gport);
 	}
-	if (ehopen) eddy3d_heat_close();
+	if (ehopen) {
+		if (p2tet) eddy3d_p2_heat_close();
+		else eddy3d_heat_close();
+	}
 	*xport = ThX;
 	fflush(fp_log);
 

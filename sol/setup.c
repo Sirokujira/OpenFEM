@@ -214,11 +214,10 @@ static int setup_unstruct(void)
 		}
 		const char *why = NULL;
 		if ((NHex + NPrism + NPyr) > 0) why = "a pure tetrahedral mesh";
-		else if (ThermalOn) why = "no thermal coupling";
-		else if (TransientOn) why = "the frequency domain (no transient)";
+		else if (TransientOn && !ThermalOn) why = "the frequency domain (no transient)";
 		else if (nl) why = "linear materials (no bh / ja)";
 		else if (GaugeTree || Direct) why = "gauge = 0 and the iterative solver (no gauge / direct)";
-		else if (FieldOut || Hdf5Out) why = "no field output (fieldout / hdf5)";
+		else if ((FieldOut && !ThermalOn) || Hdf5Out) why = "no field output (fieldout / hdf5; the temperature of thermal is written)";
 		if (why != NULL) {
 			printf("*** analysis A on a second-order (10-node) mesh supports %s only\n", why);
 			return 1;

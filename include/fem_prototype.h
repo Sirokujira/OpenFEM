@@ -103,6 +103,9 @@ void assemble_eddy3d(crs_t *, crs_t *, double, const double *);
 int solve_eddy3d(FILE *);
 int solve_eddy3d_transient(FILE *);
 int solve_eddy3d_p2(FILE *);
+int eddy3d_p2_heat_open(FILE *);
+int eddy3d_p2_heat_solve(FILE *, const double *, double, double *, double *, double *, int);
+void eddy3d_p2_heat_close(void);
 
 // assemble.c (公開した材料係数)
 void material_coef_pub(int, int, double [6]);

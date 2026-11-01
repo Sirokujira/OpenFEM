@@ -317,11 +317,20 @@ static void p2_row_dot_c(const crs_t *Kr, const crs_t *Ki, int32_t row,
 }
 
 
-int solve_eddy3d_p2(FILE *fp_log)
+// 解く系の一式 (交流の発熱は反復の間これを持ち続ける)
+static struct {
+	int ne, nf, nn, n, oG, oF, oV, oB;
+	int32_t *fe, *fvert;
+	crs_t Kr, Ki;
+	unsigned char *fix, *cond, *econd, *vert;
+	double *xdr, *xdi, *br, *bi, *ur, *ui, *w1, *w2;
+	double omega;
+} P2;
+
+
+static int p2_open(FILE *fp_log)
 {
 	const int np = NPort;
-	int ierr = 0;
-	fprintf(fp_log, "\n=== 3D eddy current (A-phi, second-order Nedelec / nodal elements) ===\n");
 	if (!MeshMode || (TetOrder != 2) || (NHex + NPrism + NPyr > 0) || (np < 1) || (Freq <= 0)) {
 		fprintf(fp_log, "*** the second-order A-phi solver needs a pure 10-node tetrahedral mesh, "
 			"a port and a frequency\n");
@@ -330,74 +339,22 @@ int solve_eddy3d_p2(FILE *fp_log)
 	edge_build();
 	const int ne = NEdge, nn = NNode, nt = NTet;
 	int nf = 0;
-	int32_t *fvert = NULL;
-	int32_t *fe = p2_faces(&nf, &fvert);
-	const int oG = ne, oF = 2 * ne, oV = (2 * ne) + (2 * nf), oB = oV + nn;
-	const int n = oB + ne;
-	const double omega = 2 * PI * Freq;
+	P2.fe = p2_faces(&nf, &P2.fvert);
+	P2.ne = ne; P2.nf = nf; P2.nn = nn;
+	P2.oG = ne; P2.oF = 2 * ne; P2.oV = (2 * ne) + (2 * nf); P2.oB = P2.oV + nn;
+	const int n = P2.oB + ne;
+	P2.n = n;
+	P2.omega = 2 * PI * Freq;
 	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, edges = %d, faces = %d, unknowns = %d "
 		"(A : 2 x %d edges + 2 x %d faces, phi : vertices + %d edge bubbles)\n", nn, nt, ne, nf, n, ne, nf, ne);
-
-	crs_t Kr, Ki;
-	p2_crs(&Kr, n, fe, ne, nf, nn);
-	p2_crs(&Ki, n, fe, ne, nf, nn);
-	fprintf(fp_log, "  coupled matrix : %lld nonzeros (%.1f per row)\n", (long long)Kr.nnz, (double)Kr.nnz / n);
-
-	// 組み立て : [S + jωT, TG; GᵀT, GᵀTG/(jω)] (節点の式を jω で割った複素対称形、1 次と同じ)
-	int bad = 0;
-	for (int e = 0; e < nt; e++) {
-		const int m = elem3d_mat(e);
-		double nu[6];
-		material_coef_pub(m, 3, nu);
-		const double sig = Material[m].sigma;
-		int32_t dof[P2_NDOF];
-		double sgn[P2_NDOF];
-		p2_dofs(e, fe, ne, nf, nn, dof, sgn);
-		double se[20][20], te[20][20], ce[20][10], pe[10][10];
-		memset(se, 0, sizeof(se)); memset(te, 0, sizeof(te));
-		memset(ce, 0, sizeof(ce)); memset(pe, 0, sizeof(pe));
-		const int nq = elem3d_nip(e);
-		for (int q = 0; q < nq; q++) {
-			double wv[20][3], wc[20][3], pn[10], pg[10][3], w;
-			if (p2_basis(e, q, wv, wc, pn, pg, &w)) { bad = 1; break; }
-			double nc[20][3];
-			for (int k = 0; k < 20; k++) nu_mul(nu, wc[k], nc[k]);
-			for (int k = 0; k < 20; k++) {
-				for (int l = 0; l < 20; l++) {
-					se[k][l] += w * dot3(nc[k], wc[l]);
-					te[k][l] += w * sig * dot3(wv[k], wv[l]);
-				}
-				for (int a = 0; a < 10; a++) ce[k][a] += w * sig * dot3(wv[k], pg[a]);
-			}
-			for (int a = 0; a < 10; a++) {
-				for (int b = 0; b < 10; b++) pe[a][b] += w * sig * dot3(pg[a], pg[b]);
-			}
-		}
-		for (int k = 0; k < 20; k++) {
-			for (int l = 0; l < 20; l++) {
-				const int64_t p = p2_find(&Kr, dof[k], dof[l]);
-				const double s = sgn[k] * sgn[l];
-				Kr.val[p] += s * se[k][l];
-				Ki.val[p] += s * omega * te[k][l];
-			}
-			for (int a = 0; a < 10; a++) {
-				const double v = sgn[k] * ce[k][a];
-				Kr.val[p2_find(&Kr, dof[k], dof[20 + a])] += v;
-				Kr.val[p2_find(&Kr, dof[20 + a], dof[k])] += v;
-			}
-		}
-		for (int a = 0; a < 10; a++) {
-			for (int b = 0; b < 10; b++) Ki.val[p2_find(&Ki, dof[20 + a], dof[20 + b])] -= pe[a][b] / omega;
-		}
-	}
-	if (bad) {
-		fprintf(fp_log, "*** the second-order A-phi solver : a degenerate element\n");
-		ierr = 1;
-	}
+	p2_crs(&P2.Kr, n, P2.fe, ne, nf, nn);
+	p2_crs(&P2.Ki, n, P2.fe, ne, nf, nn);
+	fprintf(fp_log, "  coupled matrix : %lld nonzeros (%.1f per row)\n", (long long)P2.Kr.nnz, (double)P2.Kr.nnz / n);
 
 	// Dirichlet : awall の三角形の辺 (Whitney と勾配) と面 (2 個)、電極の頂点 (φ = V) と電極上の辺の泡 (0)、
 	//             非導電領域の φ、使わない欄 (中間節点の φ)
-	unsigned char *fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));
+	const int oG = P2.oG, oF = P2.oF, oV = P2.oV, oB = P2.oB;
+	unsigned char *fix = P2.fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));
 	int nwall = 0;
 	for (int t = 0; t < NTri; t++) {
 		int hit = 0;
@@ -415,15 +372,15 @@ int solve_eddy3d_p2(FILE *fp_log)
 		}
 		int32_t sv[3] = {v[0], v[1], v[2]};
 		sort3(sv);
-		const int f = p2_face_id(fvert, nf, sv);
+		const int f = p2_face_id(P2.fvert, nf, sv);
 		if (f >= 0) {
 			fix[oF + (2 * f)] = fix[oF + (2 * f) + 1] = 1;
 			nwall++;
 		}
 	}
-	unsigned char *cond = (unsigned char *)calloc((size_t)nn, sizeof(unsigned char));
-	unsigned char *econd = (unsigned char *)calloc((size_t)ne, sizeof(unsigned char));
-	unsigned char *vert = (unsigned char *)calloc((size_t)nn, sizeof(unsigned char));
+	unsigned char *cond = P2.cond = (unsigned char *)calloc((size_t)nn, sizeof(unsigned char));
+	unsigned char *econd = P2.econd = (unsigned char *)calloc((size_t)ne, sizeof(unsigned char));
+	unsigned char *vert = P2.vert = (unsigned char *)calloc((size_t)nn, sizeof(unsigned char));
 	for (int e = 0; e < nt; e++) {
 		const int32_t *nd = &Tet[e * 4];
 		for (int a = 0; a < 4; a++) vert[nd[a]] = 1;
@@ -452,53 +409,150 @@ int solve_eddy3d_p2(FILE *fp_log)
 	if (nwall == 0) {
 		fprintf(fp_log, "*** warning : no awall surface; the outer boundary is a magnetic wall (dA/dn = 0)\n");
 	}
-	// 固定の行は恒等行 (crs_spmv の fix) なので、未使用の行の対角は 0 のままでよい
+	P2.xdr = (double *)calloc((size_t)n, sizeof(double));
+	P2.xdi = (double *)calloc((size_t)n, sizeof(double));
+	P2.br = (double *)malloc((size_t)n * sizeof(double));
+	P2.bi = (double *)malloc((size_t)n * sizeof(double));
+	P2.ur = (double *)malloc((size_t)n * sizeof(double));
+	P2.ui = (double *)malloc((size_t)n * sizeof(double));
+	P2.w1 = (double *)malloc((size_t)n * sizeof(double));
+	P2.w2 = (double *)malloc((size_t)n * sizeof(double));
+	return 0;
+}
 
-	double *xdr = (double *)calloc((size_t)n, sizeof(double));
-	double *xdi = (double *)calloc((size_t)n, sizeof(double));
-	double *br = (double *)malloc((size_t)n * sizeof(double));
-	double *bi = (double *)malloc((size_t)n * sizeof(double));
-	double *ur = (double *)malloc((size_t)n * sizeof(double));
-	double *ui = (double *)malloc((size_t)n * sizeof(double));
-	double *w1 = (double *)malloc((size_t)n * sizeof(double));
-	double *w2 = (double *)malloc((size_t)n * sizeof(double));
+
+static void p2_close(void)
+{
+	free(P2.xdr); free(P2.xdi); free(P2.br); free(P2.bi); free(P2.ur); free(P2.ui); free(P2.w1); free(P2.w2);
+	free(P2.fix); free(P2.cond); free(P2.econd); free(P2.vert);
+	free(P2.fe); free(P2.fvert);
+	crs_free(&P2.Kr);
+	crs_free(&P2.Ki);
+	edge_free();
+	memset(&P2, 0, sizeof(P2));
+}
+
+
+// 組み立て : [S + jωT, TG; GᵀT, GᵀTG/(jω)] (節点の式を jω で割った複素対称形、1 次と同じ)。
+// sigelem が NULL でなければ要素の σ (熱連成の σ(T))
+static int p2_assemble(FILE *fp_log, const double *sigelem)
+{
+	const int ne = P2.ne, nf = P2.nf, nn = P2.nn, nt = NTet;
+	const double omega = P2.omega;
+	crs_zero(&P2.Kr);
+	crs_zero(&P2.Ki);
+	int bad = 0;
+	for (int e = 0; e < nt; e++) {
+		const int m = elem3d_mat(e);
+		double nu[6];
+		material_coef_pub(m, 3, nu);
+		const double sig = ((sigelem != NULL) ? sigelem[e] : Material[m].sigma);
+		int32_t dof[P2_NDOF];
+		double sgn[P2_NDOF];
+		p2_dofs(e, P2.fe, ne, nf, nn, dof, sgn);
+		double se[20][20], te[20][20], ce[20][10], pe[10][10];
+		memset(se, 0, sizeof(se)); memset(te, 0, sizeof(te));
+		memset(ce, 0, sizeof(ce)); memset(pe, 0, sizeof(pe));
+		const int nq = elem3d_nip(e);
+		for (int q = 0; q < nq; q++) {
+			double wv[20][3], wc[20][3], pn[10], pg[10][3], w;
+			if (p2_basis(e, q, wv, wc, pn, pg, &w)) { bad = 1; break; }
+			double nc[20][3];
+			for (int k = 0; k < 20; k++) nu_mul(nu, wc[k], nc[k]);
+			for (int k = 0; k < 20; k++) {
+				for (int l = 0; l < 20; l++) {
+					se[k][l] += w * dot3(nc[k], wc[l]);
+					te[k][l] += w * sig * dot3(wv[k], wv[l]);
+				}
+				for (int a = 0; a < 10; a++) ce[k][a] += w * sig * dot3(wv[k], pg[a]);
+			}
+			for (int a = 0; a < 10; a++) {
+				for (int b = 0; b < 10; b++) pe[a][b] += w * sig * dot3(pg[a], pg[b]);
+			}
+		}
+		for (int k = 0; k < 20; k++) {
+			for (int l = 0; l < 20; l++) {
+				const int64_t p = p2_find(&P2.Kr, dof[k], dof[l]);
+				const double s = sgn[k] * sgn[l];
+				P2.Kr.val[p] += s * se[k][l];
+				P2.Ki.val[p] += s * omega * te[k][l];
+			}
+			for (int a = 0; a < 10; a++) {
+				const double v = sgn[k] * ce[k][a];
+				P2.Kr.val[p2_find(&P2.Kr, dof[k], dof[20 + a])] += v;
+				P2.Kr.val[p2_find(&P2.Kr, dof[20 + a], dof[k])] += v;
+			}
+		}
+		for (int a = 0; a < 10; a++) {
+			for (int b = 0; b < 10; b++) P2.Ki.val[p2_find(&P2.Ki, dof[20 + a], dof[20 + b])] -= pe[a][b] / omega;
+		}
+	}
+	if (bad) {
+		fprintf(fp_log, "*** the second-order A-phi solver : a degenerate element\n");
+		return 1;
+	}
+	return 0;
+}
+
+
+// ポート jc を V = Volt で励振して解き (P2.ur / ui に解)、各導体へ流れ込む電流 qr + j qi を返す
+static int p2_solve_port(FILE *fp_log, int jc, FILE *fp_iter, const char *label, double qr[MAXPORT], double qi[MAXPORT])
+{
+	const int n = P2.n, nn = P2.nn, oV = P2.oV;
+	const double omega = P2.omega;
+	for (int i = 0; i < n; i++) P2.xdr[i] = P2.xdi[i] = 0;
+	for (int i = 0; i < nn; i++) {
+		if (P2.fix[oV + i] && P2.cond[i] && P2.vert[i] && (NodeConductor[i] == jc)) P2.xdr[oV + i] = Volt;
+	}
+	crs_spmv(&P2.Kr, P2.xdr, P2.w1, NULL);
+	crs_spmv(&P2.Ki, P2.xdr, P2.w2, NULL);
+	for (int i = 0; i < n; i++) {
+		P2.br[i] = (P2.fix[i] ? 0 : -P2.w1[i]);
+		P2.bi[i] = (P2.fix[i] ? 0 : -P2.w2[i]);
+	}
+	const int iter = solver_cocg(&P2.Kr, &P2.Ki, 1.0, P2.br, P2.bi, P2.ur, P2.ui, P2.fix,
+		Solver.maxiter, Solver.nout, Solver.converg, fp_iter, label);
+	if (iter < 0) {
+		fprintf(fp_log, "*** the second-order A-phi solve did not converge (%s)\n", label);
+		return 1;
+	}
+	for (int i = 0; i < n; i++) {
+		P2.ur[i] += P2.xdr[i];
+		P2.ui[i] += P2.xdi[i];
+	}
+	// 電極の頂点の反作用 (節点の式は 1/(jω) 倍してあるので jω 倍して戻す)。電極の上で 1 になる
+	// 試験関数 Σ λv は泡の係数 0 の階層的な 2 次の関数なので、頂点の行だけを足せばよい
+	for (int p = 0; p < MAXPORT; p++) qr[p] = qi[p] = 0;
+	for (int i = 0; i < nn; i++) {
+		const int id = NodeConductor[i];
+		if ((id < 0) || !P2.cond[i] || !P2.vert[i]) continue;
+		double rr, ri;
+		p2_row_dot_c(&P2.Kr, &P2.Ki, (int32_t)(oV + i), P2.ur, P2.ui, &rr, &ri);
+		qr[id] += -omega * ri;
+		qi[id] += omega * rr;
+	}
+	return 0;
+}
+
+
+int solve_eddy3d_p2(FILE *fp_log)
+{
+	const int np = NPort;
+	int ierr = 0;
+	fprintf(fp_log, "\n=== 3D eddy current (A-phi, second-order Nedelec / nodal elements) ===\n");
+	if (p2_open(fp_log)) return 1;
+	const double omega = P2.omega;
+	ierr = p2_assemble(fp_log, NULL);
 	double *yr = (double *)calloc((size_t)np * np, sizeof(double));
 	double *yi = (double *)calloc((size_t)np * np, sizeof(double));
 	fprintf(fp_log, "  %-10s %8s %13s\n", "excite", "iter", "residual");
 	for (int jc = 1; (jc <= np) && !ierr; jc++) {
-		for (int i = 0; i < n; i++) xdr[i] = xdi[i] = 0;
-		for (int i = 0; i < nn; i++) {
-			if (fix[oV + i] && cond[i] && vert[i] && (NodeConductor[i] == jc)) xdr[oV + i] = Volt;
-		}
-		crs_spmv(&Kr, xdr, w1, NULL);
-		crs_spmv(&Ki, xdr, w2, NULL);
-		for (int i = 0; i < n; i++) {
-			br[i] = (fix[i] ? 0 : -w1[i]);
-			bi[i] = (fix[i] ? 0 : -w2[i]);
-		}
 		char label[64];
 		sprintf(label, "port%d", jc);
-		const int iter = solver_cocg(&Kr, &Ki, 1.0, br, bi, ur, ui, fix,
-			Solver.maxiter, Solver.nout, Solver.converg, fp_log, label);
-		if (iter < 0) {
-			fprintf(fp_log, "*** solver did not converge (port %d)\n", jc);
-			ierr = 1;
-		}
-		for (int i = 0; i < n; i++) {
-			ur[i] += xdr[i];
-			ui[i] += xdi[i];
-		}
-		// 電極の頂点の反作用 (節点の式は 1/(jω) 倍してあるので jω 倍して戻す)。電極の上で 1 になる
-		// 試験関数 Σ λv は泡の係数 0 の階層的な 2 次の関数なので、頂点の行だけを足せばよい
 		double qr[MAXPORT], qi[MAXPORT];
-		for (int p = 0; p < MAXPORT; p++) qr[p] = qi[p] = 0;
-		for (int i = 0; i < nn; i++) {
-			const int id = NodeConductor[i];
-			if ((id < 0) || !cond[i] || !vert[i]) continue;
-			double rr, ri;
-			p2_row_dot_c(&Kr, &Ki, (int32_t)(oV + i), ur, ui, &rr, &ri);
-			qr[id] += -omega * ri;
-			qi[id] += omega * rr;
+		if (p2_solve_port(fp_log, jc, fp_log, label, qr, qi)) {
+			ierr = 1;
+			break;
 		}
 		for (int kc = 1; kc <= np; kc++) {
 			yr[((kc - 1) * np) + (jc - 1)] = qr[kc] / Volt;
@@ -534,11 +588,88 @@ int solve_eddy3d_p2(FILE *fp_log)
 		}
 		free(zr); free(zi);
 	}
-	free(xdr); free(xdi); free(br); free(bi); free(ur); free(ui); free(w1); free(w2);
-	free(yr); free(yi); free(fix); free(cond); free(econd); free(vert);
-	free(fe); free(fvert);
-	crs_free(&Kr);
-	crs_free(&Ki);
-	edge_free();
+	free(yr); free(yi);
+	p2_close();
 	return ierr;
+}
+
+
+/*
+交流の発熱 (thermal + analysis = A、10 節点四面体)。σ(T) を要素ごとに渡して解き、端子電流 (波高値) cur での
+損失 ½σ|e|²、e = jωA + ∇φ を**組み立てと同じ積分点**で節点の形状関数に掛けて節点荷重にする
+(f_a = ∫ ½σ|e|² N_a dV)。Σ_a N_a = 1 なので Σ f = ½ eᴴ T e = ½|I|²R が厳密 (1 次の Q_e と同じ恒等式)。
+*/
+int eddy3d_p2_heat_open(FILE *fp_log)
+{
+	fprintf(fp_log, "  AC heating (analysis = A, second-order Nedelec) : frequency = %.6e [Hz]\n", Freq);
+	return p2_open(fp_log);
+}
+
+
+int eddy3d_p2_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f,
+	double *zr, double *zi, int it)
+{
+	const int ne = P2.ne, nf = P2.nf, nn = P2.nn, nt = NTet, n = P2.n;
+	const double omega = P2.omega;
+	if (p2_assemble(fp_log, sigelem)) return 1;
+	char label[64];
+	sprintf(label, "A%d", it);
+	double qr[MAXPORT], qi[MAXPORT];
+	if (p2_solve_port(fp_log, 1, NULL, label, qr, qi)) return 1;
+	const double ir = qr[1], ii = qi[1];
+	const double den = (ir * ir) + (ii * ii);
+	if (den <= 0) {
+		fprintf(fp_log, "*** thermal : no current flows through the port\n");
+		return 1;
+	}
+	*zr = Volt * ir / den;
+	*zi = -Volt * ii / den;
+	// 端子電流が cur (実数) になるよう s = cur / I_V 倍する
+	const double sr = cur * ir / den, si = -cur * ii / den;
+	for (int i = 0; i < n; i++) {
+		const double xr = P2.ur[i], xi = P2.ui[i];
+		P2.ur[i] = (sr * xr) - (si * xi);
+		P2.ui[i] = (sr * xi) + (si * xr);
+	}
+	for (int i = 0; i < nn; i++) f[i] = 0;
+	for (int e = 0; e < nt; e++) {
+		const double sg = sigelem[e];
+		if (sg <= 0) continue;
+		int32_t dof[P2_NDOF];
+		double sgn[P2_NDOF];
+		p2_dofs(e, P2.fe, ne, nf, nn, dof, sgn);
+		int32_t nd[TET_NMAX];
+		tet_nodes(e, nd);
+		const int nq = elem3d_nip(e);
+		for (int q = 0; q < nq; q++) {
+			double wv[20][3], wc[20][3], pn[10], pg[10][3], w;
+			double nv[ELEM_NMAX], g[ELEM_NMAX][3], w2;
+			if (p2_basis(e, q, wv, wc, pn, pg, &w) || elem3d_ip(e, q, nv, g, &w2)) return 1;
+			// e = jω A + ∇φ : 実部 = −ω A_i + ∇φ_r、虚部 = ω A_r + ∇φ_i
+			double er[3] = {0, 0, 0}, ei[3] = {0, 0, 0};
+			for (int k = 0; k < 20; k++) {
+				const double ar = sgn[k] * P2.ur[dof[k]], ai = sgn[k] * P2.ui[dof[k]];
+				for (int c = 0; c < 3; c++) {
+					er[c] += -omega * ai * wv[k][c];
+					ei[c] += omega * ar * wv[k][c];
+				}
+			}
+			for (int a = 0; a < 10; a++) {
+				const double pr = P2.ur[dof[20 + a]], pi = P2.ui[dof[20 + a]];
+				for (int c = 0; c < 3; c++) {
+					er[c] += pr * pg[a][c];
+					ei[c] += pi * pg[a][c];
+				}
+			}
+			const double qd = 0.5 * sg * (dot3(er, er) + dot3(ei, ei)) * w;
+			for (int a = 0; a < 10; a++) f[nd[a]] += qd * nv[a];
+		}
+	}
+	return 0;
+}
+
+
+void eddy3d_p2_heat_close(void)
+{
+	p2_close();
 }

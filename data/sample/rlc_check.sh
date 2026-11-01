@@ -501,14 +501,15 @@ mesh_reject() {	# mesh_reject <ラベル> <ofe ファイル>
 	fi
 }
 echo "[mesh order] inputs the solver must reject"
-# 辺要素 (A) は 1 次四面体の Whitney 形状関数に基づくので 2 次格子は使えない
-# 導電率と周波数を入れないと「A には導体が要る」等の別の検査で弾かれてしまい、
-# 次数の検査が空回りする (通っているように見えて何も見ていない状態になる)
-sed -e 's/^analysis = .*/analysis = A/' \
+# 辺要素の自己検証 (E) は 1 次四面体の Whitney 形状関数に基づくので 2 次格子は使えない
+# (A は 10 節点四面体を 2 次の Nedelec 要素で解くので、ここでは E を見る。A の 2 次は [A order 2])。
+# 導電率と周波数を入れないと別の検査で弾かれてしまい、次数の検査が空回りする
+# (通っているように見えて何も見ていない状態になる)
+sed -e 's/^analysis = .*/analysis = E/' \
     -e 's/^material = .*/material = 4.0 5.8e7/' \
     -e 's/^solver = .*/frequency = 1e4\nawall = 10/' \
     "$SRC/box_p2.ofe" > "$WORK/p2_edge.ofe"
-mesh_reject "analysis A on an order-2 mesh" p2_edge.ofe
+mesh_reject "analysis E on an order-2 mesh" p2_edge.ofe
 if ! (cd "$WORK" && "$OFE" -n 2 p2_edge.ofe 2>&1 | grep -q "need a first-order mesh"); then
 	echo "  *** it was rejected for a different reason than the mesh order" >&2
 	status=1
@@ -4228,6 +4229,45 @@ awk '/^heatsink/{next} /^thermal/{print; print "heatcap = 2 3.45e6"; print "tran
 	"$SRC/thermal_ac.ofe" > "$WORK/tac_tr.ofe"
 th_run tac_tr.ofe
 th_balance "thermal_ac, adiabatic transient (CN)"
+# (2b) 10 節点四面体 (bar_tet2.msh) の交流の発熱 : 2 次の Nedelec (eddy3d_p2.c)。損失 ½σ|e|² を組み立てと同じ
+#      積分点で節点の形状関数に掛けるので Σf = ½I²R が厳密。
+#      1 Hz (表皮効果の補正 3e-10) の交流が同じ格子の DC の熱連成に 1e-8 で一致し、100 kHz・α = 0 では R が
+#      熱連成なしの 2 次の A に一致、中央の断面の温度差が Fourier 級数解に 0.1% 以内 (実測 +0.031%、1 次 +0.17%)
+cp "$SRC/bar_tet2.msh" "$WORK/"
+sed 's/^mesh = .*/mesh = bar_tet2.msh/' "$SRC/thermal_ac.ofe" > "$WORK/tac2.ofe"
+awk '/^frequency/{next} /^awall/{next} /^analysis/{print "analysis = R"; next} /^thermal/{print "thermal = 7.5"; next} {print}' "$WORK/tac2.ofe" > "$WORK/tac2_dc.ofe"
+th_run tac2_dc.ofe
+rdc2=$(th_r); tdc2=$(th_t)
+awk '/^frequency/{print "frequency = 1"; next} /^thermal/{print "thermal = 10.606601717798213"; next} {print}' "$WORK/tac2.ofe" > "$WORK/tac2_lf.ofe"
+th_run tac2_lf.ofe
+compare "10-node tets : AC at 1 Hz (7.5 sqrt 2 A peak) == DC thermal (7.5 A) : R [ohm]" "$(th_r)" "$rdc2" 1e-8
+compare "10-node tets : AC at 1 Hz == DC thermal : T_max [degC]" "$(th_t)" "$tdc2" 1e-8
+th_energy "10-node tets, AC at 1 Hz"
+awk '/^tempco/{print "tempco = 2 0 0"; next} /^thermal/{print "thermal = 100"; print "fieldout = 1"; next} {print}' "$WORK/tac2.ofe" > "$WORK/tac2_a0.ofe"
+th_run tac2_a0.ofe
+ra02=$(th_r)
+tma02=$(awk '/T_mean/ { print $8; exit }' "$WORK/ofe.log")
+th_energy "10-node tets, AC, 100 kHz, alpha = 0"
+dfe2=$(awk -v xc=1e-3 -v z1=0 -v z2=0.5e-3 '
+	/^POINTS/ { np = $2; pt = 1; n = 0; next }
+	pt { for (i = 1; i <= NF; i++) { c[n] = $i; n++ } if (n >= 3 * np) pt = 0; next }
+	/^SCALARS T / { st = 1; m = 0; next }
+	st && /^LOOKUP/ { next }
+	st && (NF != 1) { st = 0; next }
+	st { x = c[3 * m]; z = c[3 * m + 2]; if (((x - xc) ^ 2 < 1e-18) && ((z - z1) ^ 2 < 1e-18)) { s1 += $1; n1++ } if (((x - xc) ^ 2 < 1e-18) && ((z - z2) ^ 2 < 1e-18)) { s2 += $1; n2++ } m++; if (m >= np) st = 0 }
+	END { if ((n1 > 0) && (n2 > 0)) printf "%.12e", s1 / n1 - s2 / n2 }' "$WORK/ofe_field.vtk")
+set -- $(awk -v f=1e5 -v sig=5.8e7 -v k=400 -v I=100 -v R="$ra02" -f "$SRC/ac_heat.awk")
+compare "10-node tets, AC, 100 kHz : T(L/2, surface) - T(L/2, centre) vs Fourier series [K]" "$dfe2" "$1" 1e-3
+compare "10-node tets, AC, 100 kHz : volume-mean temperature rise == q L^2 / (12 k) [K]" \
+	"$(awk -v t="$tma02" 'BEGIN { printf "%.12e", t - 20 }')" "$2" 1e-6
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2.msh"; next} {print}' > "$WORK/tac2_unc.ofe"
+th_run tac2_unc.ofe
+compare "10-node tets, AC, alpha = 0 : R == the uncoupled second-order A [ohm]" "$ra02" \
+	"$(awk '/Z\(1,1\)/ { print $3; exit }' "$WORK/ofe.log")" 1e-6
+awk '/^heatsink/{next} /^thermal/{print; print "heatcap = 2 3.45e6"; print "transient = 0.01 20 0.5"; next} {print}' \
+	"$WORK/tac2.ofe" > "$WORK/tac2_tr.ofe"
+th_run tac2_tr.ofe
+th_balance "10-node tets, AC (alpha = 3.9e-3), adiabatic transient (CN)"
 # (4) 弾くべき入力
 awk '/^frequency/{print "frequencysweep = 1e4 1e5"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_sw.ofe"
 th_reject "AC heating with frequencysweep" tacx_sw.ofe "cannot be combined with frequencysweep"
