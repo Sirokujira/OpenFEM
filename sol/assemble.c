@@ -366,6 +366,13 @@ static void bh_nu_dnu(const material_t *mt, double b, double *nu, double *dnudb2
 }
 
 
+// 公開版 (3 次元渦電流の過渡解析が四面体の B に使う)
+void bh_nu_dnu_pub(const material_t *mt, double b, double *nu, double *dnudb2)
+{
+	bh_nu_dnu(mt, b, nu, dnudb2);
+}
+
+
 // ---- Jiles-Atherton ヒステリシス ----
 
 // Langevin 関数 M_an = Ms(coth(x) - 1/x) と dM_an/dHe

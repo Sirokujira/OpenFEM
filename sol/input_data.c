@@ -1689,7 +1689,7 @@ int input_data(FILE *fp)
 	}
 	else if (TransientOn && (Analysis == ANALYSIS_A)) {
 		// 3 次元渦電流の過渡解析 (A-φ、後退 Euler、ポート 1 を voltage x waveform で電圧駆動)。
-		// 線形か J-A (ヒステリシス) の材料 (B-H は未対応)、周波数掃引とは併用しない
+		// 線形・J-A (ヒステリシス)・等方性の B-H 曲線の材料、周波数掃引とは併用しない
 		if (NPort != 1) {
 			printf("%s\n", "*** transient with analysis A needs exactly one port");
 			return 1;
@@ -1703,8 +1703,8 @@ int input_data(FILE *fp)
 			return 1;
 		}
 		for (int m = 0; m < NMaterial; m++) {
-			if (Material[m].nbh[0] > 0) {
-				printf("%s\n", "*** transient with analysis A supports linear or hysteretic (ja) materials only (no bh)");
+			if ((Material[m].nbh[0] > 0) && Material[m].bhaniso) {
+				printf("%s\n", "*** transient with analysis A supports isotropic bh curves only (not per-axis curves)");
 				return 1;
 			}
 		}

@@ -951,6 +951,13 @@ static struct {
 反復の打ち切りを除いて厳密 (ログに出す)。DC の極限 (V 一定で十分長い時間) では ΔA = 0 になり、
 節点の式は GᵀTG φ = 0 そのもの (= analysis R の導電行列、Whitney の恒等式) なので I = V / R_dc。
 */
+// 3 次元過渡解析で非線形 (J-A のヒステリシスか B-H 曲線) として固定点反復で扱う材料
+static int ed_nonlin(int m)
+{
+	return (Material[m].ja.on || (Material[m].nbh[0] > 0));
+}
+
+
 static void assemble_eddy3d_tr(crs_t *K, crs_t *M, double dt, int skipja)
 {
 	crs_zero(K);
@@ -995,7 +1002,7 @@ static void assemble_eddy3d_tr(crs_t *K, crs_t *M, double dt, int skipja)
 			for (int l = 0; l < nedge; l++) {
 				const int64_t p = crs_find_en(K, ed[k], ed[l]);
 				const double w = sg[k] * sg[l];
-				K->val[p] += w * ((skipja && Material[m].ja.on) ? (te[k][l] / dt) : (se[k][l] + (te[k][l] / dt)));
+				K->val[p] += w * ((skipja && ed_nonlin(m)) ? (te[k][l] / dt) : (se[k][l] + (te[k][l] / dt)));
 				M->val[p] += w * te[k][l] / dt;
 			}
 		}
@@ -1050,7 +1057,7 @@ J-A は常に 3 成分のベクトル J-A (ja_eval_vec3。場が 1 方向なら�
 不連続になり、固定点が 1e-7〜1e-6 の残差で停滞した (実測)。ベクトル J-A は滑らかなので停滞しない。
 */
 typedef struct {
-	int nj;				// J-A の四面体の数
+	int nj;				// 非線形 (J-A / B-H) の四面体の数
 	int *el;			// [nj] 要素番号
 	int32_t *ed;		// [nj*6] 辺 (全体番号)
 	double *vol;		// [nj]
@@ -1066,10 +1073,10 @@ static int ed_ja_open(ed_ja_t *J, FILE *fp_log)
 	const int nelem = edge_elem_count();
 	int nj = 0;
 	for (int e = 0; e < nelem; e++) {
-		if (!Material[edge_elem_mat(e)].ja.on) continue;
+		if (!ed_nonlin(edge_elem_mat(e))) continue;
 		if (edge_elem_kind(e) != MESHELEM_TET) {
-			fprintf(fp_log, "*** hysteresis (ja) with analysis A + transient needs first-order tetrahedra "
-				"for the hysteretic material\n");
+			fprintf(fp_log, "*** hysteresis (ja) / bh with analysis A + transient needs first-order tetrahedra "
+				"for the nonlinear material\n");
 			return 1;
 		}
 		nj++;
@@ -1085,7 +1092,7 @@ static int ed_ja_open(ed_ja_t *J, FILE *fp_log)
 	J->nu6 = (double *)calloc(s1 * 6, sizeof(double));
 	int j = 0;
 	for (int e = 0; e < nelem; e++) {
-		if (!Material[edge_elem_mat(e)].ja.on) continue;
+		if (!ed_nonlin(edge_elem_mat(e))) continue;
 		double g[4][3], vol;
 		J->el[j] = e;
 		J->vol[j] = 0;
@@ -1105,7 +1112,7 @@ static int ed_ja_open(ed_ja_t *J, FILE *fp_log)
 		}
 		j++;
 	}
-	fprintf(fp_log, "  hysteresis : vector J-A on %d tetrahedra (nlsolver = %d %.3e %.3f)\n",
+	fprintf(fp_log, "  nonlinear : %d tetrahedra with J-A (vector) / bh (nlsolver = %d %.3e %.3f)\n",
 		nj, NlMaxiter, NlTol, NlRelax);
 	// 3 成分のベクトル J-A の自己検証 (向きを固定した経路でスカラーの J-A と一致)
 	for (int m = 0; m < NMaterial; m++) {
@@ -1135,7 +1142,8 @@ static void ed_ja_eval(ed_ja_t *J, const double *x)
 #pragma omp parallel for
 #endif
 	for (j = 0; j < nj; j++) {
-		const ja_t *ja = &Material[edge_elem_mat(J->el[j])].ja;
+		const material_t *mt = &Material[edge_elem_mat(J->el[j])];
+		const ja_t *ja = &mt->ja;
 		double bv[3] = {0, 0, 0};
 		for (int k = 0; k < 6; k++) {
 			const double a = x[J->ed[(j * 6) + k]];
@@ -1148,6 +1156,24 @@ static void ed_ja_eval(ed_ja_t *J, const double *x)
 		for (int c = 0; c < 3; c++) dn[c] = ((bmag > 1e-12) ? (bv[c] / bmag) : 0);
 		double *nu6 = &J->nu6[j * 6];
 		double *hv = &J->hn[j * 3];
+		if (!ja->on) {
+			// B-H 曲線 (履歴なし) : H = ν(|B|) B、行列は厳密なヤコビアン ν I + 2 (dν/dB²) B Bᵀ
+			// (H(B) が単調なら正定値。M の Newton と同じ rank-1 の補正)
+			double nu, dn;
+			bh_nu_dnu_pub(mt, bmag, &nu, &dn);
+			for (int c = 0; c < 3; c++) {
+				hv[c] = nu * bv[c];
+				J->mn[(j * 3) + c] = (bv[c] / MU0) - hv[c];
+				J->bn[(j * 3) + c] = bv[c];
+			}
+			nu6[0] = nu + (2 * dn * bv[0] * bv[0]);
+			nu6[1] = nu + (2 * dn * bv[1] * bv[1]);
+			nu6[2] = nu + (2 * dn * bv[2] * bv[2]);
+			nu6[3] = 2 * dn * bv[0] * bv[1];
+			nu6[4] = 2 * dn * bv[1] * bv[2];
+			nu6[5] = 2 * dn * bv[2] * bv[0];
+			continue;
+		}
 		double dref[3] = {1, 0, 0};
 		if (haved) { dref[0] = dir[0]; dref[1] = dir[1]; dref[2] = dir[2]; }
 		else if (bmag > 1e-12) { dref[0] = dn[0]; dref[1] = dn[1]; dref[2] = dn[2]; }
@@ -1299,7 +1325,7 @@ int solve_eddy3d_transient(FILE *fp_log)
 	const double dt = TransientTime / TransientSteps;
 	int hyst = 0;
 	for (int m = 0; m < NMaterial; m++) {
-		if (Material[m].ja.on) hyst = 1;
+		if (ed_nonlin(m)) hyst = 1;
 	}
 	fprintf(fp_log, "  nodes = %d, elements = %d, edges = %d, unknowns = %d\n", nn, nelem, ne, n);
 	fprintf(fp_log, "  t_end = %.6e [s], %d steps (dt = %.6e [s]), voltage = %.6e [V]%s\n",
@@ -1420,7 +1446,7 @@ int solve_eddy3d_transient(FILE *fp_log)
 	}
 	if (fcsv) fclose(fcsv);
 	if (hyst && !ierr) {
-		fprintf(fp_log, "  hysteresis (vector J-A on %d tetrahedra) : fixed-point iterations = %ld (%d steps)\n",
+		fprintf(fp_log, "  nonlinear (%d tetrahedra) : fixed-point iterations = %ld (%d steps)\n",
 			J.nj, fptotal, TransientSteps);
 	}
 	fprintf(fp_log, "  energy : terminals = %.12e, magnetic work = %.12e, joule = %.12e [J] "

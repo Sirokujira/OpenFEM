@@ -5141,6 +5141,52 @@ else
 	echo "  ja on prisms with A + transient : rejected for a different reason -> NG"; status=1
 fi
 
+# ---- 3 次元渦電流の過渡解析 + B-H 曲線 (analysis = A + transient + bh、四面体) ----
+#
+# J-A と同じ固定点反復で、H = ν(|B|) B、行列は厳密なヤコビアン ν I + 2 (dν/dB²) B Bᵀ。
+#   (a) 直線の曲線 (1 点) は μr の線形の過渡解析に一致し、1 刻み 2 回で収束する
+#   (b) 準静的な正弦波の 2 周期目の Σ H^{n+1}ΔB (履歴が無いので連続の極限では 0、右端の和の分だけ残る) が、
+#       Ampere の H_y(z) = J (z − t/2) の各点で曲線から B(H) を引いた awk の同じ和 (ja_bar_loop.awk) に 0.5% 以内
+#   (c) 剛体回転した格子で I(t) と反復回数が変わらない (ヤコビアンの rank-1 項の非対角の検査)
+echo "[A + bh] 3-D eddy current with a B-H curve in the time domain (tetrahedra, exact Jacobian)"
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^voltage/{print "voltage = 1e-4"; next}
+	/^analysis/{print "transient = 2e-4 50"; printf "bh = 2 100 %.17g\n", 100 * 4e-7 * atan2(0, -1) * 50; print "nlsolver = 50 1e-9 1"} {print}' > "$WORK/abh_lin.ofe"
+(cd "$WORK" && "$OFE" -n 2 abh_lin.ofe > /dev/null 2>&1) || { echo "  abh_lin : the run failed -> NG" >&2; status=1; }
+res=$(paste -d, "$WORK/aja_lin.csv" "$WORK/ofe_transient.csv" | awk -F, 'NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
+	END { printf "%s (%d steps, max %.1e)", ((n == 50) && (m < 1e-7)) ? "OK" : "NG", n, m }')
+echo "  straight-line B-H curve == linear mur = 50 : I(t) : $res"
+case "$res" in NG*) status=1 ;; esac
+nfp=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
+if [ "${nfp:-0}" -ge 50 ] && [ "${nfp:-0}" -le 100 ]; then
+	echo "  straight-line B-H curve : fixed-point iterations = $nfp (at most 2 per step) -> OK"
+else
+	echo "  straight-line B-H curve : fixed-point iterations = ${nfp:-none} (expected 50..100) -> NG"; status=1
+fi
+awk '/^ja =/{print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "bh = 2 10000 1.2"; next} {print}' "$WORK/aja_qs.ofe" > "$WORK/abh_qs.ofe"
+(cd "$WORK" && "$OFE" -n 2 abh_qs.ofe > /dev/null 2>&1 && cp ofe_transient.csv abh_qs.csv && cp ofe.log abh_qs.log) || { echo "  abh_qs : the run failed -> NG" >&2; status=1; }
+a3_energy "B-H curve, quasi-static sine"
+wfem=$(awk -F, 'NR == 33 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/abh_qs.csv")
+wref=$(awk -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=32 -v bh="100 0.5 1000 1.0 10000 1.2" -f "$SRC/ja_bar_loop.awk")
+compare "B-H curve, quasi-static sine : 2nd-period sum of H dB == the same sum along H_y(z) = J (z - t/2) (awk) [J]" "$wfem" "$wref" 5e-3
+nfp0=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/abh_qs.log")
+if [ "${nfp0:-0}" -ge 64 ] && [ "${nfp0:-0}" -le 400 ]; then
+	echo "  B-H curve, quasi-static sine : fixed-point iterations = $nfp0 (64 steps, at most 400) -> OK"
+else
+	echo "  B-H curve, quasi-static sine : fixed-point iterations = ${nfp0:-none} (expected 64..400) -> NG"; status=1
+fi
+sed 's/^mesh = .*/mesh = bar_tet_rot.msh/' "$WORK/abh_qs.ofe" > "$WORK/abh_qsr.ofe"
+(cd "$WORK" && "$OFE" -n 2 abh_qsr.ofe > /dev/null 2>&1) || { echo "  abh_qsr : the run failed -> NG" >&2; status=1; }
+res=$(paste -d, "$WORK/abh_qs.csv" "$WORK/ofe_transient.csv" | awk -F, 'NR > 1 { d = ($3 - $10) / 0.5; if (d < 0) d = -d; if (d > m) m = d; n++ }
+	END { printf "%s (%d steps, max %.1e of the peak)", ((n == 64) && (m < 1e-6)) ? "OK" : "NG", n, m }')
+echo "  B-H curve, rigidly rotated mesh : I(t) == axis-aligned mesh : $res"
+case "$res" in NG*) status=1 ;; esac
+nfp=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
+res=$(awk -v a="${nfp:-0}" -v b="${nfp0:-0}" 'BEGIN { printf "%s", ((a > 0) && (b > 0) && (a <= 1.2 * b + 5)) ? "OK" : "NG" }')
+echo "  B-H curve, rigidly rotated mesh : fixed-point iterations = ${nfp:-none} (axis-aligned ${nfp0:-none}, at most 1.2x + 5) -> $res"
+case "$res" in NG*) status=1 ;; esac
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"; print "bh = 2 X 100 0.5"; print "bh = 2 Y 100 0.5"; print "bh = 2 Z 100 0.5"} {print}' > "$WORK/abhx_ax.ofe"
+th_reject "per-axis bh curves with A + transient" abhx_ax.ofe "isotropic bh curves only"
+
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
 # 警告が (a) 罠のケースで必ず出て (b) 正しいケースでは 1 件も出ないことを両方見る
