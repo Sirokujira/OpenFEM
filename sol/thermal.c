@@ -39,12 +39,118 @@ thermal.c
 #define TK(l) ((l) & 1)
 
 
+/*
+格子の種類に依る部分 (非構造格子は 1 次四面体だけ)。
+
+熱連成の反復 (th_steady / th_transient) は格子に依らず、要素の数・材料・係数の
+組み立て・発熱・質量・要素の温度・露出面だけがここで分かれる。**構造格子の
+分岐は従来のコードそのもの** (既存の答えはビット単位で変わらない)。
+
+1 次四面体では ∇N が要素内で一定なので、
+	剛性   K_ij = c ∇N_i・∇N_j V                    (厳密)
+	発熱   f_i  = σ|∇φ|² V / 4  (Σ_i f_i = φᵀKφ が丸めを除いて厳密)
+	質量   M_ij = ρc V (1 + δ_ij) / 20               (厳密)
+	要素の温度 = 4 節点の平均 (1 次補間の体積平均に厳密に一致)
+露出面は熱を通す四面体の面のうち、熱を通す四面体 1 つにしか属さないもの
+(格子の外か k = 0 の要素に接する)。電極の面 (3 節点がすべて導体) は除く。
+*/
+static int64_t th_nelem(void)
+{
+	return (MeshMode ? (int64_t)NTet : ((int64_t)Nx * Ny * Nz));
+}
+
+
+static int th_emat(int64_t c)
+{
+	return (MeshMode ? elem3d_mat((int)c) : (int)CellMaterial[c]);
+}
+
+
+// 露出面の直方体の許容幅 (形状判定 setup.c と同じく解析領域の大きさの EPS 倍)
+static double SurfEps;
+
+static void th_extent(void)
+{
+	if (!MeshMode) {
+		SurfEps = EPS * (fabs(Xn[Nx] - Xn[0]) + fabs(Yn[Ny] - Yn[0]) + fabs(Zn[Nz] - Zn[0]));
+		return;
+	}
+	double lo[3] = {1e300, 1e300, 1e300}, hi[3] = {-1e300, -1e300, -1e300};
+	for (int i = 0; i < NNode; i++) {
+		const double p[3] = {Xp[i], Yp[i], Zp[i]};
+		for (int d = 0; d < 3; d++) {
+			if (p[d] < lo[d]) lo[d] = p[d];
+			if (p[d] > hi[d]) hi[d] = p[d];
+		}
+	}
+	SurfEps = EPS * ((hi[0] - lo[0]) + (hi[1] - lo[1]) + (hi[2] - lo[2]));
+}
+
+
+// 四面体の露出面 [3*TFaceN] (熱を通す四面体の境界の三角形、電極の面を除く)
+static int32_t *TFace;
+static int TFaceN;
+
+static int tface_cmp(const void *a, const void *b)
+{
+	const int32_t *p = (const int32_t *)a, *q = (const int32_t *)b;
+	for (int d = 0; d < 3; d++) {
+		if (p[d] != q[d]) return ((p[d] < q[d]) ? -1 : 1);
+	}
+	return 0;
+}
+
+static void tet_faces_build(const double *kcell)
+{
+	static const int fl[4][3] = {{1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {0, 1, 2}};
+	int nf = 0;
+	for (int e = 0; e < NTet; e++) {
+		if (kcell[e] > 0) nf += 4;
+	}
+	int32_t *all = (int32_t *)malloc(((size_t)nf * 3 + 1) * sizeof(int32_t));
+	int m = 0;
+	for (int e = 0; e < NTet; e++) {
+		if (kcell[e] <= 0) continue;
+		for (int f = 0; f < 4; f++) {
+			int32_t v[3];
+			for (int l = 0; l < 3; l++) v[l] = Tet[(e * 4) + fl[f][l]];
+			// 昇順に並べて面の鍵にする
+			for (int a = 0; a < 2; a++) {
+				for (int b = a + 1; b < 3; b++) {
+					if (v[b] < v[a]) { const int32_t w = v[a]; v[a] = v[b]; v[b] = w; }
+				}
+			}
+			for (int l = 0; l < 3; l++) all[(m * 3) + l] = v[l];
+			m++;
+		}
+	}
+	qsort(all, (size_t)nf, 3 * sizeof(int32_t), tface_cmp);
+	TFace = (int32_t *)malloc(((size_t)nf * 3 + 1) * sizeof(int32_t));
+	TFaceN = 0;
+	for (int i = 0; i < nf; ) {
+		int j = i + 1;
+		while ((j < nf) && !tface_cmp(&all[i * 3], &all[j * 3])) j++;
+		if ((j - i) == 1) {
+			const int32_t *v = &all[i * 3];
+			const int ncond = (NodeConductor[v[0]] >= 0) + (NodeConductor[v[1]] >= 0)
+			                + (NodeConductor[v[2]] >= 0);
+			if (ncond < 3) {
+				for (int l = 0; l < 3; l++) TFace[(TFaceN * 3) + l] = v[l];
+				TFaceN++;
+			}
+		}
+		i = j;
+	}
+	free(all);
+}
+
+
 // 面の中心 (xc, yc, zc) が行 bc の直方体に入るか (直方体なしの行はどこでも入る)。
 // 許容幅は形状判定 (setup.c) と同じく解析領域の大きさの EPS 倍
 static int surf_in(const surfbc_t *bc, double xc, double yc, double zc)
 {
 	if (!bc->box) return 1;
-	const double eps = EPS * (fabs(Xn[Nx] - Xn[0]) + fabs(Yn[Ny] - Yn[0]) + fabs(Zn[Nz] - Zn[0]));
+	const double eps = SurfEps;
 	return (xc >= (bc->g[0] - eps)) && (xc <= (bc->g[1] + eps))
 	    && (yc >= (bc->g[2] - eps)) && (yc <= (bc->g[3] + eps))
 	    && (zc >= (bc->g[4] - eps)) && (zc <= (bc->g[5] + eps));
@@ -86,8 +192,8 @@ static const surfbc_t *surf_bc(int rad, double xc, double yc, double zc, int *id
 //   各行 (対流 0..NConv-1、輻射 NConv..) の直方体に中心が入る露出面の数を足す
 //
 // 面の係数と周囲温度は surf_bc() で面の中心から引く (あとに書いた行ほど優先)
-static double surf_faces(crs_t *B, double *g, const double *t, const double *kcell, int rad,
-	int *hits)
+static double surf_faces_grid(crs_t *B, double *g, const double *t, const double *kcell,
+	int rad, int *hits)
 {
 	const double gp[2] = {0.5 - 0.5 / sqrt(3.0), 0.5 + 0.5 / sqrt(3.0)};
 	double qsum = 0;
@@ -222,13 +328,201 @@ static double surf_faces(crs_t *B, double *g, const double *t, const double *kce
 }
 
 
+// surf_faces_grid の四面体版 (露出面は tet_faces_build で作った三角形)。
+// 対流の面の質量は h A (1 + δ_ij) / 12、右辺は h T_amb A / 3、熱は
+// h A (3 節点の平均 - T_amb) (いずれも 1 次の三角形で厳密)。
+// 輻射は三角形の 3 点則 (重心座標 (2/3, 1/6, 1/6) の巡回、重み A/3、2 次まで厳密) で、
+// 接線と右辺と熱で評価点を揃える
+static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int *hits)
+{
+	double qsum = 0;
+	int64_t nface = 0;
+	int bad = 0;
+
+	for (int f = 0; f < TFaceN; f++) {
+		const int32_t *nd = &TFace[f * 3];
+		const double xc = (Xp[nd[0]] + Xp[nd[1]] + Xp[nd[2]]) / 3;
+		const double yc = (Yp[nd[0]] + Yp[nd[1]] + Yp[nd[2]]) / 3;
+		const double zc = (Zp[nd[0]] + Zp[nd[1]] + Zp[nd[2]]) / 3;
+		if (rad == 2) {
+			const surfbc_t *cb = surf_bc(0, xc, yc, zc, NULL);
+			const surfbc_t *rb = surf_bc(1, xc, yc, zc, NULL);
+			if ((cb && (cb->c > 0)) || (rb && (rb->c > 0))) nface++;
+			if (hits) {
+				for (int e = 0; e < (NConv + NRad); e++) {
+					const surfbc_t *bc = ((e < NConv) ? &ConvBC[e] : &RadBC[e - NConv]);
+					if (surf_in(bc, xc, yc, zc)) hits[e]++;
+				}
+			}
+			continue;
+		}
+		const surfbc_t *bc = surf_bc(rad, xc, yc, zc, NULL);
+		if ((bc == NULL) || (bc->c <= 0)) continue;
+		nface++;
+		const double hc = bc->c, ta = bc->t;
+
+		const double ax = Xp[nd[1]] - Xp[nd[0]], ay = Yp[nd[1]] - Yp[nd[0]], az = Zp[nd[1]] - Zp[nd[0]];
+		const double bx = Xp[nd[2]] - Xp[nd[0]], by = Yp[nd[2]] - Yp[nd[0]], bz = Zp[nd[2]] - Zp[nd[0]];
+		const double cx = (ay * bz) - (az * by);
+		const double cy = (az * bx) - (ax * bz);
+		const double cz = (ax * by) - (ay * bx);
+		const double area = sqrt((cx * cx) + (cy * cy) + (cz * cz)) / 2;
+
+		double me[3][3];
+		double ge[3] = {0, 0, 0};
+		if (!rad) {
+			for (int m = 0; m < 3; m++) {
+				for (int mm = 0; mm < 3; mm++) me[m][mm] = hc * area * ((m == mm) ? 2 : 1) / 12;
+				ge[m] = hc * ta * area / 3;
+			}
+			if (t) {
+				const double tm = (t[nd[0]] + t[nd[1]] + t[nd[2]]) / 3;
+				qsum += hc * area * (tm - ta);
+			}
+		}
+		else {
+			const double ta4 = pow(ta + KELVIN, 4);
+			for (int m = 0; m < 3; m++) {
+				for (int mm = 0; mm < 3; mm++) me[m][mm] = 0;
+			}
+			for (int gq = 0; gq < 3; gq++) {
+				double nn[3], tg = 0;
+				for (int m = 0; m < 3; m++) {
+					nn[m] = ((m == gq) ? (2.0 / 3) : (1.0 / 6));
+					tg += nn[m] * t[nd[m]];
+				}
+				const double tk = tg + KELVIN;
+				if (tk <= 0) bad = 1;
+				const double w = area / 3;
+				const double qv = hc * STEFAN * (tk * tk * tk * tk - ta4);
+				const double dq = 4 * hc * STEFAN * tk * tk * tk;
+				qsum += w * qv;
+				for (int m = 0; m < 3; m++) {
+					ge[m] += w * (dq * tg - qv) * nn[m];
+					for (int mm = 0; mm < 3; mm++) me[m][mm] += w * dq * nn[m] * nn[mm];
+				}
+			}
+		}
+
+		if (B) {
+			for (int m = 0; m < 3; m++) {
+				for (int mm = 0; mm < 3; mm++) {
+					const int64_t pos = crs_find_tri(B, nd[m], nd[mm]);
+					if (pos >= 0) B->val[pos] += me[m][mm];
+				}
+			}
+		}
+		if (g) {
+			for (int m = 0; m < 3; m++) g[nd[m]] += ge[m];
+		}
+	}
+
+	if (bad) return -1e300;
+	return ((t || (rad == 1)) ? qsum : (double)nface);
+}
+
+
+static double surf_faces(crs_t *B, double *g, const double *t, const double *kcell, int rad,
+	int *hits)
+{
+	if (MeshMode) return surf_faces_tet(B, g, t, rad, hits);
+	return surf_faces_grid(B, g, t, kcell, rad, hits);
+}
+
+
+// ---- 要素ごとの係数の組み立て・発熱・質量 (四面体) ----
+
+static void tet_assemble(crs_t *A, const double *coef)
+{
+	crs_zero(A);
+	for (int e = 0; e < NTet; e++) {
+		const double c = coef[e];
+		if (c <= 0) continue;
+		const int32_t *nd = &Tet[e * 4];
+		double gr[4][3], vol;
+		if (tet_grad_pub(nd, gr, &vol)) continue;
+		for (int l = 0; l < 4; l++) {
+			for (int m = 0; m < 4; m++) {
+				// assemble_elem3d の等方性の式と同じ順 (α = 0 で熱連成なしと同じ行列)
+				const double v = (c * gr[l][0] * gr[m][0])
+				               + (c * gr[l][1] * gr[m][1])
+				               + (c * gr[l][2] * gr[m][2]);
+				const int64_t p = crs_find_tri(A, nd[l], nd[m]);
+				if (p >= 0) A->val[p] += v * vol;
+			}
+		}
+	}
+}
+
+
+static void tet_joule(const double *phi, const double *sig, double *f)
+{
+	for (int i = 0; i < NNode; i++) f[i] = 0;
+	for (int e = 0; e < NTet; e++) {
+		const double sg = sig[e];
+		if (sg <= 0) continue;
+		const int32_t *nd = &Tet[e * 4];
+		double gr[4][3], vol;
+		if (tet_grad_pub(nd, gr, &vol)) continue;
+		double ex = 0, ey = 0, ez = 0;
+		for (int l = 0; l < 4; l++) {
+			ex += phi[nd[l]] * gr[l][0];
+			ey += phi[nd[l]] * gr[l][1];
+			ez += phi[nd[l]] * gr[l][2];
+		}
+		const double qe = sg * ((ex * ex) + (ey * ey) + (ez * ez)) * vol / 4;
+		for (int l = 0; l < 4; l++) f[nd[l]] += qe;
+	}
+}
+
+
+static void tet_mass(crs_t *A, const double *coef)
+{
+	crs_zero(A);
+	for (int e = 0; e < NTet; e++) {
+		const double c = coef[e];
+		if (c <= 0) continue;
+		const int32_t *nd = &Tet[e * 4];
+		double gr[4][3], vol;
+		if (tet_grad_pub(nd, gr, &vol)) continue;
+		for (int l = 0; l < 4; l++) {
+			for (int m = 0; m < 4; m++) {
+				const int64_t p = crs_find_tri(A, nd[l], nd[m]);
+				if (p >= 0) A->val[p] += c * vol * ((l == m) ? 2 : 1) / 20;
+			}
+		}
+	}
+}
+
+
+static void th_assemble(crs_t *A, const double *coef)
+{
+	if (MeshMode) tet_assemble(A, coef);
+	else          assemble_cell(A, coef);
+}
+
+
+static void th_joule(const double *phi, const double *sig, double *f)
+{
+	if (MeshMode) tet_joule(phi, sig, f);
+	else          joule_load(phi, sig, f);
+}
+
+
+static void th_mass(crs_t *A, const double *coef)
+{
+	if (MeshMode) tet_mass(A, coef);
+	else          assemble_mass_cell(A, coef);
+}
+
+
 // σ(T) を要素ごとに。入力解釈で σ には周囲温度での補正
 // σ_s = σ0 / (1 + α(T_amb - T0)) が掛かっているので、それを外して掛け直す。
 // α = 0 なら因子は厳密に 1 で、熱連成なしと同じ σ になる
 static int th_sigma(FILE *fp_log, int64_t nc, const double *tcell, double *scell)
 {
 	for (int64_t c = 0; c < nc; c++) {
-		const material_t *mt = &Material[CellMaterial[c]];
+		const material_t *mt = &Material[th_emat(c)];
 		if (mt->sigma <= 0) {
 			scell[c] = 0;
 			continue;
@@ -255,7 +549,7 @@ static int th_conduct(FILE *fp_log, crs_t *A, const double *scell, unsigned char
 {
 	const int n = (int)A->n;
 
-	assemble_cell(A, scell);
+	th_assemble(A, scell);
 	crs_diag(A, diag);
 	double dmax = 0;
 	for (int i = 0; i < n; i++) {
@@ -288,6 +582,20 @@ static int th_conduct(FILE *fp_log, crs_t *A, const double *scell, unsigned char
 static double th_celltemp(const double *tn, const double *kcell, double *tcell)
 {
 	double tmax = -1e300;
+	if (MeshMode) {
+		// 四面体 : 4 節点の平均 (1 次補間の体積平均)
+		for (int e = 0; e < NTet; e++) {
+			if (kcell[e] <= 0) continue;
+			double t = 0;
+			for (int l = 0; l < 4; l++) {
+				const double tl = tn[Tet[(e * 4) + l]];
+				t += tl / 4;
+				if (tl > tmax) tmax = tl;
+			}
+			tcell[e] = t;
+		}
+		return tmax;
+	}
 	for (int i = 0; i < Nx; i++) {
 	for (int j = 0; j < Ny; j++) {
 	for (int k = 0; k < Nz; k++) {
@@ -311,6 +619,16 @@ static double th_celltemp(const double *tn, const double *kcell, double *tcell)
 static double th_tmean(const double *tcell, const double *scell)
 {
 	double vsum = 0, tsum = 0;
+	if (MeshMode) {
+		for (int e = 0; e < NTet; e++) {
+			if (scell[e] <= 0) continue;
+			double gr[4][3], v;
+			if (tet_grad_pub(&Tet[e * 4], gr, &v)) continue;
+			vsum += v;
+			tsum += v * tcell[e];
+		}
+		return ((vsum > 0) ? (tsum / vsum) : Temperature);
+	}
 	for (int i = 0; i < Nx; i++) {
 	for (int j = 0; j < Ny; j++) {
 	for (int k = 0; k < Nz; k++) {
@@ -380,7 +698,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	double *gport)
 {
 	const int n = (int)B->n;
-	const int64_t nc = (int64_t)Nx * Ny * Nz;
+	const int64_t nc = th_nelem();
 	const int64_t nnz = B->rowptr[n];
 	const double dts = TransientTime / TransientSteps;
 	const double th = TransientTheta;
@@ -396,12 +714,12 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	double *resold = (double *)malloc((size_t)n * sizeof(double));
 	double *f1     = (double *)malloc((size_t)n * sizeof(double));
 	for (int64_t c = 0; c < nc; c++) {
-		ccell[c] = ((kcell[c] > 0) ? Material[CellMaterial[c]].cth : 0);
+		ccell[c] = ((kcell[c] > 0) ? Material[th_emat(c)].cth : 0);
 	}
 	crs_t M, S;
 	crs_alloc(&M);
 	crs_alloc(&S);
-	assemble_mass_cell(&M, ccell);
+	th_mass(&M, ccell);
 
 	FILE *fcsv = fopen(FN_transient, "w");
 	if (fcsv == NULL) {
@@ -426,7 +744,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	if (!ierr && (RadEps > 0)) ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, 0);
 	if (!ierr) {
 		r = 1 / g;
-		joule_load(phi, scell, f1);
+		th_joule(phi, scell, f1);
 		p1 = 0;
 		for (int i = 0; i < n; i++) {
 			f[i] = cur * cur * f1[i];
@@ -461,7 +779,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 			if ((ierr = th_sigma(fp_log, nc, tcell, scell)) != 0) break;
 			if ((ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, tag, 1.0, &g)) != 0) break;
 			r = 1 / g;
-			joule_load(phi, scell, f1);
+			th_joule(phi, scell, f1);
 			p1 = 0;
 			for (int i = 0; i < n; i++) {
 				f[i] = cur * cur * f1[i];
@@ -602,7 +920,7 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	double *gport)
 {
 	const int n = (int)B->n;
-	const int64_t nc = (int64_t)Nx * Ny * Nz;
+	const int64_t nc = th_nelem();
 	int ierr = 0;
 
 	double rprev = 0, tmprev = 0, r = 0, g = 0, tmax = 0;
@@ -616,7 +934,7 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		pterm = ThermalCurrent * ThermalCurrent * r;
 
 		// 発熱と熱 : T = T_D + u、自由節点で B u = f - B T_D
-		joule_load(phi, scell, f);
+		th_joule(phi, scell, f);
 		ptot = 0;
 		for (int i = 0; i < n; i++) ptot += f[i];
 		// 輻射 : いまの温度のまわりで Newton 線形化して行列と右辺に入れる。
@@ -707,10 +1025,19 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 int solve_thermal(FILE *fp_log, double *gport)
 {
 	const int n = (int)num_node();
-	const int64_t nc = (int64_t)Nx * Ny * Nz;
+	const int64_t nc = th_nelem();
 	int ierr = 0;
 
 	fprintf(fp_log, "\n=== electro-thermal analysis ===\n");
+	// 非構造格子は 1 次四面体だけ (発熱・質量・露出面を四面体でしか組んでいない)。
+	// 他の種別は黙って誤答にせず入力エラーにする
+	if (MeshMode && ((NTet < 1) || (NHex > 0) || (NPrism > 0) || (NPyr > 0) || (TetOrder >= 2))) {
+		fprintf(fp_log, "*** thermal on an unstructured mesh supports linear tetrahedra "
+			"only (this mesh has %d tetrahedra (order %d), %d hexahedra, %d prisms, "
+			"%d pyramids)\n", NTet, TetOrder, NHex, NPrism, NPyr);
+		return 1;
+	}
+	th_extent();
 	fprintf(fp_log, "  drive current = %.6e [A], ambient (initial) = %.4f [degC]\n",
 		ThermalCurrent, Temperature);
 	for (int p = 0; p <= NPort; p++) {
@@ -740,8 +1067,11 @@ int solve_thermal(FILE *fp_log, double *gport)
 	double *kcell = (double *)malloc((size_t)nc * sizeof(double));
 	for (int64_t c = 0; c < nc; c++) {
 		tcell[c] = Temperature;
-		kcell[c] = Material[CellMaterial[c]].kth;
+		kcell[c] = Material[th_emat(c)].kth;
 	}
+	TFace = NULL;
+	TFaceN = 0;
+	if (MeshMode) tet_faces_build(kcell);
 
 	unsigned char *fix  = (unsigned char *)malloc((size_t)n * sizeof(unsigned char));
 	unsigned char *fixt = (unsigned char *)malloc((size_t)n * sizeof(unsigned char));
@@ -760,7 +1090,7 @@ int solve_thermal(FILE *fp_log, double *gport)
 	crs_t A, B;
 	crs_alloc(&A);
 	crs_alloc(&B);
-	assemble_cell(&B, kcell);
+	th_assemble(&B, kcell);
 	crs_diag(&B, diag);
 	double dmaxt = 0;
 	for (int i = 0; i < n; i++) {
@@ -837,6 +1167,8 @@ int solve_thermal(FILE *fp_log, double *gport)
 	free(fix); free(fixt); free(phi); free(work); free(diag);
 	free(f); free(tn); free(rhs); free(u); free(gc); free(gr); free(q);
 	free(b0);
+	free(TFace);
+	TFace = NULL;
 
 	return ierr;
 }

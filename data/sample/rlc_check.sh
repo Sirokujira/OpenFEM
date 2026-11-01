@@ -2416,7 +2416,9 @@ na_run() {	# na_run <dir> : $WORK/<dir>/x.ofe を解いて ofe_post まで
 #   (a) 3 つの電流で曲線の 2 区間目 (150 A)・3 区間目 (200 A)・外挿の区間 (250 A) を通す。
 #       許容 0.1% : 線形の層 (μr = 50) と同じ格子の離散化誤差が L -0.028% (実測)
 #       磁束で駆動される構成 (層の μ を上げると H が下がる) なので収束は遅く、
-#       上限 60 回 (実測 18〜56 回)。上限を越えたら入力エラーになる
+#       上限 100 回 (実測 16〜38 回、許容 1e-7)。上限を越えたら入力エラーになる。
+#       許容を内側の COCG と同じ 1e-9 にすると回数が丸めの雑音で決まり、CI で上限を
+#       越えた (手元 54 回)
 for I in 150 200 250; do
 	mkdir -p "$WORK/na$I"
 	sed "s/^current = .*/current = $I/" "$SRC/bar_air_bh.ofe" > "$WORK/na$I/x.ofe"
@@ -3178,9 +3180,23 @@ awk '/^thermal/{print "frequency = 1e3"} {print}' "$SRC/thermal_bar.ofe" > "$WOR
 th_reject "thermal with frequency" thx_freq.ofe "DC coupling"
 awk '/^heatsink = 1/{print "heatsink = 3 20"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thx_badsink.ofe"
 th_reject "heatsink on a conductor that does not exist" thx_badsink.ofe "does not exist"
-awk '/^analysis/{print "kthermal = 2 10"; print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next}
-	{print}' "$SRC/box_tet.ofe" > "$WORK/thx_tet.ofe"
-th_reject "thermal on an unstructured mesh" thx_tet.ofe "structured grid only"
+#     非構造格子は 1 次四面体だけ (発熱・質量・露出面を四面体でしか組んでいない)。
+#     六面体・2 次四面体は黙って誤答にせず解く段で弾く (理由はログ)
+sed 's/^mesh = .*/mesh = bar_hex.msh/' "$SRC/thermal_tet.ofe" > "$WORK/thx_hex.ofe"
+cp "$SRC/bar_hex.msh" "$SRC/box_p2.msh" "$WORK/"
+mesh_reject "thermal on a hexahedral mesh" thx_hex.ofe
+if ! grep -q "linear tetrahedra only" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than the element kind" >&2
+	status=1
+fi
+awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
+	/^analysis/{print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next}
+	{print}' "$SRC/box_p2.ofe" > "$WORK/thx_p2.ofe"
+mesh_reject "thermal on a second-order tetrahedral mesh" thx_p2.ofe
+if ! grep -q "linear tetrahedra only" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than the element order" >&2
+	status=1
+fi
 #     h = 0 の対流は熱の逃げ道にならない (ヒートシンクも無ければ定常解が無い)
 awk '/^convection/{print "convection = 0 30"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thx_h0.ofe"
 th_reject "convection with h = 0 and no heat sink" thx_h0.ofe "at least one heatsink"
@@ -3225,6 +3241,155 @@ th_reject "a convection box with four coordinates" thx_box4.ofe "invalid convect
 awk '/^radiation/{print "radiation = 1.5 10  0 0.01  0 1e-3  0 0"; next} {print}' \
 	"$SRC/thermal_rad.ofe" > "$WORK/thx_radbox.ofe"
 th_reject "a radiation box with emissivity > 1" thx_radbox.ofe "invalid radiation data"
+
+# ---- 電気-熱連成の非構造格子 (1 次四面体) ----
+#
+# data/sample/thermal_tet.ofe : thermal_bar.ofe と同じ棒 (10mm x 1mm x 1mm) を四面体で
+# 切ったもの (thermal_tet20/40.msh、mkmesh.py bar)。構造格子の閉形式 (th_exact /
+# th_fin / th_radfin / th_adia / th_four) がそのまま使える。熱の反復は格子に依らず、
+# 四面体で分かれるのは剛性・発熱 (σ|∇φ|² V/4)・質量 (ρc V (1+δ)/20)・要素の温度
+# (4 節点の平均)・露出面 (三角形) だけ。
+#
+# **断面の温度の一様性に注意。** 構造格子の断面 1 x 1 セルは節点が 4 隅だけなので
+# 対称性から断面で温度が一様になり、1 次元の閉形式 (フィン近似) が離散解の極限に
+# なる。四面体の格子 (y 1 x z 2 分割) は側面の中央に節点があるので、側面から
+# 冷やすと断面の温度勾配 (Bi = hw/k) を本当に解く。h = 200 (Bi = 0.02) では
+# T_max が 1 次元の式から +0.18% ずれて細分しても縮まない (実測) — 誤差ではなく
+# 3 次元の物理なので、側面から冷やす閉形式は Bi の小さい h = 20 で比べる
+echo "[thermal_tet] electro-thermal coupling on linear tetrahedra"
+cp "$SRC/thermal_tet.ofe" "$SRC/thermal_tet20.msh" "$SRC/thermal_tet40.msh" \
+	"$SRC/bar_tet.msh" "$SRC/bar_air.msh" "$WORK/"
+tt_mesh() {	# tt_mesh <nx> <入力> <出力> : 格子を thermal_tet<nx>.msh に差し替える
+	awk -v nx="$1" '/^mesh/{print "mesh = thermal_tet" nx ".msh"; next} {print}' "$WORK/$2" > "$WORK/$3"
+}
+tt_order() {	# tt_order <ラベル> <20 分割の値> <40 分割の値> <閉形式> [<基準を引く量>]
+	res=$(awk -v a="$2" -v b="$3" -v e="$4" -v z="${5:-0}" 'BEGIN {
+		e1 = (a - e) / (e - z); if (e1 < 0) e1 = -e1
+		e2 = (b - e) / (e - z); if (e2 < 0) e2 = -e2
+		q = (e2 > 0) ? e1 / e2 : 0
+		printf "%s (err %.2e -> %.2e, ratio %.3f)", ((q > 3.8) && (q < 4.2)) ? "OK" : "NG", e1, e2, q }')
+	echo "  $1 (20 -> 40 cells) : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+# (1) 両端ヒートシンク (I = 7.5 A, mL = 1.5) : 閉形式・恒等式・誤差の次数。
+#     許容 0.1% : h² の離散化誤差 (40 分割で R -0.020% / T_max -0.032%、実測)
+th_run thermal_tet.ofe
+set -- $(th_exact 7.5 4e-3)
+compare "tet : R(I = 7.5 A, mL = 1.5) [ohm]" "$(th_r)" "$1" 0.001
+compare "tet : T_max(I = 7.5 A) [degC]" "$(th_t)" "$2" 0.001
+th_energy "tet : thermal_tet"
+r40=$(th_r); rex=$1
+tt_mesh 20 thermal_tet.ofe tt20.ofe
+th_run tt20.ofe
+tt_order "tet : second-order convergence of R" "$(th_r)" "$r40" "$rex"
+#     場の出力の温度の最大 = ログの T_max
+awk '/^thermal/{print; print "fieldout = 1"; next} {print}' "$SRC/thermal_tet.ofe" > "$WORK/tt_fo.ofe"
+th_run tt_fo.ofe
+tvtk=$(awk '/^SCALARS T / { f = 1; next } f && /^LOOKUP/ { next }
+	f && (NF == 1) { if (($1 + 0) > m) m = $1 + 0; next } f { f = 0 }
+	END { printf "%.9e", m }' "$WORK/ofe_field.vtk")
+compare "tet : max of the T field == T_max in the log [degC]" "$tvtk" "$(th_t)" 1e-8
+# (2) α = 0 : R は熱連成なしの値に厳密に一致し、この格子では T_max も放物線の頂点に
+#     全桁一致する (x の各断面に節点が並ぶので、一様な発熱の節点荷重が断面ごとに揃う)
+awk '/^tempco/{print "tempco = 2 0 0"; next} {print}' "$SRC/thermal_tet.ofe" > "$WORK/tt_a0.ofe"
+th_run tt_a0.ofe
+set -- $(th_exact 7.5 0)
+compare "tet : R(alpha = 0) == the uncoupled value [ohm]" "$(th_r)" "$1" 1e-10
+compare "tet : T_max(alpha = 0) == parabola, nodally exact [degC]" "$(th_t)" "$2" 1e-10
+# (3) ヒートシンク + 側面の対流 (フィン、h = 20 で Bi = 0.002)。面の数は
+#     y 側面 2 x 40 x 2 + z 側面 2 x 40 x 1 の四角形 = 240 枚 x 三角形 2 = 480
+#     (電極の面は除く)。ヒートシンクと対流の両方があるので、対流の右辺を
+#     熱の収支に入れ忘れるとエネルギーの恒等式が落ちる
+awk '/^thermal/{print "convection = 20 30"} {print}' "$SRC/thermal_tet.ofe" > "$WORK/tt_fin.ofe"
+th_run tt_fin.ofe
+set -- $(th_fin 7.5 20)
+compare "tet : R(fin, h = 20) [ohm]" "$(th_r)" "$1" 0.001
+compare "tet : T_max(fin, h = 20) [degC]" "$(th_t)" "$2" 0.001
+th_energy "tet : fin, h = 20"
+th_nface "tet : fin (sides only, not the electrode faces)" 480
+r40=$(th_r); rex=$1
+tt_mesh 20 tt_fin.ofe tt_fin20.ofe
+th_run tt_fin20.ofe
+tt_order "tet : second-order convergence, fin h = 20" "$(th_r)" "$r40" "$rex"
+#     h = 200 は 3 次元の効果で 1 次元の式と比べられない (上の注意) ので恒等式だけ
+awk '/^thermal/{print "convection = 200 30"} {print}' "$SRC/thermal_tet.ofe" > "$WORK/tt_fin200.ofe"
+th_run tt_fin200.ofe
+th_energy "tet : fin, h = 200"
+#     直方体で y = 0 の側面だけに対流 : 40 x 2 x 2 = 160 枚。面の中心でなく頂点で
+#     判定すると z 側面の三角形が混ざる
+awk '/^thermal/{print "convection = 200 30  0 0.01  0 0  0 1e-3"} {print}' \
+	"$SRC/thermal_tet.ofe" > "$WORK/tt_box.ofe"
+th_run tt_box.ofe
+th_energy "tet : convection on the y = 0 face only"
+th_nface "tet : convection box on y = 0" 160
+# (4) ヒートシンク + 輻射 (thermal_rad.ofe と同じ k = 1, ε = 1, I = 2.5 A)。
+#     k = 1 なので断面の勾配が T_max に +0.09% 出る (R には -0.008%、実測)。
+#     α = 0 では Newton の 2 次収束で 4 回 (実測)。線形化の誤りは同じ不動点へ
+#     遅く収束するだけなので回数を assert する
+awk '/^kthermal/{print "kthermal = 2 1"; next} /^thermal/{print "radiation = 1 10"; print "thermal = 2.5"; next} {print}' \
+	"$SRC/thermal_tet.ofe" > "$WORK/tt_rad.ofe"
+th_run tt_rad.ofe
+set -- $(th_radfin)
+compare "tet : R(heat sinks + radiation) [ohm]" "$(th_r)" "$1" 0.001
+compare "tet : T_max(heat sinks + radiation) [degC]" "$(th_t)" "$2" 0.002
+th_energy "tet : heat sinks + radiation"
+awk '/^tempco/{print "tempco = 2 0 0"; next} {print}' "$WORK/tt_rad.ofe" > "$WORK/tt_rad0.ofe"
+th_run tt_rad0.ofe
+nit=$(awk '/converged in/ { print $3; exit }' "$WORK/ofe.log")
+if [ -n "$nit" ] && [ "$nit" -le 5 ]; then
+	echo "  tet : Newton on radiation (alpha = 0) : converged in $nit iterations (<= 5) -> OK"
+else
+	echo "  tet : Newton on radiation (alpha = 0) : ${nit:-?} iterations (> 5) -> NG" >&2
+	status=1
+fi
+# (5) 過渡解析。断熱の棒は発熱 σ|∇φ|² V/4 と質量の行和 ρc V/4 が同じ節点の重みなので
+#     温度が一様のまま進み、θ 法の漸化式に機械精度で一致する (四面体でも厳密)。
+#     質量の (1 + δ) の重みを取り違えると行和が崩れてここで落ちる
+for th in 1 0.5; do
+	awk -v th="$th" '/^heatsink/{next}
+		/^thermal/{print "heatcap = 2 3.4e6"; print "transient = 10 100 " th} {print}' \
+		"$SRC/thermal_tet.ofe" > "$WORK/tt_ad.ofe"
+	th_run tt_ad.ofe
+	set -- $(th_adia 100 "$th")
+	compare "tet : adiabatic bar, theta = $th : R == the discrete recurrence [ohm]" "$(th_r)" "$1" 1e-9
+	compare "tet : adiabatic bar, theta = $th : T == the discrete recurrence [degC]" "$(th_t)" "$2" 1e-9
+	th_balance "tet : adiabatic bar, theta = $th"
+done
+#     ヒートシンクの棒 (thermal_transient.ofe と同じ) : Fourier 級数解と空間の次数。
+#     許容 0.1% : 40 分割で +0.040% (実測)
+awk '/^tempco/{print "tempco = 2 0 0"; next} /^temperature/{print "temperature = 20"; next}
+	/^thermal/{print; print "heatcap = 2 3.4e6"; print "transient = 2 200 0.5"; next} {print}' \
+	"$SRC/thermal_tet.ofe" > "$WORK/tt_tr.ofe"
+th_run tt_tr.ofe
+tf=$(th_four); t40=$(th_t)
+compare "tet : heat-sink bar, transient : T_max - 20 vs Fourier series [K]" \
+	"$(awk -v t="$t40" 'BEGIN { printf "%.12e", t - 20 }')" "$(awk -v t="$tf" 'BEGIN { printf "%.12e", t - 20 }')" 0.001
+th_balance "tet : heat-sink bar, transient"
+tt_mesh 20 tt_tr.ofe tt_tr20.ofe
+th_run tt_tr20.ofe
+tt_order "tet : second-order convergence in space, transient" "$(th_t)" "$t40" "$tf" 20
+#     CN でヒートシンク + 対流 + 輻射 : 4 経路の収支 ((1-θ) 側の項は CN でしか見えない)
+awk '/^thermal/{print "convection = 100 30"; print "radiation = 0.9 10"; print "heatcap = 2 3.4e6"; print "transient = 1 50 0.5"} {print}' \
+	"$SRC/thermal_tet.ofe" > "$WORK/tt_trall.ofe"
+th_run tt_trall.ofe
+th_balance "tet : transient (CN, sinks + convection + radiation)"
+# (6) 熱を通さない領域 (空気、k = 0) : bar_air.msh は bar_tet.msh と同じ導体の格子に
+#     空気層を載せたもの。導体と空気の界面は露出面になるので、空気の無い棒と
+#     同じ答え・同じ露出面の数 (y 側面 2 x 24 x 24 + z 側面 2 x 24 x 2 の四角形 x 2
+#     = 2496) にならなければならない (節点番号が違うので許容は反復の打ち切りの分)
+awk '/^mesh/{print "mesh = bar_tet.msh"; next} /^heatsink = 1/{next}
+	/^thermal/{print "convection = 2000 30"; print "thermal = 5"; next} {print}' \
+	"$SRC/thermal_tet.ofe" > "$WORK/tt_bar.ofe"
+th_run tt_bar.ofe
+rb=$(th_r); tb=$(th_t)
+th_nface "tet : bar without air" 2496
+awk '/^region/{print; print "region = 2 1"; next} /^mesh/{print "mesh = bar_air.msh"; next} {print}' \
+	"$WORK/tt_bar.ofe" > "$WORK/tt_air.ofe"
+th_run tt_air.ofe
+compare "tet : bar + air (k = 0) == bar alone : R [ohm]" "$(th_r)" "$rb" 1e-9
+compare "tet : bar + air (k = 0) == bar alone : T_max [degC]" "$(th_t)" "$tb" 1e-9
+th_nface "tet : bar + air, the conductor-air interface is exposed" 2496
+th_energy "tet : bar + air"
 
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
@@ -3286,7 +3451,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
          thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
-         plate_line_bh_ac bar_air_bh; do
+         plate_line_bh_ac bar_air_bh thermal_tet; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

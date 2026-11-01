@@ -1442,12 +1442,9 @@ int input_data(FILE *fp)
 	}
 
 	// 電気-熱連成 (thermal) の前提。**非構造格子の早期 return より前に置くこと**
-	// (非構造格子で指定されたときに弾くため)
+	// (非構造格子にも効かせるため。要素の種別 (1 次四面体だけ) は格子を読むまで
+	// 分からないので solve_thermal() で見る)
 	if (ThermalOn) {
-		if (MeshMode) {
-			printf("%s\n", "*** thermal is implemented for the structured grid only");
-			return 1;
-		}
 		if (Analysis != ANALYSIS_R) {
 			printf("%s\n", "*** thermal needs analysis = R alone (the coupling is "
 				"between DC conduction and heat conduction)");

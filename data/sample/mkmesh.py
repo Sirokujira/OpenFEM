@@ -1220,7 +1220,9 @@ def main():
     opt = {}
     a = 3
     while a + 1 < len(sys.argv):
-        opt[sys.argv[a].lstrip("-")] = int(sys.argv[a + 1])
+        v = sys.argv[a + 1]
+        # 寸法 (-lx 0.01 など) は実数、分割数は整数
+        opt[sys.argv[a].lstrip("-")] = (float(v) if any(c in v for c in ".eE") else int(v))
         a += 2
     order = opt.pop("order", 1)
     opt41 = opt.pop("v41", 0)			# -v41 1 で Gmsh 4.1 形式で書く
