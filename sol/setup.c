@@ -209,19 +209,21 @@ static int setup_unstruct(void)
 	// 線形材料・ゲージなし・場の出力なし・単体の四面体格子だけなので、それ以外は理由を付けて弾く
 	// (2 次の六面体・角柱の格子も TetOrder = 2 になるので、四面体だけの格子に限る)
 	if ((TetOrder == 2) && ((NHex + NPrism + NPyr) == 0) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
-		// B-H 曲線は周波数領域の A だけ (実効磁気抵抗率法)。過渡解析・交流の発熱・E は線形のみ
+		// B-H 曲線は A の周波数領域 (実効磁気抵抗率法) と過渡解析 (固定点反復)、J-A は A の過渡解析だけ。
+		// 交流の発熱と E は線形のみ
 		int nl = 0;
 		for (int m = 0; m < NMaterial; m++) {
-			if (Material[m].ja.on) nl = 1;
-			if ((Material[m].nbh[0] > 0) && (TransientOn || ThermalOn || (Analysis & ANALYSIS_E))) nl = 1;
+			const int nonl = (Material[m].ja.on || (Material[m].nbh[0] > 0));
+			if (nonl && (ThermalOn || (Analysis & ANALYSIS_E))) nl = 1;
+			if (Material[m].ja.on && !TransientOn) nl = 1;
 		}
 		const char *why = NULL;
-		if (nl) why = "linear materials (no ja; bh only in the frequency domain without thermal)";
+		if (nl) why = "linear materials with thermal or analysis E (bh / ja : A only, ja with transient)";
 		else if ((GaugeTree || Direct) && (TransientOn || ThermalOn || (Analysis & ANALYSIS_E)))
 			why = "gauge = 0 and the iterative solver in the time domain / with thermal";
 		else if (Hdf5Out) why = "no hdf5 series";
 		if (why != NULL) {
-			printf("*** analysis A on a second-order (10-node) mesh supports %s only\n", why);
+			printf("*** analysis A / E on a second-order (10-node) mesh supports %s only\n", why);
 			return 1;
 		}
 	}

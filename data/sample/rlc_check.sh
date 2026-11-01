@@ -5220,8 +5220,6 @@ compare "order 2, field output : mean J_x (signed) [A/m^2]" "$(vtk mean0 J_A_re)
 pf=$(awk -v r="$(vtk int2 J_A_re)" -v m="$(vtk int2 J_A_im)" 'BEGIN{ printf "%.10e", (r + m) / (2 * 5.8e7) }')
 pt=$(awk '/port 1 : I =/{ printf "%.10e", 0.5 * $6 }' "$WORK/ofe.log")
 compare "order 2, field output : ohmic loss from the field == 1/2 Re(V I) [W]" "$pf" "$pt" 1e-6
-awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_t.ofe"
-th_reject "order-2 A with transient and ja" p2x_t.ofe "supports linear materials"
 # (g) 辺要素の自己検証の 2 次版 (analysis = E、box_p2.msh) : 2 次の Nedelec 空間に入る場の L2 射影の誤差 0 と
 #     回転のエネルギー。(P2a) 一般の 1 次の場、(P2b) それに S2 の 2 次の場 (面の関数が要る)。等方・異方性の ν
 #     (anisomur) と剛体回転した格子で
@@ -5277,8 +5275,8 @@ res=$(awk -v r2="$1" -v l2="$2" -v r1="$3" -v l1="$4" -v re="$5" -v le="$6" 'fun
 	printf "%s (order 2 : R %+.2e, L %+.2e; order 1 : R %+.2e, L %+.2e)", ok ? "OK" : "NG", e2, f2, e1, f1 }')
 echo "  order 2, nonlinear conductor (10 Hz, 0.5 A) : R, L == 1-D reference (2e-4 / 1e-3) and 10x better than order 1 : $res"
 case "$res" in NG*) status=1 ;; esac
-awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_tbh.ofe"
-th_reject "order-2 A with transient and bh" p2x_tbh.ofe "supports linear materials"
+awk '/^analysis/{print "bh = 2 100 0.5"} {print}' "$WORK/edge_test.ofe" | sed 's/^mesh = .*/mesh = box_p2.msh/' > "$WORK/p2x_ebh.ofe"
+th_reject "order-2 edge self test (E) with a bh material" p2x_ebh.ofe "supports linear materials"
 # (i) ゲージ固定 (gauge = 1) と直接解法 (direct = 1)。Whitney は awall 優先の全域木、∇(λaλb) の自由度は全部 0。
 #     Z はゲージ不変なので gauge = 0 と一致する (反復の打ち切りの範囲)。**直接解法 (ピボットなし LDLᵀ) が通ることが
 #     零空間が消えた検査**: 勾配の自由度か木のどちらかを固定し忘れると特異なピボットで落ちる (どちらも実測)。
@@ -5546,6 +5544,57 @@ echo "  B-H curve, rigidly rotated mesh : fixed-point iterations = ${nfp:-none} 
 case "$res" in NG*) status=1 ;; esac
 grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"; print "bh = 2 X 100 0.5"; print "bh = 2 Y 100 0.5"; print "bh = 2 Z 100 0.5"} {print}' > "$WORK/abhx_ax.ofe"
 th_reject "per-axis bh curves with A + transient" abhx_ax.ofe "isotropic bh curves only"
+# (d) 10 節点四面体 (bar_tet2c.msh = mkmesh.py bar -nx 8 -ny 1 -nz 8 を gmsh が 2 次に) : 2 次の Nedelec で
+#     **積分点ごとの状態** (eddy3d_p2.c の p2nl_*)。同じ検査を同じ形で:
+#     直線の B-H 曲線 / ほぼ線形の J-A == 線形の μr = 50 (1 刻み 2 回)、準静的な正弦波の B-H の和と J-A の損が
+#     awk の独立な積分に 0.5% (実測 −0.08% / −0.04%)、仕事の恒等式、剛体回転した格子で I(t) と回数が不変。
+#     J-A は CI の時間のため 1 周期 16 点 (awk も同じ刻み)。ヤコビアンの非対角の符号の誤りは回転した格子で
+#     収束しなくなり、J-A の状態の確定漏れは損 −45%、仕事の H の取り違えは恒等式で落ちる (どれも実測)
+cp "$SRC/bar_tet2c.msh" "$WORK/"
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2c.msh"; next} /^frequency/{next} /^voltage/{print "voltage = 1e-4"; next}
+	/^analysis/{print "transient = 2e-4 50"; print "mur = 2 50"} {print}' > "$WORK/a2nl_lin.ofe"
+(cd "$WORK" && "$OFE" -n 2 a2nl_lin.ofe > /dev/null 2>&1 && cp ofe_transient.csv a2nl_lin.csv) || { echo "  a2nl_lin : the run failed -> NG" >&2; status=1; }
+a2nl_same() {	# a2nl_same <ラベル> <ofe> : a2nl_lin と I(t) が 1e-7、固定点は 1 刻み 2 回まで
+	(cd "$WORK" && "$OFE" -n 2 "$2" > /dev/null 2>&1) || { echo "  $2 : the run failed -> NG" >&2; status=1; }
+	res=$(paste -d, "$WORK/a2nl_lin.csv" "$WORK/ofe_transient.csv" | awk -F, -v nfp="$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")" '
+		NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
+		END { ok = "NG"; if ((n == 50) && (m < 1e-7) && (nfp + 0 >= 50) && (nfp + 0 <= 100)) ok = "OK"
+		      printf "%s (%d steps, max %.1e, %d fixed-point iterations)", ok, n, m + 0, nfp + 0 }')
+	echo "  order 2, $1 == linear mur = 50 : I(t) : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+awk '/^mur = 2 50/{ printf "bh = 2 100 %.17g\n", 100 * 4e-7 * atan2(0, -1) * 50; print "nlsolver = 50 1e-9 1"; next } {print}' "$WORK/a2nl_lin.ofe" > "$WORK/a2nl_bhl.ofe"
+a2nl_same "straight-line B-H curve" a2nl_bhl.ofe
+awk -v ms="$jms" '/^mur = 2 50/{ print "ja = 2 " ms " 1e8 0 1e6 0.999999"; print "nlsolver = 50 1e-9 1"; next } {print}' "$WORK/a2nl_lin.ofe" > "$WORK/a2nl_jal.ofe"
+a2nl_same "near-linear J-A" a2nl_jal.ofe
+sed 's/^mesh = .*/mesh = bar_tet2c.msh/' "$WORK/abh_qs.ofe" > "$WORK/a2nl_bqs.ofe"
+(cd "$WORK" && "$OFE" -n 2 a2nl_bqs.ofe > /dev/null 2>&1 && cp ofe_transient.csv a2nl_bqs.csv && cp ofe.log a2nl_bqs.log) || { echo "  a2nl_bqs : the run failed -> NG" >&2; status=1; }
+a3_energy "order 2, B-H curve, quasi-static sine"
+wfem=$(awk -F, 'NR == 33 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/a2nl_bqs.csv")
+compare "order 2, B-H curve, quasi-static sine : 2nd-period sum of H dB == the same sum along H_y(z) (awk) [J]" "$wfem" "$wref" 5e-3
+awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+	{ print }' "$WORK/bar_tet2c.msh" > "$WORK/bar_tet2c_rot.msh"
+sed 's/^mesh = .*/mesh = bar_tet2c_rot.msh/' "$WORK/a2nl_bqs.ofe" > "$WORK/a2nl_bqsr.ofe"
+(cd "$WORK" && "$OFE" -n 2 a2nl_bqsr.ofe > /dev/null 2>&1) || { echo "  a2nl_bqsr : the run failed -> NG" >&2; status=1; }
+nfa=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/a2nl_bqs.log")
+nfr=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
+res=$(paste -d, "$WORK/a2nl_bqs.csv" "$WORK/ofe_transient.csv" | awk -F, -v a="${nfa:-0}" -v b="${nfr:-0}" '
+	NR > 1 { d = ($3 - $10) / 0.5; if (d < 0) d = -d; if (d > m) m = d; n++ }
+	END { ok = "NG"; if ((n == 64) && (m < 1e-6) && (a > 0) && (b > 0) && (b <= 1.2 * a + 5)) ok = "OK"
+	      printf "%s (%d steps, max %.1e of the peak; iterations %d vs %d)", ok, n, m + 0, b, a }')
+echo "  order 2, B-H curve, rigidly rotated mesh : I(t) and fixed-point iterations == axis-aligned mesh : $res"
+case "$res" in NG*) status=1 ;; esac
+awk 'BEGIN { pi = atan2(0, -1); s = "waveform ="
+	for (k = 0; k <= 32; k++) { t = k / 16; s = s sprintf(" %.12e %.15g", t, sin(2 * pi * t)) } print s }' > "$WORK/a2nl_wf.txt"
+awk -v wf="$WORK/a2nl_wf.txt" '/^waveform/{ while ((getline l < wf) > 0) print l; next } /^transient/{print "transient = 2 32"; next} {print}' \
+	"$WORK/aja_qs.ofe" | sed 's/^mesh = .*/mesh = bar_tet2c.msh/' > "$WORK/a2nl_jqs.ofe"
+(cd "$WORK" && "$OFE" -n 2 a2nl_jqs.ofe > /dev/null 2>&1) || { echo "  a2nl_jqs : the run failed -> NG" >&2; status=1; }
+a3_energy "order 2, J-A, quasi-static sine (16 steps per period)"
+wfem=$(awk -F, 'NR == 17 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/ofe_transient.csv")
+wref=$(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=16 -f "$SRC/ja_bar_loop.awk")
+compare "order 2, J-A, quasi-static hysteresis loss of the 2nd period == forward J-A along H_y(z) (awk) [J]" "$wfem" "$wref" 5e-3
 
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
