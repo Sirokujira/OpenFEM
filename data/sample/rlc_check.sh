@@ -3525,6 +3525,45 @@ awk '/^convection = 500/{print; print "convectiontemptable = 20 0.8 100 1.5"; ne
 	"$SRC/thermal_plate.ofe" > "$WORK/thct_plate.ofe"
 th_run thct_plate.ofe
 th_energy "h(T) : per-face convection (bottom face only)"
+# (6) 放射率の温度依存 (radiationtemptable、ε(T) = ε f(T))。輻射だけで冷やす一様な棒の
+#     釣り合い J²ρ0(1 + α(T - T0))A = P ε f(T) σ (T_K⁴ - T_r,K⁴) と 1e-9。
+#     接線は q' = εσ (4 f T³ + f'(T⁴ - T_r⁴))。α = 0 で 9 回 (実測、折れ線の角のぶん
+#     表なしの 7 回より多い)。f' の項を落とすと遅くなるので回数を assert する
+awk '/^convection/{print "radiation = 0.8 10"; print "radiationtemptable = 0 0.5 300 1 600 1.2"; next}
+	/^thermal/{print "thermal = 2"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thrt.ofe"
+th_run thrt.ofe
+set -- $(awk -v I=2 -v tab="0 0.5 300 1 600 1.2" -v a=4e-3 'BEGIN {
+	nt = split(tab, v, " ") / 2; for (k = 1; k <= nt; k++) { tt[k] = v[2 * k - 1]; ff[k] = v[2 * k] }
+	r0 = 1e-6; T0 = 0; Tr = 10; e = 0.8; L = 0.01; A = 5e-7; P = 3e-3; J = I / A; sb = 5.670374419e-8; K = 273.15
+	lo = Tr; hi = 5000
+	for (it = 0; it < 300; it++) {
+		T = (lo + hi) / 2
+		if (T <= tt[1]) f = ff[1]; else if (T >= tt[nt]) f = ff[nt]; else { for (k = 1; k < nt; k++) if (T <= tt[k + 1]) { f = ff[k] + (T - tt[k]) / (tt[k + 1] - tt[k]) * (ff[k + 1] - ff[k]); break } }
+		F = J * J * r0 * (1 + a * (T - T0)) * A - P * e * f * sb * ((T + K) ^ 4 - (Tr + K) ^ 4)
+		if (F > 0) lo = T; else hi = T
+	}
+	printf "%.12e %.12e", r0 * (1 + a * (T - T0)) * L / A, T }')
+compare "e(T), radiation only, uniform bar : R [ohm]" "$(th_r)" "$1" 1e-9
+compare "e(T), radiation only, uniform bar : T [degC]" "$(th_t)" "$2" 1e-9
+th_energy "e(T), radiation only"
+awk '/^radiationtemptable/{print "radiationtemptable = 0 1 1000 1"; next} {print}' "$WORK/thrt.ofe" > "$WORK/thrt1.ofe"
+awk '!/^radiationtemptable/' "$WORK/thrt.ofe" > "$WORK/thrt0.ofe"
+th_run thrt0.ofe
+r0=$(th_r)
+th_run thrt1.ofe
+compare "e(T) with f = 1 == constant emissivity : R [ohm]" "$(th_r)" "$r0" 1e-9
+awk '/^tempco/{print "tempco = 2 0 0"; next} {print}' "$WORK/thrt.ofe" > "$WORK/thrt_a0.ofe"
+th_run thrt_a0.ofe
+nit=$(awk '/converged in/ { print $3; exit }' "$WORK/ofe.log")
+if [ -n "$nit" ] && [ "$nit" -le 10 ]; then
+	echo "  Newton on e(T) (alpha = 0) : converged in $nit iterations (<= 10) -> OK"
+else
+	echo "  Newton on e(T) (alpha = 0) : ${nit:-?} iterations (> 10) -> NG" >&2
+	status=1
+fi
+awk '/^radiationtemptable/{print "radiationtemptable = 0 1.3 100 1"; next} {print}' "$WORK/thrt.ofe" > "$WORK/thrtx_gt1.ofe"
+th_reject "radiationtemptable with emissivity x factor > 1" thrtx_gt1.ofe "exceeds 1"
+awk '/^radiation =/{print "convection = 200 30"; next} {print}' "$WORK/thrt.ofe" > "$WORK/thrtx_norad.ofe"
 # (5) 弾くべき入力と警告
 awk '/^convectiontemptable/{print "convectiontemptable = 100 1 50 2"; next} {print}' \
 	"$SRC/thermal_natconv.ofe" > "$WORK/thctx_dec.ofe"
@@ -3592,6 +3631,9 @@ awk '/^convection =/{next} /^thermal/{print "heatsink = 0 20"} {print}' "$SRC/th
 lint_expect "convectiontemptable without convection" lint_ctt_noconv.ofe yes
 awk '/^thermal/{next} {print}' "$SRC/thermal_natconv.ofe" | awk '!/^kthermal|^convection = /' > "$WORK/lint_ctt_noth.ofe"
 lint_expect "convectiontemptable without thermal" lint_ctt_noth.ofe yes
+#   (thrt*.ofe は [thermal h(T)] 節で作ったもの)
+lint_expect "radiationtemptable without radiation" thrtx_norad.ofe yes
+lint_expect "radiationtemptable (clean)" thrt.ofe no
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \

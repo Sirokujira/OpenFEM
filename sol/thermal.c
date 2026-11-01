@@ -80,18 +80,23 @@ static int th_nonlin(void)
 }
 
 
-static double conv_tab(double t, double *slope)
+static double tab_eval(int nt, const double *tt, const double *ff, double t, double *slope)
 {
-	const int nt = ConvTabN;
 	*slope = 0;
-	if (t <= ConvTabT[0]) return ConvTabF[0];
+	if (t <= tt[0]) return ff[0];
 	for (int k = 0; k < (nt - 1); k++) {
-		if (t <= ConvTabT[k + 1]) {
-			*slope = (ConvTabF[k + 1] - ConvTabF[k]) / (ConvTabT[k + 1] - ConvTabT[k]);
-			return ConvTabF[k] + ((t - ConvTabT[k]) * (*slope));
+		if (t <= tt[k + 1]) {
+			*slope = (ff[k + 1] - ff[k]) / (tt[k + 1] - tt[k]);
+			return ff[k] + ((t - tt[k]) * (*slope));
 		}
 	}
-	return ConvTabF[nt - 1];
+	return ff[nt - 1];
+}
+
+
+static double conv_tab(double t, double *slope)
+{
+	return tab_eval(ConvTabN, ConvTabT, ConvTabF, t, slope);
 }
 
 
@@ -102,6 +107,14 @@ static void surf_q(int rad, double hc, double ta, double tg, double *qv, double 
 	if (rad == 1) {
 		const double tk = tg + KELVIN, ta4 = pow(ta + KELVIN, 4);
 		if (tk <= 0) *bad = 1;
+		if (RadTabN > 0) {
+			// ε(T) = ε f(T) : q' = ε σ (4 f T³ + f' (T⁴ - T_r⁴))
+			double fp;
+			const double fv = tab_eval(RadTabN, RadTabT, RadTabF, tg, &fp);
+			*qv = hc * fv * STEFAN * (tk * tk * tk * tk - ta4);
+			*dq = hc * STEFAN * ((4 * fv * tk * tk * tk) + (fp * (tk * tk * tk * tk - ta4)));
+			return;
+		}
 		*qv = hc * STEFAN * (tk * tk * tk * tk - ta4);
 		*dq = 4 * hc * STEFAN * tk * tk * tk;
 		return;
@@ -1152,6 +1165,11 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 			fprintf(fp_log, " on faces in [%g, %g] x [%g, %g] x [%g, %g]",
 				bc->g[0], bc->g[1], bc->g[2], bc->g[3], bc->g[4], bc->g[5]);
 		}
+		fprintf(fp_log, "\n");
+	}
+	if ((RadEps > 0) && (RadTabN > 0)) {
+		fprintf(fp_log, "  emissivity e(T) = e f(T), f :");
+		for (int k = 0; k < RadTabN; k++) fprintf(fp_log, " (%g, %g)", RadTabT[k], RadTabF[k]);
 		fprintf(fp_log, "\n");
 	}
 	if (th_convnl()) {

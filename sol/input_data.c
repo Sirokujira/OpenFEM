@@ -278,6 +278,7 @@ int input_data(FILE *fp)
 	ConvH = 0;
 	RadEps = 0;
 	ConvTabN = 0;
+	RadTabN = 0;
 	NConv = 0;
 	NRad = 0;
 	TransientOn = 0;
@@ -971,26 +972,31 @@ int input_data(FILE *fp)
 				NConv++;
 			}
 		}
-		else if (!strcmp(strkey, "convectiontemptable")) {
+		else if (!strcmp(strkey, "convectiontemptable") || !strcmp(strkey, "radiationtemptable")) {
 			// convectiontemptable = <T1> <f1> <T2> <f2> ...
+			// radiationtemptable = <T1> <f1> ...  : 輻射の ε(T) = ε f(T) (同じ折れ線、ε f ≤ 1)
 			//   対流の h を面の温度 T の関数にする : h(T) = h f(T) (すべての convection 行に
 			//   掛かる、折れ線で範囲の外は端の値)。自然対流 h ∝ (T - T_a)^(1/4) などを書く。
 			//   対流が非線形になるので輻射と同じく Picard の各回で Newton 線形化する
-			if ((nval < 2) || ((nval % 2) != 0) || ((nval / 2) > MAXTEMPTAB) || (ConvTabN > 0)) {
+			const int isrd = (strkey[0] == 'r');
+			int *tn = (isrd ? &RadTabN : &ConvTabN);
+			double *tt = (isrd ? RadTabT : ConvTabT);
+			double *tf = (isrd ? RadTabF : ConvTabF);
+			if ((nval < 2) || ((nval % 2) != 0) || ((nval / 2) > MAXTEMPTAB) || (*tn > 0)) {
 				printf(errfmt2, strkey);
 				return 1;
 			}
 			const int nt = nval / 2;
 			for (int k = 0; k < nt; k++) {
-				ConvTabT[k] = atof(token[2 + (2 * k)]);
-				ConvTabF[k] = atof(token[3 + (2 * k)]);
+				tt[k] = atof(token[2 + (2 * k)]);
+				tf[k] = atof(token[3 + (2 * k)]);
 				// 温度は狭義単調増加、倍率は 0 以上 (自然対流は T = T_a で h = 0)
-				if ((ConvTabF[k] < 0) || ((k > 0) && (ConvTabT[k] <= ConvTabT[k - 1]))) {
+				if ((tf[k] < 0) || ((k > 0) && (tt[k] <= tt[k - 1]))) {
 					printf(errfmt2, strkey);
 					return 1;
 				}
 			}
-			ConvTabN = nt;
+			*tn = nt;
 		}
 		else if (!strcmp(strkey, "thermal")) {
 			// thermal = <I [A]> [<maxiter> [<tol>]]  : 電気-熱連成 (定常、analysis = R)
@@ -1529,6 +1535,18 @@ int input_data(FILE *fp)
 			input_warn("convectiontemptable has no effect without convection (it scales "
 				"the h of the convection lines)");
 		}
+		if ((RadTabN > 0) && (NRad < 1)) {
+			input_warn("radiationtemptable has no effect without radiation (it scales "
+				"the emissivity of the radiation lines)");
+		}
+		// 放射率は 1 を越えられない : 表の最大の倍率 x 最大の ε <= 1
+		for (int k = 0; k < RadTabN; k++) {
+			if ((RadEps * RadTabF[k]) > 1) {
+				printf("*** radiationtemptable : emissivity %g x factor %g exceeds 1\n",
+					RadEps, RadTabF[k]);
+				return 1;
+			}
+		}
 		// 電流の流れる材料が熱を通さないと、その要素の発熱が逃げられない
 		for (int m = 0; m < NMaterial; m++) {
 			if ((Material[m].sigma > 0) && (Material[m].kth <= 0)) {
@@ -1575,6 +1593,10 @@ int input_data(FILE *fp)
 		}
 		if (ConvTabN > 0) {
 			input_warn("convectiontemptable has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (RadTabN > 0) {
+			input_warn("radiationtemptable has no effect without thermal (it is only "
 				"read by the electro-thermal coupling)");
 		}
 		if (NRad > 0) {
