@@ -509,7 +509,7 @@ sed -e 's/^analysis = .*/analysis = A/' \
     -e 's/^solver = .*/frequency = 1e4\nawall = 10/' \
     "$SRC/box_p3.ofe" > "$WORK/p2_edge.ofe"
 mesh_reject "analysis A on an order-3 mesh" p2_edge.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 p2_edge.ofe 2>&1 | grep -q "need a first-order or a second-order"); then
+if ! (cd "$WORK" && "$OFE" -n 2 p2_edge.ofe 2>&1 | grep -q "need a first-order mesh"); then
 	echo "  *** it was rejected for a different reason than the mesh order" >&2
 	status=1
 fi

@@ -207,7 +207,8 @@ static int setup_unstruct(void)
 	}
 	// 2 次の四面体 (10 節点) の A は 2 次の Nedelec 要素 (eddy3d_p2.c) で解く。対応するのは周波数領域の
 	// 線形材料・ゲージなし・場の出力なし・単体の四面体格子だけなので、それ以外は理由を付けて弾く
-	if ((TetOrder == 2) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+	// (2 次の六面体・角柱の格子も TetOrder = 2 になるので、四面体だけの格子に限る)
+	if ((TetOrder == 2) && ((NHex + NPrism + NPyr) == 0) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
 		// B-H 曲線は周波数領域の A だけ (実効磁気抵抗率法)。過渡解析・交流の発熱・E は線形のみ
 		int nl = 0;
 		for (int m = 0; m < NMaterial; m++) {
@@ -215,8 +216,7 @@ static int setup_unstruct(void)
 			if ((Material[m].nbh[0] > 0) && (TransientOn || ThermalOn || (Analysis & ANALYSIS_E))) nl = 1;
 		}
 		const char *why = NULL;
-		if ((NHex + NPrism + NPyr) > 0) why = "a pure tetrahedral mesh";
-		else if (nl) why = "linear materials (no ja; bh only in the frequency domain without thermal)";
+		if (nl) why = "linear materials (no ja; bh only in the frequency domain without thermal)";
 		else if ((GaugeTree || Direct) && (TransientOn || ThermalOn || (Analysis & ANALYSIS_E)))
 			why = "gauge = 0 and the iterative solver in the time domain / with thermal";
 		else if (Hdf5Out) why = "no hdf5 series";
@@ -226,8 +226,9 @@ static int setup_unstruct(void)
 		}
 	}
 	else if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
-		printf("%s\n", "*** analysis E / A (edge elements) need a first-order or a second-order "
-			"(10-node tetrahedral) mesh");
+		// "need a first-order mesh" は rlc_check.sh が理由として grep する (3 次 / 4 次 / 2 次の六面体)
+		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh "
+			"(or a second-order mesh of 10-node tetrahedra only)");
 		return 1;
 	}
 	// 10 節点の四面体も組み立てで積分点の det J の符号が揃わない要素を飛ばす (tet10_element が 1 を
