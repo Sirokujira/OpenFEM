@@ -1726,9 +1726,10 @@ int solve(FILE *fp_log)
 	しか無いので、黙って直列で走らず入力エラーにする。
 	*/
 	if ((msize > 1) && (MpiSolve == 2)
-	 && (MeshMode || ThermalOn || Direct || (Analysis & ~(ANALYSIS_C | ANALYSIS_L | ANALYSIS_R)))) {
-		fprintf(fp_log, "*** mpisolve = 2 (the matrix distributed over the ranks) supports the structured grid "
-			"with analysis C / L / R only (no thermal, no direct = 1); use mpisolve = 1\n");
+	 && (ThermalOn || Direct || (Analysis & ~(ANALYSIS_C | ANALYSIS_L | ANALYSIS_R | ANALYSIS_A))
+	     || ((Analysis & ANALYSIS_A) && (TransientOn || (TetOrder >= 2))))) {
+		fprintf(fp_log, "*** mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R and "
+			"the first-order A in the frequency domain only (no thermal, no direct = 1); use mpisolve = 1\n");
 		return 1;
 	}
 	if ((msize > 1) && MpiSolve) {
