@@ -5096,6 +5096,87 @@ th_reject "currentsweep2 with a different number of points" jvx_n.ofe "as many p
 awk '/^ja =/{next} /^currentsweep =/{next} /^javector/{next} /^japrobe/{next} /^jasub/{next} {print}' "$SRC/ja_rotating.ofe" > "$WORK/jvx_noja.ofe"
 th_reject "currentsweep2 without a hysteretic material" jvx_noja.ofe "currentsweep2 needs a hysteretic"
 
+# ---- 3 次元渦電流の 2 次の要素 (analysis = A、10 節点四面体、2 次の Nedelec + 2 次の節点、eddy3d_p2.c) ----
+#
+# bar_eddy と同じ棒を gmsh が 2 次にした格子 (bar_tet2.msh、gmsh_bar_p2.py) で解き、1 次元の厳密解
+# (bar_eddy_z.awk) と比べる。
+#   (a) 100 Hz : DC の場 (B が厚さ方向に 1 次) は 2 次の空間に厳密に入るので R・L が 1e-7 以内 (実測 1e-9)
+#   (b) 100 kHz (t/δ = 4.8) : 2 次は 3e-5 以内 (実測 8e-6)、同じ頂点の 1 次 (1e-2) より 100 倍以上よい
+#   (c) 剛体回転した格子 (J が対角でない) で R・L が 9 桁一致
+#   (d) 内部の中間節点をずらした曲がった要素 : R の DC 極限 (1 次の φ は等パラメトリックな 2 次の空間に入る)
+#       が 1e-7、100 kHz が 3e-5 以内。ずらしすぎて裏返った要素は setup で弾く (飛ばすと R +8.7%、実測)
+echo "[A order 2] 3-D eddy current on 10-node tetrahedra (second-order Nedelec / nodal elements)"
+cp "$SRC/bar_eddy.ofe" "$SRC/bar_tet.msh" "$SRC/bar_tet2.msh" "$WORK/"
+p2_rl() {	# p2_rl <ofe> : 実行して "R L" (rlc.csv の Rf / Lf)
+	(cd "$WORK" && "$OFE" -n 2 "$1" > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "x x"; return; }
+	awk -F, '$1 == "Rf" { a = 1; next } a == 1 && $1 == "1" { r = $2; a = 0 } $1 == "Lf" { b = 1; next } b == 1 && $1 == "1" { l = $2; b = 0 }
+		END { printf "%s %s", r, l }' "$WORK/rlc.csv"
+}
+p2_case() {	# p2_case <ラベル> <格子> <周波数> <許容> : 厳密解との R・L の相対誤差
+	grep -v '^#' "$WORK/bar_eddy.ofe" | awk -v m="$2" -v f="$3" '/^mesh/{print "mesh = " m; next} /^frequency/{print "frequency = " f; next} {print}' > "$WORK/p2c.ofe"
+	set -- "$1" "$2" "$3" "$4" $(p2_rl p2c.ofe) $(awk -v f="$3" -f "$SRC/bar_eddy_z.awk")
+	res=$(awk -v r="$5" -v l="$6" -v re="$7" -v le="$8" -v tol="$4" 'BEGIN { if (r == "x") { print "NG (the run failed)"; exit }
+		er = r / re - 1; el = l / le - 1; ok = "NG"; if ((er < tol) && (er > -tol) && (el < tol) && (el > -tol)) ok = "OK"
+		printf "%s (R %+.2e, L %+.2e)", ok, er, el }')
+	echo "  $1 : R, L == 1-D exact solution within $4 : $res"
+	case "$res" in NG*) status=1 ;; esac
+	P2R=$5; P2L=$6
+}
+p2_case "order 2, 100 Hz" bar_tet2.msh 1e2 1e-7
+p2_case "order 2, 10 kHz" bar_tet2.msh 1e4 1e-6
+p2_case "order 2, 100 kHz" bar_tet2.msh 1e5 3e-5
+r2=$P2R; l2=$P2L
+p2_case "order 1 (same vertices), 100 kHz (reference only)" bar_tet.msh 1e5 3e-2
+set -- $(awk -v f=1e5 -f "$SRC/bar_eddy_z.awk")
+res=$(awk -v r1="$P2R" -v l1="$P2L" -v r2="$r2" -v l2="$l2" -v re="$1" -v le="$2" 'BEGIN {
+	e1 = r1 / re - 1; e2 = r2 / re - 1; f1 = l1 / le - 1; f2 = l2 / le - 1
+	if (e1 < 0) e1 = -e1; if (e2 < 0) e2 = -e2; if (f1 < 0) f1 = -f1; if (f2 < 0) f2 = -f2
+	ok = "NG"; if ((e2 * 100 < e1) && (f2 * 100 < f1)) ok = "OK"
+	printf "%s (R %.0fx, L %.0fx)", ok, e1 / e2, f1 / f2 }')
+echo "  order 2 beats order 1 on the same vertices at 100 kHz by more than 100x : $res"
+case "$res" in NG*) status=1 ;; esac
+# (c)
+awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+	{ print }' "$WORK/bar_tet2.msh" > "$WORK/bar_tet2_rot.msh"
+p2_case "order 2, rigidly rotated mesh, 100 kHz" bar_tet2_rot.msh 1e5 3e-5
+res=$(awk -v a="$P2R" -v b="$r2" -v c="$P2L" -v d="$l2" 'BEGIN { x = a / b - 1; y = c / d - 1; if (x < 0) x = -x; if (y < 0) y = -y
+	printf "%s (%.1e, %.1e)", ((x < 1e-8) && (y < 1e-8)) ? "OK" : "NG", x, y }')
+echo "  rigidly rotated mesh : R, L == axis-aligned mesh : $res"
+case "$res" in NG*) status=1 ;; esac
+# (d) 内部の中間節点 (要素の 10 節点のうち 5..10 番目) だけを決まった擬似乱数でずらす
+awk '/\$Elements/{f=1;getline;next} /\$EndElements/{f=0} f && $2==11 { nt = $3; for (k = 4 + nt + 4; k <= 4 + nt + 9; k++) print $k }' "$WORK/bar_tet2.msh" | sort -u > "$WORK/p2mid.txt"
+p2_bend() {	# p2_bend <振幅 [m]> <出力>
+	awk -v amp="$1" -v mf="$WORK/p2mid.txt" 'BEGIN { s = 12345; while ((getline l < mf) > 0) mid[l] = 1 }
+		function rnd() { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648 }
+		/^\$Nodes/ { f = 1; print; getline; print; next } /^\$EndNodes/ { f = 0 }
+		f && NF == 4 { x = $2; y = $3; z = $4; e = 1e-12
+			inner = (x > e) && (x < 2e-3 - e) && (y > e) && (y < 0.25e-3 - e) && (z > e) && (z < 1e-3 - e)
+			if (inner && ($1 in mid)) { x += (rnd() - 0.5) * amp; y += (rnd() - 0.5) * amp; z += (rnd() - 0.5) * amp }
+			printf "%s %.17g %.17g %.17g\n", $1, x, y, z; next } { print }' "$WORK/bar_tet2.msh" > "$WORK/$2"
+}
+p2_bend 2e-6 bar_tet2_cm.msh
+p2_case "order 2, curved elements (interior mid-edge nodes moved), 100 Hz R / L" bar_tet2_cm.msh 1e2 1e-5
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2_cm.msh"; next} /^frequency/{next} /^awall/{next} /^analysis/{print "analysis = R"; next} {print}' > "$WORK/p2r.ofe"
+(cd "$WORK" && "$OFE" -n 2 p2r.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  p2r : the run failed -> NG" >&2; status=1; }
+compare "curved elements : analysis R == L / (sigma W t) (a linear phi is in the isoparametric space) [ohm]" \
+	"$(awk -F, '$1 == "R" { a = 1; next } a && $1 == "1" { print $2; exit }' "$WORK/rlc.csv")" 1.3793103448e-04 1e-8
+p2_case "order 2, curved elements, 100 kHz" bar_tet2_cm.msh 1e5 3e-5
+p2_bend 2e-5 bar_tet2_fold.msh
+sed 's/^mesh = .*/mesh = bar_tet2_fold.msh/' "$WORK/p2r.ofe" > "$WORK/p2x_fold.ofe"
+th_reject "10-node mesh with folded elements" p2x_fold.ofe "is degenerate or inverted"
+# (e) 対応しない組み合わせ
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2.msh"; next} {print}' > "$WORK/p2base.ofe"
+awk '/^analysis/{print "gauge = 1"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_g.ofe"
+th_reject "order-2 A with gauge = 1" p2x_g.ofe "second-order (10-node) mesh supports gauge = 0"
+awk '/^analysis/{print "fieldout = 1"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_f.ofe"
+th_reject "order-2 A with fieldout = 1" p2x_f.ofe "supports no field output"
+awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_t.ofe"
+th_reject "order-2 A with transient" p2x_t.ofe "supports the frequency domain"
+awk '/^analysis/{print "analysis = E"; next} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_e.ofe"
+th_reject "analysis E on a 10-node mesh" p2x_e.ofe "need a first-order mesh"
+
 # ---- 3 次元渦電流の過渡解析 (analysis = A + transient、後退 Euler、電圧駆動) ----
 #
 # χ = Δt φ を未知数にすると係数行列が実対称・半正定値になる (eddy3d.c の solve_eddy3d_transient)。

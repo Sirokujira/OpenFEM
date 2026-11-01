@@ -205,9 +205,43 @@ static int setup_unstruct(void)
 			"tetrahedra, hexahedra and prisms");
 		return 1;
 	}
-	if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
-		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh");
+	// 2 次の四面体 (10 節点) の A は 2 次の Nedelec 要素 (eddy3d_p2.c) で解く。対応するのは周波数領域の
+	// 線形材料・ゲージなし・場の出力なし・単体の四面体格子だけなので、それ以外は理由を付けて弾く
+	if ((TetOrder == 2) && (Analysis & ANALYSIS_A) && !(Analysis & ANALYSIS_E)) {
+		int nl = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if ((Material[m].nbh[0] > 0) || Material[m].ja.on) nl = 1;
+		}
+		const char *why = NULL;
+		if ((NHex + NPrism + NPyr) > 0) why = "a pure tetrahedral mesh";
+		else if (ThermalOn) why = "no thermal coupling";
+		else if (TransientOn) why = "the frequency domain (no transient)";
+		else if (nl) why = "linear materials (no bh / ja)";
+		else if (GaugeTree || Direct) why = "gauge = 0 and the iterative solver (no gauge / direct)";
+		else if (FieldOut || Hdf5Out) why = "no field output (fieldout / hdf5)";
+		if (why != NULL) {
+			printf("*** analysis A on a second-order (10-node) mesh supports %s only\n", why);
+			return 1;
+		}
+	}
+	else if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
+		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh "
+			"(analysis A also accepts a second-order 10-node tetrahedral mesh)");
 		return 1;
+	}
+	// 10 節点の四面体も組み立てで積分点の det J の符号が揃わない要素を飛ばす (tet10_element が 1 を
+	// 返す) ので、同じく先に全要素を見て弾く。**内部の中間節点を要素の大きさの 1/4 ずらした格子で、
+	// 裏返った要素が黙って飛ばされ R が +8.7% になった** (実測。曲がった要素の 2 次の A の検査で踏んだ)
+	if ((MeshDim == 3) && (TetOrder == 2)) {
+		const double c1[6] = {1, 1, 1, 0, 0, 0};
+		for (int e = 0; e < NTet; e++) {
+			double ke[10][10], vol;
+			if (tet10_element(e, c1, ke, &vol)) {
+				printf("*** tetrahedron %d (10-node) is degenerate or inverted (det J changes "
+					"sign inside the element)\n", e + 1);
+				return 1;
+			}
+		}
 	}
 	// 20 節点の四面体は、組み立てで積分点の det J の符号が揃わない要素を飛ばすので
 	// (2 次と同じ経路)、黙って誤答にしないよう先に全要素を見て弾く
