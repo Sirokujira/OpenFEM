@@ -1710,6 +1710,16 @@ static void sweep_row(FILE *fp, sweepcol_t k, FILE *fp_log)
 }
 
 
+// 非線形 (B-H・J-A) の材料があるか (mpisolve = 2 の対応の判定)
+static int mpi_any_nonlin(void)
+{
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].ja.on || (Material[m].nbh[0] > 0)) return 1;
+	}
+	return 0;
+}
+
+
 int solve(FILE *fp_log)
 {
 	int ierr = 0;
@@ -1727,9 +1737,10 @@ int solve(FILE *fp_log)
 	*/
 	if ((msize > 1) && (MpiSolve == 2)
 	 && (ThermalOn || Direct || (Analysis & ~(ANALYSIS_C | ANALYSIS_L | ANALYSIS_R | ANALYSIS_A))
-	     || ((Analysis & ANALYSIS_A) && (TransientOn || (TetOrder >= 2))))) {
-		fprintf(fp_log, "*** mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R and "
-			"the first-order A in the frequency domain only (no thermal, no direct = 1); use mpisolve = 1\n");
+	     || ((Analysis & ANALYSIS_A) && TransientOn && ((TetOrder >= 2) || mpi_any_nonlin())))) {
+		fprintf(fp_log, "*** mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R, "
+			"A in the frequency domain and the linear first-order A transient only (no thermal, no direct = 1); "
+			"use mpisolve = 1\n");
 		return 1;
 	}
 	if ((msize > 1) && MpiSolve) {

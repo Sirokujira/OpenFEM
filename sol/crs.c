@@ -152,6 +152,20 @@ int crs_distribute(crs_t *A)
 }
 
 
+// A-φ の実部・虚部 (同じパターン) を同じ分け方で分散してログに出す。b は NULL でもよい
+int crs_distribute_pair(FILE *fp_log, crs_t *a, crs_t *b)
+{
+	if (!crs_distribute(a)) return 0;
+	if (b != NULL) crs_distribute(b);
+	if (fp_log != NULL) {
+		fprintf(fp_log, "\n=== MPI : the matrix is distributed by rows (mpisolve = 2) : rank %d holds rows %lld..%lld "
+			"of %lld (%lld nonzeros) ===\n", mpi_rank(), (long long)DistR0[NDist - 1], (long long)(DistR1[NDist - 1] - 1),
+			(long long)a->n, (long long)a->nnz);
+	}
+	return 1;
+}
+
+
 void crs_alloc_dist(crs_t *A)
 {
 	crs_alloc(A);

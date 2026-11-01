@@ -539,12 +539,7 @@ int solve_eddy3d(FILE *fp_log)
 	crs_alloc_edge_node(&Kr);
 	crs_alloc_edge_node(&Ki);
 	// mpisolve = 2 : 実部・虚部とも自分の行ブロックだけを持つ (同じパターンを同じ分け方で詰めるので位置が揃う)
-	if (crs_distribute(&Kr) + crs_distribute(&Ki) == 2) {
-		int64_t r0, r1;
-		crs_dist_info(&Kr, &r0, &r1);
-		fprintf(fp_log, "\n=== MPI : the matrix is distributed by rows (mpisolve = 2) : rank %d holds rows %lld..%lld "
-			"of %lld (%lld nonzeros) ===\n", mpi_rank(), (long long)r0, (long long)(r1 - 1), (long long)Kr.n, (long long)Kr.nnz);
-	}
+	crs_distribute_pair(fp_log, &Kr, &Ki);
 	// 非線形 (B-H) の磁性体があれば実効磁気抵抗率法 (solve.c の F と同じ):
 	// 要素ごとの ν を波高値 |B| で評価し、H を独立変数にした更新 ν = |H|/B(|H|) に
 	// ln ν の Anderson 加速を掛ける。単一ポート・電流振幅 current
@@ -1020,6 +1015,7 @@ static void assemble_eddy3d_tr(crs_t *K, crs_t *M, double dt, int skipja)
 		for (int k = 0; k < nedge; k++) {
 			for (int l = 0; l < nedge; l++) {
 				const int64_t p = crs_find_en(K, ed[k], ed[l]);
+				if (p < 0) continue;		// 行列を分散したとき (mpisolve = 2) の他の rank の行
 				const double w = sg[k] * sg[l];
 				K->val[p] += w * ((skipja && ed_nonlin(m)) ? (te[k][l] / dt) : (se[k][l] + (te[k][l] / dt)));
 				M->val[p] += w * te[k][l] / dt;
@@ -1030,15 +1026,20 @@ static void assemble_eddy3d_tr(crs_t *K, crs_t *M, double dt, int skipja)
 				const double w = sg[k] * tg[k][a] / dt;
 				const int64_t p1 = crs_find_en(K, ed[k], (int32_t)ne + nd[a]);
 				const int64_t p2 = crs_find_en(K, (int32_t)ne + nd[a], ed[k]);
-				K->val[p1] += w;
-				K->val[p2] += w;
-				M->val[p1] += w;
-				M->val[p2] += w;
+				if (p1 >= 0) {
+					K->val[p1] += w;
+					M->val[p1] += w;
+				}
+				if (p2 >= 0) {
+					K->val[p2] += w;
+					M->val[p2] += w;
+				}
 			}
 		}
 		for (int a = 0; a < nen; a++) {
 			for (int b = 0; b < nen; b++) {
 				const int64_t p = crs_find_en(K, (int32_t)ne + nd[a], (int32_t)ne + nd[b]);
+				if (p < 0) continue;
 				K->val[p] += gtg[a][b] / dt;
 				M->val[p] += gtg[a][b] / dt;
 			}
@@ -1353,6 +1354,9 @@ int solve_eddy3d_transient(FILE *fp_log)
 	crs_t K, M;
 	crs_alloc_edge_node(&K);
 	crs_alloc_edge_node(&M);
+	// mpisolve = 2 : 線形の過渡解析は積と CG だけなので K・M とも自分の行ブロックだけを持つ (端子電流は
+	// 積の結果から取る。ヒステリシス・B-H の固定点は行列を直接引くので setup が弾く)
+	if (!hyst) crs_distribute_pair(fp_log, &K, &M);
 	assemble_eddy3d_tr(&K, &M, dt, hyst);
 
 	unsigned char *fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));

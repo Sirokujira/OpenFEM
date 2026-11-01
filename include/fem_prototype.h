@@ -146,6 +146,7 @@ void crs_alloc(crs_t *);
 void crs_free(crs_t *);
 void crs_alloc_dist(crs_t *);
 int crs_distribute(crs_t *);
+int crs_distribute_pair(FILE *, crs_t *, crs_t *);
 int crs_owns(const crs_t *, int64_t);
 int crs_dist_info(const crs_t *, int64_t *, int64_t *);
 void crs_zero(crs_t *);

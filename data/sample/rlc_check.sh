@@ -1437,7 +1437,7 @@ else
 				fi
 			done
 		done
-		# 行列の分散 (mpisolve = 2、C / L / R と 1 次の A)。各 rank は行ブロック (構造格子は x 方向に切った板) の行だけを
+		# 行列の分散 (mpisolve = 2、C / L / R と A の周波数領域・1 次の A の線形の過渡解析)。各 rank は行ブロック (構造格子は x 方向に切った板) の行だけを
 		# 組み立てて持ち、対角・反作用は持ち主から集める。行ごとの和の順は直列と同じなので出力はバイト一致。
 		# 「分散したこと」は rank 0 が持つ行の数 (= n / np) で見る (分散し忘れても答えは同じになるので)
 		cp "$SRC/resistor_bar.ofe" "$SRC/coupled_microstrip.ofe" "$WORK/"
@@ -1485,11 +1485,35 @@ else
 				status=1
 			fi
 		done
-		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "mpisolve = 2"; print "transient = 2e-4 5"} {print}' > "$WORK/mdx_a.ofe"
+		# 2 次 (eddy3d_p2.c) と 3 次 (eddy3d_pr.c) の A、1 次の A の線形の過渡解析 (K と M を分散、ofe_transient.csv も一致)
+		cp "$SRC/bar_tet2.msh" "$SRC/bar_ho3.msh" "$WORK/"
+		for m in bar_tet2 bar_ho3; do
+			grep -v '^#' "$WORK/bar_eddy.ofe" | awk -v m="$m.msh" '/^mesh/{print "mesh = " m; next} /^analysis/{print "mpisolve = 2"} {print}' > "$WORK/mu_$m.ofe"
+		done
+		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "mpisolve = 2"; print "transient = 2e-4 8"} {print}' > "$WORK/mu_tr.ofe"
+		for c in bar_tet2 bar_ho3 tr; do
+			rm -f "$WORK/ofe.out" "$WORK/ofe_transient.csv" "$WORK/mu_ref.csv"
+			(cd "$WORK" && "$OFE" -n 2 "mu_$c.ofe" > /dev/null 2>&1) || { echo "  mpisolve = 2 $c : the serial run failed -> NG" >&2; status=1; }
+			cp "$WORK/ofe.out" "$WORK/mu_ref.out" 2> /dev/null || true
+			[ -f "$WORK/ofe_transient.csv" ] && cp "$WORK/ofe_transient.csv" "$WORK/mu_ref.csv"
+			rm -f "$WORK/ofe.out" "$WORK/ofe_transient.csv"
+			(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 "mu_$c.ofe" > /dev/null 2>&1) || true
+			k=$(grep -c "the matrix is distributed by rows" "$WORK/ofe.log" || true)
+			r=OK
+			cmp -s "$WORK/mu_ref.out" "$WORK/ofe.out" || r=NG
+			if [ -f "$WORK/mu_ref.csv" ]; then cmp -s "$WORK/mu_ref.csv" "$WORK/ofe_transient.csv" || r=NG; fi
+			if [ "$r" = OK ] && [ "$k" = 2 ]; then
+				echo "  mpisolve = 2, np = 2 : A ($c) gives byte-identical output, $k distributed matrices : OK"
+			else
+				echo "  mpisolve = 2, np = 2 : A ($c) differs from the serial run (or $k of 2 matrices distributed) -> NG" >&2
+				status=1
+			fi
+		done
+		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2.msh"; next} /^frequency/{next} /^analysis/{print "mpisolve = 2"; print "transient = 2e-4 5"} {print}' > "$WORK/mdx_a.ofe"
 		(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 mdx_a.ofe > /dev/null 2>&1) \
-			&& { echo "  mpisolve = 2 with the A transient : accepted -> NG" >&2; status=1; } \
-			|| echo "  mpisolve = 2 with the A transient : rejected -> OK"
-		grep -q "mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R and" "$WORK/ofe.log" \
+			&& { echo "  mpisolve = 2 with the second-order A transient : accepted -> NG" >&2; status=1; } \
+			|| echo "  mpisolve = 2 with the second-order A transient : rejected -> OK"
+		grep -q "mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R," "$WORK/ofe.log" \
 			|| { echo "  *** it was rejected for a different reason" >&2; status=1; }
 		;;
 	esac

@@ -397,6 +397,8 @@ static int pr_open(FILE *fp_log)
 		PR.r, nn, nt, ne, nf, n, NtE, ne, NtF, nf, NtI, nt, PR.nA, nn);
 	pr_crs(&PR.Kr);
 	pr_crs(&PR.Ki);
+	// mpisolve = 2 : 実部・虚部とも自分の行ブロックだけを持つ
+	crs_distribute_pair(fp_log, &PR.Kr, &PR.Ki);
 	fprintf(fp_log, "  coupled matrix : %lld nonzeros (%.1f per row)\n", (long long)PR.Kr.nnz, (double)PR.Kr.nnz / n);
 
 	// Dirichlet : awall の三角形の辺と面の A (接線成分 0)、電極の節点の φ (= V)、非導電領域と未使用の φ
@@ -486,18 +488,25 @@ static int pr_assemble(FILE *fp_log)
 		if (pr_element(e, nu, sig, se, te, ce, pe, wv, wc, nc)) { bad = 1; break; }
 		for (int k = 0; k < nA; k++) {
 			for (int l = 0; l < nA; l++) {
+				// 行列を分散したとき (mpisolve = 2) は他の rank の行が空で -1 になるので飛ばす
 				const int64_t p = pr_find(&PR.Kr, dof[k], dof[l]);
+				if (p < 0) continue;
 				PR.Kr.val[p] += se[(k * nA) + l];
 				PR.Ki.val[p] += omega * te[(k * nA) + l];
 			}
 			for (int a = 0; a < nP; a++) {
 				const double v = ce[(k * nP) + a];
-				PR.Kr.val[pr_find(&PR.Kr, dof[k], dof[nA + a])] += v;
-				PR.Kr.val[pr_find(&PR.Kr, dof[nA + a], dof[k])] += v;
+				const int64_t p1 = pr_find(&PR.Kr, dof[k], dof[nA + a]);
+				const int64_t p2 = pr_find(&PR.Kr, dof[nA + a], dof[k]);
+				if (p1 >= 0) PR.Kr.val[p1] += v;
+				if (p2 >= 0) PR.Kr.val[p2] += v;
 			}
 		}
 		for (int a = 0; a < nP; a++) {
-			for (int b = 0; b < nP; b++) PR.Ki.val[pr_find(&PR.Ki, dof[nA + a], dof[nA + b])] -= pe[(a * nP) + b] / omega;
+			for (int b = 0; b < nP; b++) {
+				const int64_t p = pr_find(&PR.Ki, dof[nA + a], dof[nA + b]);
+				if (p >= 0) PR.Ki.val[p] -= pe[(a * nP) + b] / omega;
+			}
 		}
 	}
 	free(se); free(te); free(ce); free(pe); free(wv); free(wc); free(nc); free(dof);
@@ -516,6 +525,14 @@ static void pr_row_dot_c(int32_t row, double *sr, double *si)
 		const int32_t c = PR.Kr.col[p];
 		ar += (PR.Kr.val[p] * PR.ur[c]) - (PR.Ki.val[p] * PR.ui[c]);
 		ai += (PR.Kr.val[p] * PR.ui[c]) + (PR.Ki.val[p] * PR.ur[c]);
+	}
+	// 行列を分散したとき (mpisolve = 2) は行の持ち主が計算した値を配る (全 rank が同じ順に呼ぶ)
+	int64_t d0, d1;
+	if (crs_dist_info(&PR.Kr, &d0, &d1)) {
+		double v[2] = {ar, ai};
+		mpi_bcast_dbl(v, 2, mpi_row_owner((int)PR.Kr.n, (int)row));
+		ar = v[0];
+		ai = v[1];
 	}
 	*sr = ar;
 	*si = ai;

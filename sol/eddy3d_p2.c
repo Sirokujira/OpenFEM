@@ -337,6 +337,14 @@ static void p2_row_dot_c(const crs_t *Kr, const crs_t *Ki, int32_t row,
 		ar += (Kr->val[p] * xr[c]) - (Ki->val[p] * xi[c]);
 		ai += (Kr->val[p] * xi[c]) + (Ki->val[p] * xr[c]);
 	}
+	// 行列を分散したとき (mpisolve = 2) は行の持ち主が計算した値を配る (全 rank が同じ順に呼ぶ)
+	int64_t d0, d1;
+	if (crs_dist_info(Kr, &d0, &d1)) {
+		double v[2] = {ar, ai};
+		mpi_bcast_dbl(v, 2, mpi_row_owner((int)Kr->n, (int)row));
+		ar = v[0];
+		ai = v[1];
+	}
 	*sr = ar;
 	*si = ai;
 }
@@ -379,6 +387,8 @@ static int p2_open(FILE *fp_log)
 		"(A : 2 x %d edges + 2 x %d faces, phi : vertices + %d edge bubbles)\n", nn, nt, ne, nf, n, ne, nf, ne);
 	p2_crs(&P2.Kr, n, P2.fe, ne, nf, nn);
 	p2_crs(&P2.Ki, n, P2.fe, ne, nf, nn);
+	// mpisolve = 2 : 実部・虚部とも自分の行ブロックだけを持つ (setup が周波数領域・熱連成なしに限る)
+	crs_distribute_pair(fp_log, &P2.Kr, &P2.Ki);
 	fprintf(fp_log, "  coupled matrix : %lld nonzeros (%.1f per row)\n", (long long)P2.Kr.nnz, (double)P2.Kr.nnz / n);
 
 	// Dirichlet : awall の三角形の辺 (Whitney と勾配) と面 (2 個)、電極の頂点 (φ = V) と電極上の辺の泡 (0)、
@@ -551,19 +561,26 @@ static int p2_assemble(FILE *fp_log, const double *sigelem)
 		}
 		for (int k = 0; k < 20; k++) {
 			for (int l = 0; l < 20; l++) {
+				// 行列を分散したとき (mpisolve = 2) は他の rank の行が空で -1 になるので飛ばす
 				const int64_t p = p2_find(&P2.Kr, dof[k], dof[l]);
+				if (p < 0) continue;
 				const double s = sgn[k] * sgn[l];
 				P2.Kr.val[p] += s * se[k][l];
 				P2.Ki.val[p] += s * omega * te[k][l];
 			}
 			for (int a = 0; a < 10; a++) {
 				const double v = sgn[k] * ce[k][a];
-				P2.Kr.val[p2_find(&P2.Kr, dof[k], dof[20 + a])] += v;
-				P2.Kr.val[p2_find(&P2.Kr, dof[20 + a], dof[k])] += v;
+				const int64_t p1 = p2_find(&P2.Kr, dof[k], dof[20 + a]);
+				const int64_t p2 = p2_find(&P2.Kr, dof[20 + a], dof[k]);
+				if (p1 >= 0) P2.Kr.val[p1] += v;
+				if (p2 >= 0) P2.Kr.val[p2] += v;
 			}
 		}
 		for (int a = 0; a < 10; a++) {
-			for (int b = 0; b < 10; b++) P2.Ki.val[p2_find(&P2.Ki, dof[20 + a], dof[20 + b])] -= pe[a][b] / omega;
+			for (int b = 0; b < 10; b++) {
+				const int64_t p = p2_find(&P2.Ki, dof[20 + a], dof[20 + b]);
+				if (p >= 0) P2.Ki.val[p] -= pe[a][b] / omega;
+			}
 		}
 	}
 	if (bad) {
