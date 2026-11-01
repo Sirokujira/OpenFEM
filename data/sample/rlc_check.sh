@@ -3977,12 +3977,7 @@ res=$(awk -v a="$e_thermal_ann_h8" -v b="$e_thermal_ann_h27" -v c="$e_thermal_an
 	printf "%s (P1 %.2e, P2 %.2e, P2 refined %.2e)", ok ? "OK" : "NG", a, b, c }')
 echo "  annulus : curved P2 faces beat the P1 facets, and converge at h^4 : $res"
 case "$res" in NG*) status=1 ;; esac
-# (4) 弾くべき入力 : 2 次の六面体の相互放射
-h2_write box_hex2 100 'heatsink = 0 20\nradiation = 0.8 20\nradiationexchange = 1'
-mesh_reject "radiationexchange on a second-order hexahedral mesh" th2.ofe
-if ! grep -q "radiationexchange on tetrahedra only" "$WORK/ofe.log"; then
-	echo "  *** it was rejected for a different reason than radiationexchange" >&2; status=1
-fi
+# (高次の六面体・角柱の相互放射は [radiation exchange] の (8) の (c)〜(e))
 
 # ---- 3 次の六面体 (64 節点、gmsh の hexa64) と角柱 (40 節点、prism40) ----
 #
@@ -4953,6 +4948,63 @@ res=$(awk -v a="$rxs_c2" -v b="$rxs_c3" -v la="$rxs_l2" -v lb="$rxs_l3" 'functio
 	printf "%s (sum A F_inf / sum A : P2 %.2e, P3 %.2e; to radiation / I^2 R : %.1e, %.1e)", ok ? "OK" : "NG", a, b, la, lb }')
 echo "  closed spherical void (curved faces) : the enclosure closes as the order rises, no heat leaves : $res"
 case "$res" in NG*) status=1 ;; esac
+#     (c) 高次の六面体・角柱の平らな面 (thermal_cavity_hex2s.msh = 20 節点 / thermal_cavity_prism2s.msh = 15 節点、
+#         mkmesh.py cavity_hex -nx 5 [-prism 1] を gmsh の setOrder(2) (SecondOrderIncomplete) で 2 次にしたもの) :
+#         行ごとの F∞ が Hottel に 1e-10。角柱は底面・天井が三角形の面、壁が四角形の面 (面の角の参照座標の対応
+#         elem3d_face_point の誤りはここで落ちる)
+cp "$SRC/thermal_cavity_hex2s.msh" "$SRC/thermal_cavity_prism2s.msh" "$WORK/"
+rx_x20 thermal_cavity.ofe rxg.ofe
+for m in thermal_cavity_hex2s thermal_cavity_prism2s; do
+	rx_unst "$m" rxg.ofe rxh2.ofe
+	th_run rxh2.ofe
+	compare "$m (flat faces) : cavity floor -> opening == parallel squares (Hottel) [-]" "$(rx_row 2)" "$fpar" 1e-10
+	compare "$m (flat faces) : cavity wall -> opening == perpendicular squares [-]" "$(rx_row 3)" "$fper" 1e-10
+	compare "$m (flat faces) : sum A F_inf / sum A == 0.2 [-]" "$(rx_sum)" 0.2 1e-10
+	th_energy "radiation exchange, $m"
+done
+#     (d) 円環の穴の内面 (曲がった面、両端が開いた円筒) : 側面から両端の開口への形態係数は
+#         F∞ = a (1 − F12) / L、F12 = ½ [X − √(X² − 4)]、X = 2 + L²/a² (円板どうし、面積の相互性)。
+#         輻射を内面だけ (|x|, |y| < 0.6mm の直方体、外側の面の頂点の平均は 0.68mm 以上) に課す。
+#         境界の折れ線 (各辺 2p 分割) の誤差は弧の中心角 θ の分割で (θ / 2p)² / 8 程度 (2 次の 12 分割・3 次の 8 分割で
+#         2.1e-3) なので許容は 2e-3。実測 (1 次の六面体の折れ線は −7.0e-3 / −1.5e-2) :
+#           2 次 (thermal_ann_h27 / _h27b、12 / 24 分割) −8.4e-4 / −3.0e-4、3 次 (ann_hex3a / 3b、8 / 16 分割)
+#           −3.0e-4 / −1.3e-4、4 次 (ann_hex4a、8 分割) 1.5e-6
+#         z に積んだ面は中心の法線が中心を結ぶ線と直交し、中心だけでは「同一平面」になるので、面の積分点で
+#         向き合うかを見る (rx_vis_curved。それを落とすと積んだ対の F が抜けて 3 次 +3.7e-3、4 次 +4.0e-3、実測)。
+#         六面体と角柱 (側面は四角形) は同じ頂点・同じ面なので F∞ が全桁一致する
+for m in thermal_ann_h27 thermal_ann_h27b thermal_ann_p18 ann_hex1b ann_hex3a ann_hex3b ann_prism3a ann_prism3b ann_hex4a ann_prism4a; do
+	cp "$SRC/$m.msh" "$WORK/"
+	case "$m" in thermal_*) lz=2e-4 ;; *) lz=1e-4 ;; esac
+	printf 'OpenFEM 1 0\ntitle = radiation exchange inside the hole of an annulus\nmesh = %s.msh\nmaterial = 1.0 1e6\ntempco = 2 0 0\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\nconvection = 2000 20\nradiation = 0.8 20 -0.6e-3 0.6e-3 -0.6e-3 0.6e-3 0 %s\nradiationexchange = 1\ntemperature = 20\nthermal = 10\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' "$m" "$lz" > "$WORK/rxan.ofe"
+	th_run rxan.ofe
+	th_energy "radiation exchange, hole of $m"
+	e=$(awk -v s="$(rx_sum)" -v L="$lz" 'BEGIN { if (s == "") { print "nan"; exit }
+		a = 0.5e-3; X = 2 + L * L / (a * a); f12 = 0.5 * (X - sqrt(X * X - 4)); f = a * (1 - f12) / L
+		printf "%.6e", (s - f) / f }')
+	eval "rxa_$m=\$e; rxs_$m=\$(rx_sum)"
+	case "$m" in
+	ann_hex1b) ;;
+	*) res=$(awk -v e="$e" 'BEGIN { a = (e < 0) ? -e : e; printf "%s (%+.2e)", (a <= 2e-3) ? "OK" : "NG", e }')
+	   echo "  $m : hole side -> both openings == a (1 - F12) / L : $res"
+	   case "$res" in NG*) status=1 ;; esac ;;
+	esac
+done
+res=$(awk -v a2="$rxa_thermal_ann_h27" -v b2="$rxa_thermal_ann_h27b" -v a3="$rxa_ann_hex3a" -v b3="$rxa_ann_hex3b" \
+	-v l1="$rxa_ann_hex1b" -v a4="$rxa_ann_hex4a" 'function ab(x) { return (x < 0) ? -x : x }
+	BEGIN { ok = (ab(b2) <= 0.5 * ab(a2)) && (ab(b3) <= 0.5 * ab(a3)) && (ab(b3) * 20 <= ab(l1)) && (ab(a4) < ab(a3))
+	printf "%s (P2 %.1e -> %.1e, P3 %.1e -> %.1e, P1 facets %.1e, P4 %.1e)", ok ? "OK" : "NG", a2, b2, a3, b3, l1, a4 }')
+echo "  hole of an annulus : the curved faces converge under refinement and beat the P1 facets : $res"
+case "$res" in NG*) status=1 ;; esac
+for p in thermal_ann_h27:thermal_ann_p18 ann_hex3a:ann_prism3a ann_hex3b:ann_prism3b ann_hex4a:ann_prism4a; do
+	eval "x=\$rxs_${p%%:*}; y=\$rxs_${p#*:}"
+	compare "${p#*:} == ${p%%:*} (same vertices, quadrilateral side faces) : sum A F_inf / sum A [-]" \
+		"$(awk -v s="$y" 'BEGIN { printf "%.15e", 1 + s }')" "$(awk -v s="$x" 'BEGIN { printf "%.15e", 1 + s }')" 1e-12
+done
+#     (e) 係数は面を選んだ点 (頂点の平均) で引く : 直方体の境目が外側の面の頂点の平均 (0.683mm) と曲がった面の
+#         中央 (0.707mm) の間にあると、中央で引いた係数は無い (実測 : 異常終了)。走り切って熱の収支が閉じること
+sed 's/-0.6e-3 0.6e-3 -0.6e-3 0.6e-3/-0.7e-3 0.7e-3 -0.7e-3 0.7e-3/; s/^mesh = .*/mesh = thermal_ann_h27.msh/; s/ 0 1e-4$/ 0 2e-4/' "$WORK/rxan.ofe" > "$WORK/rxan7.ofe"
+th_run rxan7.ofe
+th_energy "radiation exchange, box edge between the corner mean and the curved centre"
 # (6) 弾くべき入力
 awk '/^radiationexchange/{print; print "radiationtemptable = 0 1 500 1.2"; next} {print}' "$SRC/thermal_cavity.ofe" > "$WORK/thrxx_tab.ofe"
 th_reject "radiationexchange with radiationtemptable" thrxx_tab.ofe "cannot be combined with radiationtemptable"

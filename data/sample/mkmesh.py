@@ -1322,7 +1322,7 @@ def make_neck_hex(split=0, pyrneck=0, bar=0, nx=40, grade=0):
     return nodes, cells
 
 
-def make_cavity_hex(split=0, nx=40, two=0, void=0):
+def make_cavity_hex(split=0, nx=40, two=0, void=0, prism=0):
     """開いた立方体の空洞 (thermal_cavity.ofe と同じ形・同じ格子) の六面体 / 四面体版
     (非構造格子の相互放射の検証)
 
@@ -1335,7 +1335,10 @@ def make_cavity_hex(split=0, nx=40, two=0, void=0):
     nx は x の分割 (既定 40 = 構造格子と同じ。20 でも空洞の壁は格子線に乗る)。
     two = 1 で空洞を 2 つ (x 2..4mm と 6..8mm、間の壁が遮蔽になる)、void = 1 で閉じた
     空隙 (x 4..6mm、y 0.5..2.5mm、z 0.5..2.2mm、導体の中に閉じている) にする
-    (どちらも rlc_check.sh の構造格子の検査と同じ形)。
+    (どちらも rlc_check.sh の構造格子の検査と同じ形)。prism = 1 は各セルを xy の対角線で
+    角柱 2 つに割る (三角形の面は z = 一定、電極の面は四角形のまま)。高次の格子は
+    gmsh -order 2 で 1 次の格子から作る (thermal_cavity_hex2.msh / thermal_cavity_prism2.msh、
+    nx = 5)。
 
     物理タグ : 1 = 導体、10 = x=0 面 (電極 0)、11 = x=10mm 面 (電極 1)
     """
@@ -1383,6 +1386,12 @@ def make_cavity_hex(split=0, nx=40, two=0, void=0):
         for j in range(ny):
             for k in range(nz):
                 if not solid(i, j, k):
+                    continue
+                if prism:
+                    v0 = [node(i, j, k), node(i + 1, j, k), node(i + 1, j + 1, k), node(i, j + 1, k)]
+                    v1 = [node(i, j, k + 1), node(i + 1, j, k + 1), node(i + 1, j + 1, k + 1), node(i, j + 1, k + 1)]
+                    for tr in ((0, 1, 2), (0, 2, 3)):
+                        cells.append((1, 6, [v0[tr[0]], v0[tr[1]], v0[tr[2]], v1[tr[0]], v1[tr[1]], v1[tr[2]]]))
                     continue
                 if split == 0:
                     cells.append((1, 5, [node(i, j, k), node(i + 1, j, k), node(i + 1, j + 1, k),

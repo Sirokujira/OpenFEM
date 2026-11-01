@@ -45,6 +45,8 @@ int elem3d_nip(int);
 int tet_ho_point(int, const double [4], double [ELEM_NMAX], double [ELEM_NMAX][3], double *);
 int elem3d_ip(int, int, double [ELEM_NMAX], double [ELEM_NMAX][3], double *);
 int tet_face_shape(int, const int [3], const double [3], double [TET_NMAX], double [3], double [3]);
+int elem3d_face_point(int, const int32_t *, int, double, double, double [ELEM_NMAX], double [3], double [3], double [3]);
+int face_quad_pub(int, int, double [][2], double *);
 int tri_quad_pub(int, double [][3], double *);
 int elem3d_face_nip(int);
 int elem3d_face_ip(int, const int32_t *, int, int, double [ELEM_NMAX], double *);

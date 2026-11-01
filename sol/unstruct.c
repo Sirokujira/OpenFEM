@@ -3548,6 +3548,121 @@ int elem3d_face_ip(int e, const int32_t *cn, int k, int q, double nv[ELEM_NMAX],
 }
 
 
+// 3 次元要素 e の境界面 (角の全体節点 cn[k]、三角形 k = 3 / 四角形 k = 4 は巡回順) の媒介変数 (s, t) の点。
+// 参照空間で三角形は 角0 + s (角1 − 角0) + t (角2 − 角0)、四角形は角の双 1 次 (面は参照空間で平らなので厳密)。
+// 形状関数の値 nv、物理座標 x、接ベクトル t1 = ∂x/∂s、t2 = ∂x/∂t を返す (曲がった面の相互放射が使う)。
+// 戻り値は節点数 (失敗は 0)
+int elem3d_face_point(int e, const int32_t *cn, int k, double s, double t, double nv[ELEM_NMAX],
+	double x[3], double t1[3], double t2[3])
+{
+	const int kind = elem3d_kind(e);
+	int32_t nd[ELEM_NMAX];
+	const int nen = elem3d_nodes(e, nd);
+	const int ncor = ((kind == MESHELEM_HEX) ? 8 : (kind == MESHELEM_PRISM) ? 6 : 4);
+	int loc[4];
+	for (int m = 0; m < k; m++) {
+		loc[m] = -1;
+		for (int a = 0; a < ncor; a++) {
+			if (nd[a] == cn[m]) loc[m] = a;
+		}
+		if (loc[m] < 0) return 0;
+	}
+	for (int c = 0; c < 3; c++) x[c] = t1[c] = t2[c] = 0;
+	if (kind == MESHELEM_TET) {
+		if (k != 3) return 0;
+		const double mu[3] = {1 - s - t, s, t};
+		if (TetOrder >= 2) {
+			tet_face_shape(e, loc, mu, nv, t1, t2);
+		}
+		else {
+			for (int a = 0; a < 4; a++) nv[a] = 0;
+			for (int m = 0; m < 3; m++) nv[loc[m]] = mu[m];
+			const double p0[3] = {Xp[nd[loc[0]]], Yp[nd[loc[0]]], Zp[nd[loc[0]]]};
+			t1[0] = Xp[nd[loc[1]]] - p0[0]; t1[1] = Yp[nd[loc[1]]] - p0[1]; t1[2] = Zp[nd[loc[1]]] - p0[2];
+			t2[0] = Xp[nd[loc[2]]] - p0[0]; t2[1] = Yp[nd[loc[2]]] - p0[1]; t2[2] = Zp[nd[loc[2]]] - p0[2];
+		}
+		for (int a = 0; a < nen; a++) {
+			x[0] += nv[a] * Xp[nd[a]]; x[1] += nv[a] * Yp[nd[a]]; x[2] += nv[a] * Zp[nd[a]];
+		}
+		return nen;
+	}
+	if (((kind == MESHELEM_HEX) && ((nen <= 8) || (k != 4))) || ((kind == MESHELEM_PRISM) && (nen <= 6))
+	 || ((kind != MESHELEM_HEX) && (kind != MESHELEM_PRISM))) return 0;
+	// 角の参照座標 (六面体 ξ、角柱 (u, v, ζ))
+	double rc[4][3];
+	for (int m = 0; m < k; m++) {
+		if (kind == MESHELEM_HEX) {
+			for (int c = 0; c < 3; c++) rc[m][c] = HEX2_XI[loc[m]][c];
+		}
+		else {
+			const int iv = PRISM2_T[loc[m]];
+			rc[m][0] = (iv == 1); rc[m][1] = (iv == 2); rc[m][2] = PRISM2_Z[loc[m]];
+		}
+	}
+	double r[3], dr1[3], dr2[3];
+	for (int c = 0; c < 3; c++) {
+		if (k == 3) {
+			r[c] = rc[0][c] + (s * (rc[1][c] - rc[0][c])) + (t * (rc[2][c] - rc[0][c]));
+			dr1[c] = rc[1][c] - rc[0][c];
+			dr2[c] = rc[2][c] - rc[0][c];
+		}
+		else {
+			r[c] = ((1 - s) * (1 - t) * rc[0][c]) + (s * (1 - t) * rc[1][c]) + (s * t * rc[2][c]) + ((1 - s) * t * rc[3][c]);
+			dr1[c] = ((1 - t) * (rc[1][c] - rc[0][c])) + (t * (rc[2][c] - rc[3][c]));
+			dr2[c] = ((1 - s) * (rc[3][c] - rc[0][c])) + (s * (rc[2][c] - rc[1][c]));
+		}
+	}
+	double dn[HEXP_NMAX][3];
+	if (kind == MESHELEM_HEX) {
+		hex2_nval(nen, r[0], r[1], r[2], nv);
+		hex2_dshape(nen, r[0], r[1], r[2], dn);
+	}
+	else {
+		double vv[PRISMP_NMAX], dpr[PRISMP_NMAX][3];
+		prism2_nval(nen, r[0], r[1], r[2], vv);
+		prism2_dshape(nen, r[0], r[1], r[2], dpr);
+		for (int a = 0; a < nen; a++) {
+			nv[a] = vv[a];
+			for (int c = 0; c < 3; c++) dn[a][c] = dpr[a][c];
+		}
+	}
+	for (int a = 0; a < nen; a++) {
+		const double p[3] = {Xp[nd[a]], Yp[nd[a]], Zp[nd[a]]};
+		const double s1 = (dn[a][0] * dr1[0]) + (dn[a][1] * dr1[1]) + (dn[a][2] * dr1[2]);
+		const double s2 = (dn[a][0] * dr2[0]) + (dn[a][1] * dr2[1]) + (dn[a][2] * dr2[2]);
+		for (int c = 0; c < 3; c++) {
+			x[c] += nv[a] * p[c];
+			t1[c] += s1 * p[c];
+			t2[c] += s2 * p[c];
+		}
+	}
+	return nen;
+}
+
+
+// 面の媒介変数 (s, t) の積分点 : 三角形は Duffy (n x n、重みの和 1/2)、四角形は [0,1]² の Gauss (n x n、和 1)。
+// n は 3..7。戻り値は点の数
+int face_quad_pub(int k, int n, double st[][2], double *w)
+{
+	if (k == 3) {
+		double mu[64][3], wq[64];
+		const int nq = tri_quad_pub(n, mu, wq);
+		for (int q = 0; q < nq; q++) { st[q][0] = mu[q][1]; st[q][1] = mu[q][2]; w[q] = wq[q]; }
+		return nq;
+	}
+	double gp[8], gw[8];
+	gauss01(n, gp, gw);
+	int q = 0;
+	for (int a = 0; a < n; a++) {
+		for (int b = 0; b < n; b++) {
+			st[q][0] = gp[a]; st[q][1] = gp[b]; w[q] = gw[a] * gw[b];
+			q++;
+		}
+	}
+	return q;
+}
+
+
 // 高次の四面体の任意の参照点 (重心座標 lam) での形状関数の値と物理空間の勾配、det J
 // (elem3d_ip の高次の四面体の分岐を積分点でない点で使う。2 次の A の場の出力が重心で使う)
 int tet_ho_point(int e, const double lam[4], double nv[ELEM_NMAX], double g[ELEM_NMAX][3], double *det)
