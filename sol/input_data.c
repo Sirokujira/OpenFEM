@@ -1445,9 +1445,11 @@ int input_data(FILE *fp)
 	// (非構造格子にも効かせるため。要素の種別 (1 次四面体だけ) は格子を読むまで
 	// 分からないので solve_thermal() で見る)
 	if (ThermalOn) {
-		if (Analysis != ANALYSIS_R) {
+		// DC (R) か交流の発熱 (A、3 次元渦電流の損失) のどちらか 1 つ
+		if ((Analysis != ANALYSIS_R) && (Analysis != ANALYSIS_A)) {
 			printf("%s\n", "*** thermal needs analysis = R alone (the coupling is "
-				"between DC conduction and heat conduction)");
+				"between DC conduction and heat conduction) or analysis = A alone "
+				"(AC heating by 3-D eddy currents)");
 			return 1;
 		}
 		// 発熱は電流の 2 乗なので重ね合わせが効かない (bh と同じ理由)
@@ -1456,10 +1458,26 @@ int input_data(FILE *fp)
 				"not superpose, so the port matrix cannot be built port by port)");
 			return 1;
 		}
-		if ((Freq > 0) || (NFreqSweep > 0)) {
+		if ((Analysis == ANALYSIS_R) && ((Freq > 0) || (NFreqSweep > 0))) {
 			printf("%s\n", "*** thermal is a DC coupling; remove frequency / "
 				"frequencysweep");
 			return 1;
+		}
+		// 交流の発熱 : 周波数は 1 点 (温度場はその周波数での釣り合い)。非線形 (B-H) の
+		// 実効磁気抵抗率の反復とは入れ子にしない (どちらも反復なので収束を保証できない)
+		if (Analysis == ANALYSIS_A) {
+			if (NFreqSweep > 0) {
+				printf("%s\n", "*** thermal with analysis A cannot be combined with "
+					"frequencysweep (solve each frequency separately)");
+				return 1;
+			}
+			for (int m = 0; m < NMaterial; m++) {
+				if (Material[m].nbh[0] > 0) {
+					printf("%s\n", "*** thermal with analysis A supports linear "
+						"materials only (remove bh)");
+					return 1;
+				}
+			}
 		}
 		if (Tline) {
 			printf("%s\n", "*** thermal cannot be combined with tline (the drive "

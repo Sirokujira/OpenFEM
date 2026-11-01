@@ -3391,6 +3391,72 @@ compare "tet : bar + air (k = 0) == bar alone : T_max [degC]" "$(th_t)" "$tb" 1e
 th_nface "tet : bar + air, the conductor-air interface is exposed" 2496
 th_energy "tet : bar + air"
 
+# ---- 交流の発熱 (thermal + analysis = A) ----
+#
+# 3 次元渦電流 (A-φ) の時間平均の損失 Q_e = ½ eᴴ T_e e (e = jωa + Gφ) で温度を解く。
+# Σ Q_e = ½ Re(V I*) は連成系の行から厳密に出る (eddy3d.c の注釈) ので、
+# エネルギーの恒等式がそのまま損失の積分の検査になる。電流は波高値。
+echo "[thermal_ac] AC heating : eddy-current losses (A-phi) in the electro-thermal coupling"
+cp "$SRC/thermal_ac.ofe" "$SRC/bar_tet.msh" "$WORK/"
+# (1) 100 Hz (表皮深さ 50mm ≫ 断面) : ω -> 0 で A-φ は DC の導電解析に帰着するので、
+#     DC の熱連成 (thermal_tet.ofe、I = 7.5 A) と波高値 7.5√2 A の交流が一致する。
+#     α = 4e-3 なので σ(T) を要素ごとに A-φ へ渡していなければ R が 9% ずれる。
+#     許容 1e-8 : 低周波の A-φ と DC の差 (実測 9e-10)
+th_run thermal_tet.ofe
+rdc=$(th_r); tdc=$(th_t)
+awk '/^analysis/{print "frequency = 100"; print "awall = 20"; print "analysis = A"; next}
+	/^thermal/{print "thermal = 10.606601717798213"; next} {print}' \
+	"$SRC/thermal_tet.ofe" > "$WORK/tac_lf.ofe"
+th_run tac_lf.ofe
+compare "AC at 100 Hz (I = 7.5 sqrt 2 A peak) == DC thermal (7.5 A) : R [ohm]" "$(th_r)" "$rdc" 1e-8
+compare "AC at 100 Hz == DC thermal : T_max [degC]" "$(th_t)" "$tdc" 1e-8
+th_energy "AC at 100 Hz (joule = I^2 R / 2 with the peak current)"
+# (2) 100 kHz の銅の棒 (thermal_ac.ofe、表皮深さ 0.21mm)、α = 0。
+#     R・X は熱連成なしの A (bar_eddy.ofe と同じ格子・材料) と一致し、中央の断面の
+#     表面と中心の温度差が表皮効果の発熱分布の Fourier 級数解 (ac_heat.awk) に合う。
+#     損失を要素で一様に配ったり (分布を潰す)、e の Gφ の符号を誤ると差が崩れる。
+#     許容 0.3% : 24 分割で +0.17% (12 / 24 / 48 分割で +0.35 / +0.17 / +0.05%、実測)
+awk '/^tempco/{print "tempco = 2 0 0"; next} /^thermal/{print "thermal = 100"; print "fieldout = 1"; next} {print}' \
+	"$SRC/thermal_ac.ofe" > "$WORK/tac_a0.ofe"
+th_run tac_a0.ofe
+ra0=$(th_r)
+xa0=$(awk '/^  X = / { print $3; exit }' "$WORK/ofe.log")
+tma0=$(awk '/T_mean/ { print $8; exit }' "$WORK/ofe.log")
+th_energy "AC, 100 kHz, alpha = 0"
+dfe=$(awk -v xc=1e-3 -v z1=0 -v z2=0.5e-3 '
+	/^POINTS/ { np = $2; pt = 1; n = 0; next }
+	pt { for (i = 1; i <= NF; i++) { c[n] = $i; n++ } if (n >= 3 * np) pt = 0; next }
+	/^SCALARS T / { st = 1; m = 0; next }
+	st && /^LOOKUP/ { next }
+	st && (NF != 1) { st = 0; next }
+	st { x = c[3 * m]; z = c[3 * m + 2]; if (((x - xc) ^ 2 < 1e-18) && ((z - z1) ^ 2 < 1e-18)) { s1 += $1; n1++ } if (((x - xc) ^ 2 < 1e-18) && ((z - z2) ^ 2 < 1e-18)) { s2 += $1; n2++ } m++; if (m >= np) st = 0 }
+	END { if ((n1 > 0) && (n2 > 0)) printf "%.12e", s1 / n1 - s2 / n2 }' "$WORK/ofe_field.vtk")
+set -- $(awk -v f=1e5 -v sig=5.8e7 -v k=400 -v I=100 -v R="$ra0" -f "$SRC/ac_heat.awk")
+compare "AC, 100 kHz : T(L/2, surface) - T(L/2, centre) vs Fourier series [K]" "$dfe" "$1" 0.003
+compare "AC, 100 kHz : volume-mean temperature rise == q L^2 / (12 k) [K]" \
+	"$(awk -v t="$tma0" 'BEGIN { printf "%.12e", t - 20 }')" "$2" 0.003
+awk '!/^tempco|^kthermal|^heatsink|^temperature|^thermal/' "$SRC/thermal_ac.ofe" > "$WORK/tac_unc.ofe"
+th_run tac_unc.ofe
+zline=$(awk '/Z\(1,1\)/ { print; exit }' "$WORK/ofe.log")
+compare "AC, alpha = 0 : R == the uncoupled A [ohm]" "$ra0" "$(echo "$zline" | awk '{ print $3 }')" 1e-6
+compare "AC, alpha = 0 : X == the uncoupled A [ohm]" "$xa0" "$(echo "$zline" | awk '{ print $4 }' | tr -d '+')" 1e-6
+# (3) α > 0 (thermal_ac.ofe) : 恒等式と収束。断熱の棒の過渡 (CN) で発熱 = 蓄熱
+th_run thermal_ac.ofe
+th_energy "thermal_ac (alpha = 3.9e-3, 300 A peak)"
+compare "thermal_ac : R rises above the alpha = 0 value by the heating [ohm]" \
+	"$(awk -v a="$(th_r)" -v b="$ra0" 'BEGIN { printf "%.12e", ((a > b) ? 1 : 0) }')" 1 0
+awk '/^heatsink/{next} /^thermal/{print; print "heatcap = 2 3.45e6"; print "transient = 0.01 20 0.5"; next} {print}' \
+	"$SRC/thermal_ac.ofe" > "$WORK/tac_tr.ofe"
+th_run tac_tr.ofe
+th_balance "thermal_ac, adiabatic transient (CN)"
+# (4) 弾くべき入力
+awk '/^frequency/{print "frequencysweep = 1e4 1e5"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_sw.ofe"
+th_reject "AC heating with frequencysweep" tacx_sw.ofe "cannot be combined with frequencysweep"
+awk '/^kthermal/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_bh.ofe"
+th_reject "AC heating with a nonlinear (bh) material" tacx_bh.ofe "linear materials only"
+awk '/^analysis/{print "analysis = A"; print "frequency = 1e3"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/tacx_grid.ofe"
+th_reject "AC heating on the structured grid" tacx_grid.ofe "requires an unstructured mesh"
+
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
 # 警告が (a) 罠のケースで必ず出て (b) 正しいケースでは 1 件も出ないことを両方見る
@@ -3451,7 +3517,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
          thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
-         plate_line_bh_ac bar_air_bh thermal_tet; do
+         plate_line_bh_ac bar_air_bh thermal_tet thermal_ac; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

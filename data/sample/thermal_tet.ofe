@@ -13,7 +13,7 @@ title = electro-thermal coupling on tetrahedra : a bar cooled at both ends
 # 物理タグ 1 = 体積、10 = x=0 面 (電極 0)、11 = x=L 面 (電極 1)。
 #
 # 四面体では要素の温度を 4 節点の平均 (1 次補間の体積平均) にとり、要素内で σ を
-# 一定にするので、構造格子と同じく離散化誤差は h²。40 分割で R -0.014%、
+# 一定にするので、構造格子と同じく離散化誤差は h²。40 分割で R -0.020%、
 # 20 分割との誤差比は 4.0 (rlc_check.sh で見る)。
 #
 mesh = thermal_tet40.msh

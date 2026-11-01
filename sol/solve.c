@@ -996,8 +996,8 @@ static int solve_one(FILE *fp_log)
 		// 熱連成 : 定常電流界は σ(T) を要素ごとに更新しながら thermal.c が解く。
 		// 熱連成でないときの経路には一切触れない (既存の答えをビット単位で保つ)
 		if ((mode == 2) && ThermalOn) {
-			double g = 0;
-			const int e = solve_thermal(fp_log, &g);
+			double g = 0, x = 0;
+			const int e = solve_thermal(fp_log, &g, &x);
 			ierr |= e;
 			if (!e) {
 				Gmat[0] = g;
@@ -1127,7 +1127,21 @@ static int solve_one(FILE *fp_log)
 
 	// 3 次元渦電流解析 (A-φ、辺要素)
 	if (!ierr && (Analysis & ANALYSIS_A)) {
-		ierr |= solve_eddy3d(fp_log);
+		if (ThermalOn) {
+			// 交流の発熱 : A-φ を σ(T) を要素ごとに更新しながら thermal.c が解く
+			// (熱連成でないときの経路には触れない)
+			double g = 0, x = 0;
+			const int e = solve_thermal(fp_log, &g, &x);
+			ierr |= e;
+			if (!e) {
+				Rfmat[0] = 1 / g;
+				Lfmat[0] = x / (2 * PI * Freq);
+				HaveF = 1;
+			}
+		}
+		else {
+			ierr |= solve_eddy3d(fp_log);
+		}
 	}
 
 	return ierr;

@@ -578,6 +578,47 @@ static int th_conduct(FILE *fp_log, crs_t *A, const double *scell, unsigned char
 }
 
 
+// 交流の発熱 (analysis = A) : 電気の段を A-φ で解く (eddy3d.c)。電流は波高値で、
+// 発熱は時間平均 ½|I|²R
+static double ThX;		// 最後に解いた Z の虚部 (交流のとき)
+
+static int th_ac(void)
+{
+	return ((Analysis & ANALYSIS_A) != 0);
+}
+
+
+static double th_pfac(void)
+{
+	return (th_ac() ? 0.5 : 1.0);
+}
+
+
+// 電気の段 : 電流 cur での発熱の節点荷重 f と *gout = 1 / R を作る。
+// DC は th_conduct + th_joule (従来の経路そのもの)、交流は eddy3d_heat_solve
+static int th_electric(FILE *fp_log, crs_t *A, const double *scell, unsigned char *fix,
+	double *phi, double *work, double *diag, double *q, int it, double cur, double *gout,
+	double *f)
+{
+	if (th_ac()) {
+		double zr = 0, zi = 0;
+		if (eddy3d_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
+		if (zr <= 0) {
+			fprintf(fp_log, "*** thermal : non-passive impedance R = %.6e (iteration %d)\n",
+				zr, it);
+			return 1;
+		}
+		*gout = 1 / zr;
+		ThX = zi;
+		return 0;
+	}
+	const int e = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, it, cur, gout);
+	if (e) return e;
+	th_joule(phi, scell, f);
+	return 0;
+}
+
+
 // 要素の温度 = 8 節点の平均 (3 線形の体積平均)。戻り値は熱を通す領域の節点の最高温度
 static double th_celltemp(const double *tn, const double *kcell, double *tcell)
 {
@@ -740,11 +781,10 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	// 電気は単位電流で解き、発熱は f = I² f1 (σ を固定すれば発熱は I² に比例するので、
 	// 段差の両側の発熱を解き直さずに作れる)
 	double cur = th_current(0, 0), p1 = 0;
-	if (!ierr) ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, 0, 1.0, &g);
+	if (!ierr) ierr = th_electric(fp_log, A, scell, fix, phi, work, diag, q, 0, 1.0, &g, f1);
 	if (!ierr && (RadEps > 0)) ierr = th_radlin(fp_log, B, b0, gr, tn, kcell, 0);
 	if (!ierr) {
 		r = 1 / g;
-		th_joule(phi, scell, f1);
 		p1 = 0;
 		for (int i = 0; i < n; i++) {
 			f[i] = cur * cur * f1[i];
@@ -777,9 +817,8 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		for (it = 1; it <= ThermalMaxIter; it++) {
 			const int tag = step * 1000 + it;
 			if ((ierr = th_sigma(fp_log, nc, tcell, scell)) != 0) break;
-			if ((ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, tag, 1.0, &g)) != 0) break;
+			if ((ierr = th_electric(fp_log, A, scell, fix, phi, work, diag, q, tag, 1.0, &g, f1)) != 0) break;
 			r = 1 / g;
-			th_joule(phi, scell, f1);
 			p1 = 0;
 			for (int i = 0; i < n; i++) {
 				f[i] = cur * cur * f1[i];
@@ -887,16 +926,22 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 			r, cur, cur * r, TransientTime);
 		fprintf(fp_log, "  T_max = %.10e [degC], T_mean (conductor) = %.10e [degC]\n",
 			tmax, th_tmean(tcell, scell));
+		if (th_ac()) {
+			fprintf(fp_log, "  X = %.10e [ohm], L = %.10e [H] (I is the peak amplitude; "
+				"the joule power below is the time average I^2 R / 2)\n", ThX, ThX / (2 * PI * Freq));
+		}
 		fprintf(fp_log, "  joule power : I^2 R = %.12e, field integral = %.12e [W] (t = t_end)\n",
-			cur * cur * r, ptot);
+			th_pfac() * cur * cur * r, ptot);
 		fprintf(fp_log, "  heat balance : joule = %.12e, stored = %.12e, to heat sinks = %.12e, "
 			"to convection = %.12e, to radiation = %.12e [J]\n", ejoule, du, esink, econv, erad);
 		*gport = g;
 
 		if (FieldOut) {
-			for (int i = 0; i < n; i++) phi[i] *= cur;	// 単位電流の φ を終了時刻の電流に
-			field_add_node("phi_R_port1", phi);
-			field_add_grad("E_R_port1", phi, 0);
+			if (!th_ac()) {
+				for (int i = 0; i < n; i++) phi[i] *= cur;	// 単位電流の φ を終了時刻の電流に
+				field_add_node("phi_R_port1", phi);
+				field_add_grad("E_R_port1", phi, 0);
+			}
 			field_add_node("T", tn);
 		}
 	}
@@ -929,12 +974,11 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	fprintf(fp_log, "  %4s %16s %14s %16s\n", "iter", "R [ohm]", "T_max [degC]", "dR / R");
 	for (it = 1; !ierr && (it <= ThermalMaxIter); it++) {
 		if ((ierr = th_sigma(fp_log, nc, tcell, scell)) != 0) break;
-		if ((ierr = th_conduct(fp_log, A, scell, fix, phi, work, diag, q, it, ThermalCurrent, &g)) != 0) break;
+		if ((ierr = th_electric(fp_log, A, scell, fix, phi, work, diag, q, it, ThermalCurrent, &g, f)) != 0) break;
 		r = 1 / g;
-		pterm = ThermalCurrent * ThermalCurrent * r;
+		pterm = th_pfac() * ThermalCurrent * ThermalCurrent * r;
 
-		// 発熱と熱 : T = T_D + u、自由節点で B u = f - B T_D
-		th_joule(phi, scell, f);
+		// 発熱と熱 : T = T_D + u、自由節点で B u = f - B T_D (f は th_electric で作った)
 		ptot = 0;
 		for (int i = 0; i < n; i++) ptot += f[i];
 		// 輻射 : いまの温度のまわりで Newton 線形化して行列と右辺に入れる。
@@ -1005,14 +1049,20 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 			r, ThermalCurrent, ThermalCurrent * r);
 		fprintf(fp_log, "  T_max = %.10e [degC], T_mean (conductor) = %.10e [degC]\n",
 			tmax, th_tmean(tcell, scell));
+		if (th_ac()) {
+			fprintf(fp_log, "  X = %.10e [ohm], L = %.10e [H] (I is the peak amplitude; "
+				"the joule power below is the time average I^2 R / 2)\n", ThX, ThX / (2 * PI * Freq));
+		}
 		fprintf(fp_log, "  joule power : I^2 R = %.12e, field integral = %.12e, "
 			"to heat sinks = %.12e, to convection = %.12e, to radiation = %.12e [W]\n",
 			pterm, ptot, qsink, qconv, qrad);
 		*gport = g;
 
 		if (FieldOut) {
-			field_add_node("phi_R_port1", phi);
-			field_add_grad("E_R_port1", phi, 0);
+			if (!th_ac()) {
+				field_add_node("phi_R_port1", phi);
+				field_add_grad("E_R_port1", phi, 0);
+			}
 			field_add_node("T", tn);
 		}
 	}
@@ -1022,7 +1072,7 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 }
 
 
-int solve_thermal(FILE *fp_log, double *gport)
+int solve_thermal(FILE *fp_log, double *gport, double *xport)
 {
 	const int n = (int)num_node();
 	const int64_t nc = th_nelem();
@@ -1038,8 +1088,9 @@ int solve_thermal(FILE *fp_log, double *gport)
 		return 1;
 	}
 	th_extent();
-	fprintf(fp_log, "  drive current = %.6e [A], ambient (initial) = %.4f [degC]\n",
-		ThermalCurrent, Temperature);
+	fprintf(fp_log, "  drive current = %.6e [A]%s, ambient (initial) = %.4f [degC]\n",
+		ThermalCurrent, (th_ac() ? " (peak amplitude, AC)" : ""), Temperature);
+	ThX = 0;
 	for (int p = 0; p <= NPort; p++) {
 		if (HeatSinkOn[p]) {
 			fprintf(fp_log, "  heat sink : conductor %d at %.4f [degC]\n", p, HeatSinkT[p]);
@@ -1155,10 +1206,18 @@ int solve_thermal(FILE *fp_log, double *gport)
 		for (int64_t e = 0; e < nnz; e++) b0[e] = B.val[e];
 	}
 
+	// 交流 : A-φ の辺の情報と行列は反復の間持っておく
+	int ehopen = 0;
+	if (!ierr && th_ac()) {
+		ierr = eddy3d_heat_open(fp_log);
+		ehopen = 1;
+	}
 	if (!ierr) {
 		ierr = (TransientOn ? th_transient : th_steady)(fp_log, &A, &B, b0, kcell, tcell,
 			scell, fix, fixt, phi, work, diag, f, tn, rhs, u, gc, gr, q, gport);
 	}
+	if (ehopen) eddy3d_heat_close();
+	*xport = ThX;
 	fflush(fp_log);
 
 	crs_free(&A);

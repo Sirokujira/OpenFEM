@@ -159,7 +159,10 @@ int solve_port(const crs_t *, const unsigned char *, int, double *, double *,
 	double *, double *, FILE *, const char *);
 
 // thermal.c
-int solve_thermal(FILE *, double *);
+int solve_thermal(FILE *, double *, double *);
+int eddy3d_heat_open(FILE *);
+int eddy3d_heat_solve(FILE *, const double *, double, double *, double *, double *, int);
+void eddy3d_heat_close(void);
 
 // mpiwrap.c (WITH_MPI=OFF ではスタブ。mpi.h はこのモジュールの外に出さない)
 int mpi_init(int *, char ***);

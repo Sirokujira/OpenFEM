@@ -205,8 +205,19 @@ void crs_alloc_edge_node(crs_t *A)
 //	Kr = [ S     TG ;  (TG)^T   0        ]
 //	Ki = [ ωT    0  ;   0      -G^T TG/ω ]
 // nuelem が非 NULL なら、B-H 曲線を持つ材料の要素だけ等方性の ν = nuelem[e] を使う
-// (非線形の実効磁気抵抗率の反復)
+// (非線形の実効磁気抵抗率の反復)。sigelem が非 NULL なら要素ごとの σ = sigelem[e]
+// (熱連成の σ(T))。どちらも NULL なら従来と同じ演算
+static void assemble_eddy3d_sig(crs_t *Kr, crs_t *Ki, double omega, const double *nuelem,
+	const double *sigelem);
+
 void assemble_eddy3d(crs_t *Kr, crs_t *Ki, double omega, const double *nuelem)
+{
+	assemble_eddy3d_sig(Kr, Ki, omega, nuelem, NULL);
+}
+
+
+static void assemble_eddy3d_sig(crs_t *Kr, crs_t *Ki, double omega, const double *nuelem,
+	const double *sigelem)
 {
 	crs_zero(Kr);
 	crs_zero(Ki);
@@ -225,7 +236,7 @@ void assemble_eddy3d(crs_t *Kr, crs_t *Ki, double omega, const double *nuelem)
 			nu[0] = nu[1] = nu[2] = nuelem[e];
 			nu[3] = nu[4] = nu[5] = 0;
 		}
-		const double sig = Material[m].sigma;
+		const double sig = ((sigelem != NULL) ? sigelem[e] : Material[m].sigma);
 
 		double se[12][12], te[12][12];
 		edge_elem_matrices(e, nu, sig, se, te);
@@ -890,4 +901,207 @@ int solve_eddy3d(FILE *fp_log)
 	edge_free();
 
 	return ierr;
+}
+
+
+
+/*
+---- 交流の発熱 (thermal + analysis = A) ----
+
+熱連成 (thermal.c) の電気の段を A-φ で解く。σ(T) を要素ごとに与えて port 1 を
+V = Volt で解き、端子電流が cur (波高値、実数) になるよう解を複素数倍して、
+要素の時間平均の損失 Q_e = ½∫σ|E|² dV を作る。
+
+	e_k = jω a_k + (Gφ)_k   (局所の向き、E = -Σ e_k W_k は Whitney 恒等式から厳密)
+	Q_e = ½ eᴴ T_e e,   T_e = σ_e ∫W_k・W_l dV   (組み立てと同じ要素行列)
+
+連成系の A の行 S a + T e = 0 と節点の行 Gᵀ T e = r (電極の反作用 = 端子電流) から
+	eᴴ T e = jω aᴴ S a + φᴴ r,   Re(eᴴ T e) = Re(V I*)
+なので Σ_e Q_e = ½ Re(V I*) = ½|I|² R が丸めと反復の打ち切りを除いて厳密
+(rlc_check.sh で見るエネルギーの恒等式)。節点荷重は f_i = Σ_e Q_e / (要素の節点数)
+(要素平均の発熱を一定とみなした 1 次四面体の整合な荷重。和は Σ Q_e のまま)。
+ω -> 0 で DC の導電解析に帰着するので、低周波では DC の熱連成 (電流 I/√2) と
+一致する (検証の恒等式)。損失はゲージ不変なので gauge は既定 (固定しない) でよい。
+*/
+static struct {
+	crs_t Kr, Ki;
+	unsigned char *fix, *cond;
+	double *xdr, *br, *bi, *ur, *ui, *w1, *w2;
+	double omega;
+} EH;
+
+
+int eddy3d_heat_open(FILE *fp_log)
+{
+	edge_build();
+
+	const int ne = NEdge;
+	const int nn = NNode;
+	const int n = ne + nn;
+	const int nelem = edge_elem_count();
+	EH.omega = 2 * PI * Freq;
+	fprintf(fp_log, "  AC heating (analysis = A) : frequency = %.6e [Hz], %d edges, "
+		"%d unknowns\n", Freq, ne, n);
+
+	crs_alloc_edge_node(&EH.Kr);
+	crs_alloc_edge_node(&EH.Ki);
+
+	// Dirichlet は solve_eddy3d と同じ : awall の辺、電極の節点、非導電領域の節点
+	EH.fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));
+	unsigned char *wall = (unsigned char *)calloc((size_t)ne, sizeof(unsigned char));
+	awall_mark(wall);
+	int nwall = 0;
+	for (int i = 0; i < ne; i++) {
+		EH.fix[i] = wall[i];
+		nwall += wall[i];
+	}
+	int ierr = 0;
+	if (GaugeTree) {
+		unsigned char *tree = (unsigned char *)malloc((size_t)ne * sizeof(unsigned char));
+		int *comp = (int *)malloc((size_t)nn * sizeof(int));
+		edge_tree_gauge(wall, tree, comp);
+		int bad = 0, ref = -1;
+		for (int i = 0; i < ne; i++) EH.fix[i] |= tree[i];
+		for (int i = 0; i < nn; i++) {
+			if (NodeConductor[i] < 0) continue;
+			if (ref < 0) ref = comp[i];
+			else if (comp[i] != ref) bad = 1;
+		}
+		if (bad) {
+			fprintf(fp_log, "*** the electrodes are not connected through awall edges, "
+				"so the tree gauge would shift the terminal voltage; use gauge = 0\n");
+			ierr = 1;
+		}
+		free(tree);
+		free(comp);
+	}
+	free(wall);
+	EH.cond = (unsigned char *)calloc((size_t)nn, sizeof(unsigned char));
+	for (int e = 0; e < nelem; e++) {
+		if (Material[edge_elem_mat(e)].sigma <= 0) continue;
+		const int32_t *nd = edge_elem_nodes(e);
+		const int nen = edge_elem_nen(e);
+		for (int l = 0; l < nen; l++) EH.cond[nd[l]] = 1;
+	}
+	for (int i = 0; i < nn; i++) {
+		if (!EH.cond[i] || (NodeConductor[i] >= 0)) EH.fix[ne + i] = 1;
+	}
+	if (nwall == 0) {
+		fprintf(fp_log, "*** warning : no awall surface; the outer boundary is a "
+			"magnetic wall (dA/dn = 0)\n");
+	}
+
+	EH.xdr = (double *)malloc((size_t)n * sizeof(double));
+	EH.br  = (double *)malloc((size_t)n * sizeof(double));
+	EH.bi  = (double *)malloc((size_t)n * sizeof(double));
+	EH.ur  = (double *)malloc((size_t)n * sizeof(double));
+	EH.ui  = (double *)malloc((size_t)n * sizeof(double));
+	EH.w1  = (double *)malloc((size_t)n * sizeof(double));
+	EH.w2  = (double *)malloc((size_t)n * sizeof(double));
+
+	return ierr;
+}
+
+
+// σ = sigelem で解き、端子電流の波高値 cur での節点荷重 f[NNode] と Z = zr + j zi を返す
+int eddy3d_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f,
+	double *zr, double *zi, int it)
+{
+	const int ne = NEdge;
+	const int nn = NNode;
+	const int n = ne + nn;
+	const int nelem = edge_elem_count();
+	const double omega = EH.omega;
+
+	assemble_eddy3d_sig(&EH.Kr, &EH.Ki, omega, NULL, sigelem);
+	for (int i = 0; i < n; i++) EH.xdr[i] = 0;
+	for (int i = 0; i < nn; i++) {
+		if (EH.fix[ne + i] && (NodeConductor[i] == 1)) EH.xdr[ne + i] = Volt;
+	}
+	crs_spmv(&EH.Kr, EH.xdr, EH.w1, NULL);
+	crs_spmv(&EH.Ki, EH.xdr, EH.w2, NULL);
+	for (int i = 0; i < n; i++) {
+		EH.br[i] = (EH.fix[i] ? 0 : -EH.w1[i]);
+		EH.bi[i] = (EH.fix[i] ? 0 : -EH.w2[i]);
+	}
+	char label[64];
+	sprintf(label, "A%d", it);
+	if (solver_cocg(&EH.Kr, &EH.Ki, 1.0, EH.br, EH.bi, EH.ur, EH.ui, EH.fix,
+			Solver.maxiter, Solver.nout, Solver.converg, NULL, label) < 0) {
+		fprintf(fp_log, "*** thermal : the A-phi solve did not converge (iteration %d)\n", it);
+		return 1;
+	}
+	for (int i = 0; i < n; i++) EH.ur[i] += EH.xdr[i];
+
+	// 端子電流 (節点の行は 1/(jω) 倍してあるので jω 倍して戻す)
+	double ir = 0, ii = 0;
+	for (int i = 0; i < nn; i++) {
+		if ((NodeConductor[i] != 1) || !EH.cond[i]) continue;
+		double rr, ri;
+		row_dot_c(&EH.Kr, &EH.Ki, (int32_t)ne + i, EH.ur, EH.ui, &rr, &ri);
+		ir += -omega * ri;
+		ii += omega * rr;
+	}
+	const double den = (ir * ir) + (ii * ii);
+	if (den <= 0) {
+		fprintf(fp_log, "*** thermal : no current flows through the port\n");
+		return 1;
+	}
+	*zr = Volt * ir / den;
+	*zi = -Volt * ii / den;
+
+	// 端子電流が cur (実数) になるよう s = cur / I_V 倍する
+	const double sr = cur * ir / den, si = -cur * ii / den;
+	for (int i = 0; i < n; i++) {
+		const double xr = EH.ur[i], xi = EH.ui[i];
+		EH.ur[i] = (sr * xr) - (si * xi);
+		EH.ui[i] = (sr * xi) + (si * xr);
+	}
+
+	// 要素の損失 Q_e = ½ eᴴ T_e e を節点に配る
+	for (int i = 0; i < nn; i++) f[i] = 0;
+	for (int e = 0; e < nelem; e++) {
+		const double sg = sigelem[e];
+		if (sg <= 0) continue;
+		const int m = edge_elem_mat(e);
+		const int nedge = edge_elem_nedge(e);
+		const int nen = edge_elem_nen(e);
+		const int (*tab)[2] = edge_elem_table(e);
+		const int32_t *ed = &TetEdge[EdgeOff[e]];
+		const signed char *sgn = &TetEdgeSgn[EdgeOff[e]];
+		const int32_t *nd = edge_elem_nodes(e);
+		double nu[6], se[12][12], te[12][12];
+		material_coef_pub(m, 3, nu);
+		edge_elem_matrices(e, nu, sg, se, te);
+		double er[12], ei[12];
+		for (int k = 0; k < nedge; k++) {
+			const int32_t p = ne + nd[tab[k][0]], q = ne + nd[tab[k][1]];
+			// jω a = -ω a_i + j ω a_r
+			er[k] = (-omega * sgn[k] * EH.ui[ed[k]]) + (EH.ur[q] - EH.ur[p]);
+			ei[k] = (omega * sgn[k] * EH.ur[ed[k]]) + (EH.ui[q] - EH.ui[p]);
+		}
+		double qe = 0;
+		for (int k = 0; k < nedge; k++) {
+			for (int l = 0; l < nedge; l++) {
+				qe += te[k][l] * ((er[k] * er[l]) + (ei[k] * ei[l]));
+			}
+		}
+		qe *= 0.5;
+		for (int a = 0; a < nen; a++) f[nd[a]] += qe / nen;
+	}
+
+	return 0;
+}
+
+
+void eddy3d_heat_close(void)
+{
+	crs_free(&EH.Kr);
+	crs_free(&EH.Ki);
+	free(EH.fix); free(EH.cond);
+	free(EH.xdr); free(EH.br); free(EH.bi); free(EH.ur); free(EH.ui);
+	free(EH.w1); free(EH.w2);
+	EH.fix = EH.cond = NULL;
+	EH.xdr = EH.br = EH.bi = EH.ur = EH.ui = EH.w1 = EH.w2 = NULL;
+	edge_free();
 }
