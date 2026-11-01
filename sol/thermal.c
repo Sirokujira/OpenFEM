@@ -56,12 +56,14 @@ thermal.c
 */
 static int64_t th_nelem(void)
 {
+	if (MeshMode && (MeshDim == 2)) return (int64_t)NTri;
 	return (MeshMode ? (int64_t)elem3d_count() : ((int64_t)Nx * Ny * Nz));
 }
 
 
 static int th_emat(int64_t c)
 {
+	if (MeshMode && (MeshDim == 2)) return (int)TriMat[c];
 	return (MeshMode ? elem3d_mat((int)c) : (int)CellMaterial[c]);
 }
 
@@ -153,6 +155,8 @@ static void th_extent(void)
 static int32_t *TFace;
 static int TFaceN;
 static int32_t *TFaceEl;		// [TFaceN] 露出面を持つ要素 (外向きの法線を決める)
+static const signed char *ThNodeCond;	// ヒートシンクを選ぶ節点の導体番号 (3 次元は NodeConductor、
+										// 断面 2 次元は導体の三角形の節点)
 static int32_t *TOcc;			// [4*TOccN] 熱を通す要素の境界面すべて (電極の面も含む。相互放射の遮蔽)
 static int TOccN;
 
@@ -203,8 +207,66 @@ static int elem_faces(int e, int fv[6][4], int nfv[6])
 	return nf;
 }
 
+static int edge_cmp(const void *a, const void *b)
+{
+	const int32_t *p = (const int32_t *)a, *q = (const int32_t *)b;
+	for (int d = 0; d < 2; d++) {
+		if (p[d] != q[d]) return ((p[d] < q[d]) ? -1 : 1);
+	}
+	return 0;
+}
+
+
+// 断面 2 次元 (1 次三角形) の露出辺 : 熱を通す三角形 1 つにしか属さない辺 (k = 0 の領域との
+// 界面を含む)。TFace の形 {a, b, -1, -1}。単位長あたりの線積分になる
+static void tri_edges_build(const double *kcell)
+{
+	int ne = 0;
+	for (int e = 0; e < NTri; e++) ne += ((kcell[e] > 0) ? 3 : 0);
+	int32_t *all = (int32_t *)malloc(((size_t)ne * 5 + 1) * sizeof(int32_t));
+	int m = 0;
+	for (int e = 0; e < NTri; e++) {
+		if (kcell[e] <= 0) continue;
+		for (int l = 0; l < 3; l++) {
+			const int32_t a = Tri[(e * 3) + l], b = Tri[(e * 3) + ((l + 1) % 3)];
+			int32_t *r = &all[m * 5];
+			r[0] = ((a < b) ? a : b);
+			r[1] = ((a < b) ? b : a);
+			r[2] = a;
+			r[3] = b;
+			r[4] = e;
+			m++;
+		}
+	}
+	qsort(all, (size_t)ne, 5 * sizeof(int32_t), edge_cmp);
+	TFace = (int32_t *)malloc(((size_t)ne * 4 + 1) * sizeof(int32_t));
+	TFaceEl = (int32_t *)malloc(((size_t)ne + 1) * sizeof(int32_t));
+	TOcc = (int32_t *)malloc(sizeof(int32_t));
+	TFaceN = 0;
+	TOccN = 0;
+	for (int i = 0; i < ne; ) {
+		int j = i + 1;
+		while ((j < ne) && !edge_cmp(&all[i * 5], &all[j * 5])) j++;
+		if ((j - i) == 1) {
+			TFace[(TFaceN * 4) + 0] = all[(i * 5) + 2];
+			TFace[(TFaceN * 4) + 1] = all[(i * 5) + 3];
+			TFace[(TFaceN * 4) + 2] = -1;
+			TFace[(TFaceN * 4) + 3] = -1;
+			TFaceEl[TFaceN] = all[(i * 5) + 4];
+			TFaceN++;
+		}
+		i = j;
+	}
+	free(all);
+}
+
+
 static void tet_faces_build(const double *kcell)
 {
+	if (MeshDim == 2) {
+		tri_edges_build(kcell);
+		return;
+	}
 	const int ne = elem3d_count();
 	int nf = 0;
 	for (int e = 0; e < ne; e++) {
@@ -612,6 +674,66 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 
 	for (int f = 0; f < TFaceN; f++) {
 		const int32_t *nd = &TFace[f * 4];
+		if (nd[2] < 0) {
+			// 断面 2 次元の露出辺 (単位長あたり) : 対流は 1 次の線分で厳密 (質量 hL(1+δ)/6、
+			// 右辺 h T_a L/2)、輻射・h(T) は 2 点 Gauss で接線・右辺・熱の評価点を揃える
+			const double xc = (Xp[nd[0]] + Xp[nd[1]]) / 2, yc = (Yp[nd[0]] + Yp[nd[1]]) / 2;
+			const double zc = (Zp[nd[0]] + Zp[nd[1]]) / 2;
+			if (rad == 2) {
+				const surfbc_t *cb = surf_bc(0, xc, yc, zc, NULL);
+				const surfbc_t *rb = surf_bc(1, xc, yc, zc, NULL);
+				if ((cb && (cb->c > 0)) || (rb && (rb->c > 0))) nface++;
+				if (hits) {
+					for (int e = 0; e < (NConv + NRad); e++) {
+						const surfbc_t *bc = ((e < NConv) ? &ConvBC[e] : &RadBC[e - NConv]);
+						if (surf_in(bc, xc, yc, zc)) hits[e]++;
+					}
+				}
+				continue;
+			}
+			const surfbc_t *bc = surf_bc(((rad == 3) ? 0 : rad), xc, yc, zc, NULL);
+			if ((bc == NULL) || (bc->c <= 0)) continue;
+			nface++;
+			const double hc = bc->c, ta = bc->t;
+			const double dx = Xp[nd[1]] - Xp[nd[0]], dy = Yp[nd[1]] - Yp[nd[0]];
+			const double dz = Zp[nd[1]] - Zp[nd[0]];
+			const double len = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+			double me[2][2] = {{0, 0}, {0, 0}}, ge[2] = {0, 0};
+			if (!rad) {
+				for (int m = 0; m < 2; m++) {
+					for (int mm = 0; mm < 2; mm++) me[m][mm] = hc * len * ((m == mm) ? 2 : 1) / 6;
+					ge[m] = hc * ta * len / 2;
+				}
+				if (t) qsum += hc * len * (((t[nd[0]] + t[nd[1]]) / 2) - ta);
+			}
+			else {
+				const double gq[2] = {0.5 - 0.5 / sqrt(3.0), 0.5 + 0.5 / sqrt(3.0)};
+				for (int g2 = 0; g2 < 2; g2++) {
+					const double nn[2] = {1 - gq[g2], gq[g2]};
+					const double tg = (nn[0] * t[nd[0]]) + (nn[1] * t[nd[1]]);
+					const double w = len / 2;
+					double qv, dq;
+					surf_q(rad, hc, ta, tg, &qv, &dq, &bad);
+					qsum += w * qv;
+					for (int m = 0; m < 2; m++) {
+						ge[m] += w * (dq * tg - qv) * nn[m];
+						for (int mm = 0; mm < 2; mm++) me[m][mm] += w * dq * nn[m] * nn[mm];
+					}
+				}
+			}
+			if (B) {
+				for (int m = 0; m < 2; m++) {
+					for (int mm = 0; mm < 2; mm++) {
+						const int64_t pos = crs_find_tri(B, nd[m], nd[mm]);
+						if (pos >= 0) B->val[pos] += me[m][mm];
+					}
+				}
+			}
+			if (g) {
+				for (int m = 0; m < 2; m++) g[nd[m]] += ge[m];
+			}
+			continue;
+		}
 		if (nd[3] >= 0) {
 			// 四角形の面 (六面体・角柱・ピラミッド)
 			if (rad == 2) {
@@ -1508,8 +1630,34 @@ static double gen_mean(int e, const double *tn, double *vol)
 }
 
 
+// 断面 2 次元 (1 次三角形) : 剛性 K_ij = c S ∇λ_i・∇λ_j、質量 M_ij = c S (1 + δ_ij)/12
+static void tri2d_assemble(crs_t *A, const double *coef, int mass)
+{
+	crs_zero(A);
+	for (int e = 0; e < NTri; e++) {
+		const double c = coef[e];
+		if (c <= 0) continue;
+		const int32_t *nd = &Tri[e * 3];
+		double g[3][2], area;
+		if (tri_grad(nd, g, &area)) continue;
+		for (int l = 0; l < 3; l++) {
+			for (int m = 0; m < 3; m++) {
+				const double v = (mass ? (c * area * ((l == m) ? 2 : 1) / 12)
+				               : (c * ((g[l][0] * g[m][0]) + (g[l][1] * g[m][1])) * area));
+				const int64_t p = crs_find_tri(A, nd[l], nd[m]);
+				if (p >= 0) A->val[p] += v;
+			}
+		}
+	}
+}
+
+
 static void tet_assemble(crs_t *A, const double *coef)
 {
+	if (MeshDim == 2) {
+		tri2d_assemble(A, coef, 0);
+		return;
+	}
 	crs_zero(A);
 	gen_assemble(A, coef, 0);
 	for (int e = 0; e < NTet; e++) {
@@ -1556,6 +1704,10 @@ static void tet_joule(const double *phi, const double *sig, double *f)
 
 static void tet_mass(crs_t *A, const double *coef)
 {
+	if (MeshDim == 2) {
+		tri2d_assemble(A, coef, 1);
+		return;
+	}
 	crs_zero(A);
 	gen_assemble(A, coef, 1);
 	for (int e = 0; e < NTet; e++) {
@@ -1598,8 +1750,33 @@ static void th_mass(crs_t *A, const double *coef)
 // σ(T) を要素ごとに。入力解釈で σ には周囲温度での補正
 // σ_s = σ0 / (1 + α(T_amb - T0)) が掛かっているので、それを外して掛け直す。
 // α = 0 なら因子は厳密に 1 で、熱連成なしと同じ σ になる
+static double cond_rho_factor(int p, double t)
+{
+	return ((CondNTemp[p] > 0) ? table_interp(CondNTemp[p], CondTempT[p], CondTempF[p], t)
+	        : (1 + (CondTempco[p] * (t - CondTemp0[p]))));
+}
+
 static int th_sigma(FILE *fp_log, int64_t nc, const double *tcell, double *scell)
 {
+	if (MeshMode && (MeshDim == 2)) {
+		// 断面 2 次元 (F) の σ は導体ごとの CondSigma (conductorsigma / conductortempco)。
+		// 入力解釈で周囲温度の補正が掛かっているので外して掛け直す
+		for (int64_t c = 0; c < nc; c++) {
+			const int id = TriCond[c];
+			if ((id < 0) || (CondSigma[id] <= 0)) {
+				scell[c] = 0;
+				continue;
+			}
+			const double den = cond_rho_factor(id, tcell[c]);
+			if (den <= 0) {
+				fprintf(fp_log, "*** thermal : the resistivity factor of conductor %d became "
+					"non-positive (T = %.4e degC)\n", id, tcell[c]);
+				return 1;
+			}
+			scell[c] = CondSigma[id] * cond_rho_factor(id, Temperature) / den;
+		}
+		return 0;
+	}
 	for (int64_t c = 0; c < nc; c++) {
 		const material_t *mt = &Material[th_emat(c)];
 		if (mt->sigma <= 0) {
@@ -1663,7 +1840,7 @@ static double ThX;		// 最後に解いた Z の虚部 (交流のとき)
 
 static int th_ac(void)
 {
-	return ((Analysis & ANALYSIS_A) != 0);
+	return ((Analysis & (ANALYSIS_A | ANALYSIS_F)) != 0);
 }
 
 
@@ -1681,7 +1858,10 @@ static int th_electric(FILE *fp_log, crs_t *A, const double *scell, unsigned cha
 {
 	if (th_ac()) {
 		double zr = 0, zi = 0;
-		if (eddy3d_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
+		if (MeshMode && (MeshDim == 2)) {
+			if (eddy2d_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
+		}
+		else if (eddy3d_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
 		if (zr <= 0) {
 			fprintf(fp_log, "*** thermal : non-passive impedance R = %.6e (iteration %d)\n",
 				zr, it);
@@ -1702,6 +1882,20 @@ static int th_electric(FILE *fp_log, crs_t *A, const double *scell, unsigned cha
 static double th_celltemp(const double *tn, const double *kcell, double *tcell)
 {
 	double tmax = -1e300;
+	if (MeshMode && (MeshDim == 2)) {
+		// 断面 2 次元 : 3 節点の平均 (1 次補間の面積平均)
+		for (int e = 0; e < NTri; e++) {
+			if (kcell[e] <= 0) continue;
+			double t = 0;
+			for (int l = 0; l < 3; l++) {
+				const double tl = tn[Tri[(e * 3) + l]];
+				t += tl / 3;
+				if (tl > tmax) tmax = tl;
+			}
+			tcell[e] = t;
+		}
+		return tmax;
+	}
 	if (MeshMode) {
 		// 四面体 : 4 節点の平均 (1 次補間の体積平均)
 		for (int e = 0; e < NTet; e++) {
@@ -1750,6 +1944,14 @@ static double th_celltemp(const double *tn, const double *kcell, double *tcell)
 static double th_tmean(const double *tcell, const double *scell)
 {
 	double vsum = 0, tsum = 0;
+	if (MeshMode && (MeshDim == 2)) {
+		for (int e = 0; e < NTri; e++) {
+			if (scell[e] <= 0) continue;
+			vsum += TriArea[e];
+			tsum += TriArea[e] * tcell[e];
+		}
+		return ((vsum > 0) ? (tsum / vsum) : Temperature);
+	}
 	if (MeshMode) {
 		for (int e = 0; e < NTet; e++) {
 			if (scell[e] <= 0) continue;
@@ -1981,7 +2183,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		// (符号を変えて) ヒートシンクへ出ていく熱の流れになる
 		qsink = 0;
 		for (int i = 0; i < n; i++) {
-			const int id = NodeConductor[i];
+			const int id = ThNodeCond[i];
 			if ((id >= 0) && HeatSinkOn[id]) {
 				const double dm = crs_row_dot(&M, i, tn) - mtold[i];
 				qsink -= (dm / dts) + (th * (crs_row_dot(B, i, tn) - f[i] - gc[i] - gr[i]))
@@ -2109,7 +2311,7 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		// 評価し直した値とは O(ΔT²) だけ違う (収束すれば丸めの程度)
 		qsink = 0;
 		for (int i = 0; i < n; i++) {
-			const int id = NodeConductor[i];
+			const int id = ThNodeCond[i];
 			if ((id >= 0) && HeatSinkOn[id]) {
 				qsink += f[i] + gc[i] + gr[i] - crs_row_dot(B, i, tn);
 			}
@@ -2182,7 +2384,20 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	fprintf(fp_log, "\n=== electro-thermal analysis ===\n");
 	// 非構造格子は 1 次の 3 次元要素 (四面体・六面体・角柱・ピラミッド、混在可)。
 	// 2 次以上と断面 2 次元は黙って誤答にせず入力エラー。交流の発熱 (A) は四面体だけ
-	if (MeshMode && ((MeshDim != 3) || (TetOrder >= 2) || (HexNen > 8) || (PrismNen > 6))) {
+	// 断面 2 次元は交流の発熱 (F) の 1 次三角形だけ (F は断面 2 次元でしか解けない)
+	if (MeshMode && (MeshDim == 2) && (Analysis & ANALYSIS_F) && (TetOrder < 2)) {
+		if (RadExchange) {
+			fprintf(fp_log, "*** radiationexchange is not implemented on a 2-D cross-section mesh\n");
+			return 1;
+		}
+	}
+	else if ((Analysis & ANALYSIS_F) || (MeshMode && ((MeshDim != 3) || (TetOrder >= 2)
+	         || (HexNen > 8) || (PrismNen > 6)))) {
+		if (Analysis & ANALYSIS_F) {
+			fprintf(fp_log, "*** AC heating with analysis F (thermal + F) needs a 2-D cross-section "
+				"mesh of 3-node triangles\n");
+			return 1;
+		}
 		fprintf(fp_log, "*** thermal on an unstructured mesh supports first-order 3-D elements "
 			"only (tetrahedra, hexahedra, prisms, pyramids; this mesh is %d-D, element "
 			"order %d, %d-node hexahedra, %d-node prisms)\n",
@@ -2243,6 +2458,18 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	TFaceN = 0;
 	TOccN = 0;
 	if (MeshMode) tet_faces_build(kcell);
+	signed char *nc2d = NULL;
+	ThNodeCond = NodeConductor;
+	if (MeshMode && (MeshDim == 2)) {
+		// 断面 2 次元 : ヒートシンクの導体は、その導体の三角形の節点を固定する
+		nc2d = (signed char *)malloc((size_t)n * sizeof(signed char));
+		memset(nc2d, -1, (size_t)n * sizeof(signed char));
+		for (int e = 0; e < NTri; e++) {
+			if (TriCond[e] < 0) continue;
+			for (int l = 0; l < 3; l++) nc2d[Tri[(e * 3) + l]] = TriCond[e];
+		}
+		ThNodeCond = nc2d;
+	}
 
 	unsigned char *fix  = (unsigned char *)malloc((size_t)n * sizeof(unsigned char));
 	unsigned char *fixt = (unsigned char *)malloc((size_t)n * sizeof(unsigned char));
@@ -2269,7 +2496,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	}
 	int64_t nsink = 0;
 	for (int i = 0; i < n; i++) {
-		const int id = NodeConductor[i];
+		const int id = ThNodeCond[i];
 		if ((id >= 0) && HeatSinkOn[id]) {
 			fixt[i] = 1;
 			tn[i] = HeatSinkT[id];
@@ -2331,7 +2558,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 
 	// 交流 : A-φ の辺の情報と行列は反復の間持っておく
 	int ehopen = 0;
-	if (!ierr && th_ac()) {
+	if (!ierr && th_ac() && !(MeshMode && (MeshDim == 2))) {
 		ierr = eddy3d_heat_open(fp_log);
 		ehopen = 1;
 	}
@@ -2349,7 +2576,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	free(fix); free(fixt); free(phi); free(work); free(diag);
 	free(f); free(tn); free(rhs); free(u); free(gc); free(gr); free(q);
 	free(b0);
-	free(TFace); free(TFaceEl); free(TOcc);
+	free(TFace); free(TFaceEl); free(TOcc); free(nc2d);
 	TFace = NULL;
 	rx_free();
 

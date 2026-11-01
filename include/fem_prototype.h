@@ -63,6 +63,8 @@ int64_t crs_find_tri(const crs_t *, int32_t, int32_t);
 void crs_alloc_tri(crs_t *);
 void assemble_nu_tri(crs_t *, const double *);
 void assemble_mass_tri(crs_t *);
+void assemble_mass_tri_sig(crs_t *, const double *);
+int eddy2d_heat_solve(FILE *, const double *, double, double *, double *, double *, int);
 double tri6_area(int);
 int tri_grad_center(int, double [TRI_NMAX][2], int *);
 

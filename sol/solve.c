@@ -1527,7 +1527,21 @@ static int solve_one(FILE *fp_log)
 
 	// 時間調和渦電流解析 (表皮効果を含む R(f), L(f))
 	if (!ierr && (Analysis & ANALYSIS_F)) {
-		ierr |= solve_eddy(fp_log);
+		if (ThermalOn) {
+			// 交流の発熱 (断面 2 次元) : F を σ(T) を要素ごとに更新しながら thermal.c が解く
+			// (熱連成でないときの経路には触れない)
+			double g = 0, x = 0;
+			const int e = solve_thermal(fp_log, &g, &x);
+			ierr |= e;
+			if (!e) {
+				Rfmat[0] = 1 / g;
+				Lfmat[0] = x / (2 * PI * Freq);
+				HaveF = 1;
+			}
+		}
+		else {
+			ierr |= solve_eddy(fp_log);
+		}
 	}
 
 	// 3 次元渦電流解析 (A-φ、辺要素)
@@ -1841,5 +1855,112 @@ int solve(FILE *fp_log)
 	h5_close(fp_log);
 	field_free();
 
+	return ierr;
+}
+
+
+/*
+交流の発熱 (thermal + analysis = F、断面 2 次元の 1 次三角形)。
+
+要素ごとの σ (sigelem[NTri]、熱連成の σ(T)) で F を単一ポートで解き、電流が cur [A]
+(波高値) になるよう縮尺した場の時間平均の損失 (単位長あたり) を節点荷重 f にする:
+	p(x) = ½ σ |V' - jω Az(x)|²,   f_i = ∫ p N_i dA
+V' は導体 1 で s (縮尺)、基準導体 0 で 0。被積分関数は λ の 3 次なので Duffy の 9 点で
+厳密。系の行から Σ_i f_i = ½ Re(V' I*) = ½ |I|² R(f) が厳密に出る (aᴴ(K + jωM)a = V' aᴴb
+の実部と虚部。損失を組み立てと同じ質量行列の上で積分するのでそのまま成り立つ)。
+*zr, *zi = Z = R + jX [Ω/m]。
+*/
+int eddy2d_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f,
+	double *zr, double *zi, int it)
+{
+	const int n = (int)num_node();
+	const double omega = 2 * PI * Freq;
+	int ierr = 0;
+
+	crs_t K, M;
+	crs_alloc(&K);
+	crs_alloc(&M);
+	assemble_nu_tri(&K, NULL);
+	assemble_mass_tri_sig(&M, sigelem);
+
+	unsigned char *fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));
+	double *br = (double *)calloc((size_t)n, sizeof(double));
+	double *bi = (double *)calloc((size_t)n, sizeof(double));
+	double *ar = (double *)calloc((size_t)n, sizeof(double));
+	double *ai = (double *)calloc((size_t)n, sizeof(double));
+
+	// b_i = ∫ σ N_i V' dA (V' = 1 [V/m] を導体 1 に)、S_1 = ∫_1 σ dA
+	double s1 = 0;
+	for (int e = 0; e < NTri; e++) {
+		if (TriCond[e] != 1) continue;
+		const double sg = sigelem[e];
+		for (int l = 0; l < 3; l++) br[Tri[(e * 3) + l]] += sg * TriArea[e] / 3;
+		s1 += sg * TriArea[e];
+	}
+	char label[64];
+	sprintf(label, "eddy%d", it);
+	if (solver_cocg(&K, &M, omega, br, bi, ar, ai, fix,
+		Solver.maxiter, Solver.nout, Solver.converg, NULL, label) < 0) {
+		fprintf(fp_log, "*** thermal : the eddy-current solve did not converge (iteration %d)\n", it);
+		ierr = 1;
+	}
+
+	// I_V = S_1 - jω ∫_1 σ Az dA  (V' = 1)
+	double qr = 0, qi = 0;
+	for (int e = 0; e < NTri; e++) {
+		if (TriCond[e] != 1) continue;
+		const double w = sigelem[e] * TriArea[e] / 3;
+		for (int l = 0; l < 3; l++) {
+			qr += w * ar[Tri[(e * 3) + l]];
+			qi += w * ai[Tri[(e * 3) + l]];
+		}
+	}
+	const double ivr = s1 + (omega * qi), ivi = -omega * qr;
+	const double den = (ivr * ivr) + (ivi * ivi);
+	if (!ierr && (den <= 0)) {
+		fprintf(fp_log, "*** thermal : no current flows through the port\n");
+		ierr = 1;
+	}
+	if (!ierr) {
+		*zr = ivr / den;						// Z = 1 / Y (V' = 1 のとき Y = I_V)
+		*zi = -ivi / den;
+		// s = cur / I_V (V' の縮尺)。Az も s 倍
+		const double sr = cur * ivr / den, si = -cur * ivi / den;
+		for (int i = 0; i < n; i++) {
+			const double xr = ar[i], xi = ai[i];
+			ar[i] = (sr * xr) - (si * xi);
+			ai[i] = (sr * xi) + (si * xr);
+		}
+		// 損失の節点荷重 : Duffy 変換 + 各方向 3 点 (9 点、λ の 5 次まで厳密)
+		const double gp[3] = {0.5 - (0.5 * 0.77459666924148337704), 0.5,
+		                      0.5 + (0.5 * 0.77459666924148337704)};
+		const double gw[3] = {5.0 / 18, 8.0 / 18, 5.0 / 18};
+		for (int i = 0; i < n; i++) f[i] = 0;
+		for (int e = 0; e < NTri; e++) {
+			const double sg = sigelem[e];
+			if ((TriCond[e] < 0) || (sg <= 0)) continue;
+			const int32_t *nd = &Tri[e * 3];
+			const double vr = ((TriCond[e] == 1) ? sr : 0), vi = ((TriCond[e] == 1) ? si : 0);
+			for (int a = 0; a < 3; a++) {
+			for (int b = 0; b < 3; b++) {
+				const double u = gp[a], v = gp[b];
+				const double lam[3] = {1 - u - (v * (1 - u)), u, v * (1 - u)};
+				const double w = gw[a] * gw[b] * (1 - u) * 2 * TriArea[e];	// ∫ dA = 2A ∫∫ (1-u) du dv
+				double zr8 = 0, zi8 = 0;
+				for (int l = 0; l < 3; l++) {
+					zr8 += lam[l] * ar[nd[l]];
+					zi8 += lam[l] * ai[nd[l]];
+				}
+				// V' - jω Az = (vr + ω zi8) + j (vi - ω zr8)
+				const double jr = vr + (omega * zi8), ji = vi - (omega * zr8);
+				const double pq = 0.5 * sg * ((jr * jr) + (ji * ji)) * w;
+				for (int l = 0; l < 3; l++) f[nd[l]] += pq * lam[l];
+			}
+			}
+		}
+	}
+	crs_free(&K);
+	crs_free(&M);
+	free(fix); free(br); free(bi); free(ar); free(ai);
 	return ierr;
 }

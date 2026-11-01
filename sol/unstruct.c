@@ -5226,12 +5226,20 @@ void assemble_nu_tri(crs_t *A, const double *nucell)
 // 質量行列 M_ij = ∫ σ λ_i λ_j dS = σ S (1 + δ_ij)/12 (導体要素のみ)
 void assemble_mass_tri(crs_t *A)
 {
+	assemble_mass_tri_sig(A, NULL);
+}
+
+
+// 要素ごとの σ (sig[NTri]、NULL なら導体ごとの CondSigma) で組む。熱連成 (thermal + F) で
+// σ(T) を要素ごとに渡すのに使う。NULL のときの演算は従来と同じ
+void assemble_mass_tri_sig(crs_t *A, const double *sig)
+{
 	crs_zero(A);
 
 	for (int e = 0; e < NTri; e++) {
 		const int id = TriCond[e];
 		if (id < 0) continue;
-		const double sg = CondSigma[id];
+		const double sg = (sig ? sig[e] : CondSigma[id]);
 		if (sg <= 0) continue;
 
 		int32_t nd[TRI_NMAX];

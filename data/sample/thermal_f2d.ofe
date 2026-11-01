@@ -1,0 +1,41 @@
+OpenFEM 1 0
+title = AC heating on a 2-D cross-section : a parallel plate line cooled by convection
+#
+# 交流の発熱 (thermal + analysis = F) の断面 2 次元版 (単位長あたり)。plate2d.msh の
+# 平行平板線路 (幅 W = 1mm、厚さ t = 0.05mm、間隙 0.2mm、σ0 = 5.8e7 at T0 = 20 degC、
+# α = 3.9e-3) に波高値 I の電流を流し、導体の露出辺 (間隙側も外側も) から h = 50 で
+# 周囲 (20 degC) へ冷やす。2 枚の板は対称なので同じ温度になる。
+#
+# 100 Hz では表皮深さ (6.6mm) が t より十分大きく電流は一様、板の Bi = ht/k = 6e-6 と
+# 小さいので板はほぼ等温 (板の中の温度差は ΔT の 1e-6 程度)。板 1 枚の発熱
+#   P = ½ I² ρ(T) / (W t),  ρ(T) = ρ0 (1 + α (T - T0))
+# と対流 h L (T - T_a) (L = 2 (W + t) は板の周長) の釣り合いから
+#   ΔT = T - T_a = c / (1 - α c),   c = ½ I² ρ0 / (W t h L)   (T_a = T0)
+#   R(f) = 2 ρ(T) / (W t)   [ohm/m]
+# I = 4.5 A : c = 33.25, ΔT = 38.21 K (rlc_check.sh で awk で全桁を出して比べる)。
+# 発熱の節点荷重は組み立てと同じ質量行列の上の ½∫σ|V' - jωAz|² なので、
+# Σ f = ½ |I|² R(f) = 対流で出ていく熱が丸めを除いて厳密 (エネルギーの恒等式)。
+#
+mesh = plate2d.msh
+material = 1.0 0
+material = 1.0 0
+region = 1 2
+region = 10 3
+region = 11 3
+kthermal = 3 400
+electrode = 10 0
+electrode = 11 1
+
+conductorsigma = 0 5.8e7
+conductorsigma = 1 5.8e7
+conductortempco = 0 3.9e-3 20
+conductortempco = 1 3.9e-3 20
+convection = 50 20
+
+temperature = 20
+frequency = 100
+thermal = 4.5 200 1e-11
+analysis = F
+tline = X
+solver = 200000 5000 1e-12
+end

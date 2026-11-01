@@ -3793,6 +3793,118 @@ th_reject "AC heating with a nonlinear (bh) material" tacx_bh.ofe "linear materi
 awk '/^analysis/{print "analysis = A"; print "frequency = 1e3"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/tacx_grid.ofe"
 th_reject "AC heating on the structured grid" tacx_grid.ofe "requires an unstructured mesh"
 
+# ---- 交流の発熱 (thermal + analysis = F、断面 2 次元・単位長あたり) ----
+#
+# 1 次三角形の熱 (剛性・質量・露出辺の対流 / 輻射、ヒートシンクは導体の三角形の節点) と、
+# 要素ごとの σ(T) で単一ポートの F を電流で駆動して解く eddy2d_heat_solve (solve.c の注釈)。
+# 発熱は組み立てと同じ質量行列の上の ½∫σ|V' - jωAz|² なので Σf = ½|I|²R(f) が厳密。
+echo "[thermal F 2-D] AC heating on a 2-D cross-section (per unit length)"
+cp "$SRC/thermal_f2d.ofe" "$SRC/plate2d.msh" "$SRC/plate2d_p2.msh" "$SRC/plate_line_ac.ofe" "$WORK/"
+f2_tm() { awk '/^  T_max = / { print $(NF-1); exit }' "$WORK/ofe.log"; }
+# (1) 100 Hz、h = 50 : 等温の板の閉形式 (thermal_f2d.ofe の注釈)。許容は板の中の温度差
+#     (Bi = ht/k = 6e-6 と端の効果、実測 2e-6) から ΔT に 1e-5、R に 1e-6
+set -- $(awk 'BEGIN { I = 4.5; s0 = 5.8e7; a = 3.9e-3; W = 1e-3; t = 0.05e-3; h = 50; L = 2 * (W + t)
+	c = 0.5 * I * I / s0 / (W * t * h * L); dT = c / (1 - a * c)
+	printf "%.12e %.12e", dT, 2 * (1 + a * dT) / (s0 * W * t) }')
+dtex=$1; rex=$2
+th_run thermal_f2d.ofe
+compare "2-D AC heating, isothermal plates : T_mean - T_a [K]" "$(awk -v t="$(f2_tm)" 'BEGIN { printf "%.12e", t - 20 }')" "$dtex" 1e-5
+compare "2-D AC heating, isothermal plates : R(f) = 2 rho(T) / (W t) [ohm/m]" "$(th_r)" "$rex" 1e-6
+th_nface "2-D AC heating : exposed edges 2 x (2 x 40 + 2 x 12)" 208
+# (2) エネルギーの恒等式は h = 500 (I を √10 倍で同じ ΔT) で見る。h = 50 では k/h の比が
+#     大きすぎて熱の CG の定数分の残差が 6e-10 残る (実測。許容 1e-9 の上限に近い)
+awk '/^convection/{print "convection = 500 20"; next} /^thermal/{print "thermal = 14.230249470757707 200 1e-11"; next} {print}' \
+	"$SRC/thermal_f2d.ofe" > "$WORK/f2_h500.ofe"
+th_run f2_h500.ofe
+th_energy "2-D AC heating, 100 Hz"
+#     10 MHz (表皮効果・近接効果で発熱が間隙側に偏る)
+awk '/^frequency/{print "frequency = 1e7"; next} {print}' "$WORK/f2_h500.ofe" > "$WORK/f2_10m.ofe"
+th_run f2_10m.ofe
+th_energy "2-D AC heating, 10 MHz"
+r10=$(th_r)
+# (3) α = 0 : 熱連成の R(f) は熱連成なしの F と一致 (σ(T) の配線の検査。rlc.csv の 8 桁)
+for fq in 100 1e7; do
+	awk -v f="$fq" '/^thermal|^convection/{next} /^frequency/{print "frequency = " f; next} {print}' \
+		"$SRC/thermal_f2d.ofe" > "$WORK/f2_plain.ofe"
+	(cd "$WORK" && "$OFE" -n 2 f2_plain.ofe > /dev/null && "$OFE_POST" > /dev/null)
+	rp=$(value_of Rf)
+	awk -v f="$fq" '/^frequency/{print "frequency = " f; next} /^conductortempco/{print "conductortempco = " $3 " 0 20"; next} {print}' \
+		"$SRC/thermal_f2d.ofe" > "$WORK/f2_a0.ofe"
+	th_run f2_a0.ofe
+	compare "2-D AC heating, alpha = 0 == plain F : R(f = $fq) [ohm/m]" "$(th_r)" "$rp" 1e-8
+	[ "$fq" = 1e7 ] && r10a0=$(th_r)
+done
+res=$(awk -v a="$r10" -v b="$r10a0" 'BEGIN { printf "%s (R %.6e with heating vs %.6e at alpha = 0)", (a > b) ? "OK" : "NG", a, b }')
+echo "  2-D AC heating, 10 MHz : R(f) rises with the temperature : $res"
+case "$res" in NG*) status=1 ;; esac
+# (4) 輻射の辺 (2 点 Gauss の Newton) と、α = 0 での反復回数 (接線の検査)
+awk '/^convection/{print; print "radiation = 0.8 20"; next} {print}' "$WORK/f2_h500.ofe" > "$WORK/f2_rad.ofe"
+th_run f2_rad.ofe
+th_energy "2-D AC heating, convection + radiation"
+awk '/^conductortempco/{print "conductortempco = " $3 " 0 20"; next} {print}' "$WORK/f2_rad.ofe" > "$WORK/f2_rad0.ofe"
+th_run f2_rad0.ofe
+nit=$(awk '/converged in/ { print $3; exit }' "$WORK/ofe.log")
+if [ -n "$nit" ] && [ "$nit" -le 5 ]; then
+	echo "  2-D : Newton on edge radiation (alpha = 0) : converged in $nit iterations (<= 5) -> OK"
+else
+	echo "  2-D : Newton on edge radiation (alpha = 0) : ${nit:-?} iterations (> 5) -> NG" >&2
+	status=1
+fi
+# (5) ヒートシンク (導体 0 の三角形の節点を 20 degC に固定。導体 1 は間隙が k = 0 なので
+#     対流でしか冷えない) と過渡 (CN) の収支
+awk '/^convection/{print; print "heatsink = 0 20"; next} {print}' "$WORK/f2_h500.ofe" > "$WORK/f2_sink.ofe"
+th_run f2_sink.ofe
+th_energy "2-D AC heating, heat sink on conductor 0"
+awk '/^thermal/{print; print "heatcap = 3 3.4e6"; print "transient = 0.05 20 0.5"; next} {print}' "$WORK/f2_h500.ofe" > "$WORK/f2_tr.ofe"
+th_run f2_tr.ofe
+th_balance "2-D AC heating, transient (CN)"
+# (7) 熱伝導の剛性 : 間隙の誘電体に k_d = 0.5 を与え、導体 0 をヒートシンク、対流なし。
+#     板 1 の熱はすべて間隙を 1 次元に通る (側面は断熱) ので
+#       ΔT = c / (1 - α c),  c = ½ I² ρ0 d / (W t k_d W)
+#     に板 1 の中の放物線 q t² / (2 k_cu) (q = 板 1 の発熱密度) を足したものが T_max。
+#     面内で 90 度回した格子 (plate2d_rot.msh) でも同じ答え (剛性の面内 2 成分の両方を見る)。
+#     許容は ΔT に 1e-5 (σ(T) を板の平均温度で取る近似の 1e-7 と、板の中の 1 次要素の誤差)
+cp "$SRC/plate2d_rot.msh" "$WORK/"
+set -- $(awk 'BEGIN { I = 4.5; s0 = 5.8e7; a = 3.9e-3; W = 1e-3; t = 0.05e-3; d = 0.2e-3; kd = 0.5; kc = 400
+	c = 0.5 * I * I / s0 * d / (W * t * kd * W); dT = c / (1 - a * c)
+	q = dT * kd * W / d / (W * t)
+	printf "%.12e", dT + q * t * t / (2 * kc) }')
+for m in plate2d plate2d_rot; do
+	awk -v m="$m" '/^mesh/{print "mesh = " m ".msh"; next} /^kthermal/{print; print "kthermal = 2 0.5"; next}
+		/^convection/{print "heatsink = 0 20"; next} {print}' "$SRC/thermal_f2d.ofe" > "$WORK/f2_kd.ofe"
+	th_run f2_kd.ofe
+	compare "2-D AC heating, conduction across the gap ($m) : T_max - T_sink [K]" \
+		"$(awk -v t="$(th_t)" 'BEGIN { printf "%.12e", t - 20 }')" "$1" 1e-5
+	th_energy "2-D AC heating, conduction across the gap ($m)"
+done
+#     断熱 (冷却なし)・α = 0 の過渡 (CN) : 面積加重の平均温度は質量の行和 1ᵀM T/ρc そのもの
+#     なので、T_mean(t) = T_0 + ½ I² R t / (ρc 2 W t_p) が θ に依らず厳密 (質量の (1 + δ) の
+#     重みの検査。収支の恒等式は質量の誤りを見ない)
+awk '/^convection/{next} /^conductortempco/{print "conductortempco = " $3 " 0 20"; next}
+	/^thermal/{print; print "heatcap = 3 3.4e6"; print "transient = 0.2 10 0.5"; next} {print}' \
+	"$SRC/thermal_f2d.ofe" > "$WORK/f2_ad.ofe"
+th_run f2_ad.ofe
+compare "2-D AC heating, adiabatic transient (CN) : T_mean(t) - T_0 == I^2 R t / (2 rho c A) [K]" \
+	"$(awk -v t="$(f2_tm)" 'BEGIN { printf "%.12e", t - 20 }')" \
+	"$(awk -v r="$(th_r)" 'BEGIN { printf "%.12e", 0.5 * 4.5 * 4.5 * r * 0.2 / (3.4e6 * 2 * 1e-3 * 0.05e-3) }')" 1e-9
+th_balance "2-D AC heating, adiabatic transient (CN)"
+# (6) 弾くべき入力
+awk '/^mesh/{print "mesh = plate2d_p2.msh"; next} {print}' "$SRC/thermal_f2d.ofe" > "$WORK/f2x_p2.ofe"
+mesh_reject "AC heating (F) on 6-node triangles" f2x_p2.ofe
+if ! grep -q "needs a 2-D cross-section mesh of 3-node triangles" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than the element order" >&2; status=1
+fi
+awk '/^convection/{print; print "radiation = 0.8 20"; print "radiationexchange = 1"; next} {print}' "$SRC/thermal_f2d.ofe" > "$WORK/f2x_rx.ofe"
+mesh_reject "radiationexchange on a 2-D cross-section" f2x_rx.ofe
+if ! grep -q "not implemented on a 2-D cross-section" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than the 2-D radiation exchange" >&2; status=1
+fi
+awk '/^conductor = 0/{print "material = 1.0 0"; print "kthermal = 2 400"} /^analysis/{print "convection = 50 20"; print "thermal = 1"} {print}' "$SRC/plate_line_ac.ofe" > "$WORK/f2x_grid.ofe"
+mesh_reject "AC heating (F) on the structured grid" f2x_grid.ofe
+if ! grep -q "needs a 2-D cross-section mesh of 3-node triangles" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than the structured grid" >&2; status=1
+fi
+
 # ---- 対流の h(T) (convectiontemptable) ----
 #
 # h(T) = h f(T) (折れ線) で対流が非線形になり、輻射と同じく Picard の各回で Newton
@@ -4304,7 +4416,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
-         bertotti_core temp_material temp_mur hn_plate plate2d_p2 plate2d_p3 nodal_test_p4 \
+         bertotti_core temp_material temp_mur hn_plate plate2d_p2 plate2d_p3 nodal_test_p4 thermal_f2d \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
          thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
          plate_line_bh_ac bar_air_bh thermal_tet thermal_ac thermal_natconv \

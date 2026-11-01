@@ -1485,10 +1485,11 @@ int input_data(FILE *fp)
 	// 分からないので solve_thermal() で見る)
 	if (ThermalOn) {
 		// DC (R) か交流の発熱 (A、3 次元渦電流の損失) のどちらか 1 つ
-		if ((Analysis != ANALYSIS_R) && (Analysis != ANALYSIS_A)) {
+		if ((Analysis != ANALYSIS_R) && (Analysis != ANALYSIS_A) && (Analysis != ANALYSIS_F)) {
 			printf("%s\n", "*** thermal needs analysis = R alone (the coupling is "
-				"between DC conduction and heat conduction) or analysis = A alone "
-				"(AC heating by 3-D eddy currents)");
+				"between DC conduction and heat conduction), analysis = A alone "
+				"(AC heating by 3-D eddy currents) or analysis = F alone (AC heating "
+				"on a 2-D cross-section, per unit length)");
 			return 1;
 		}
 		// 発熱は電流の 2 乗なので重ね合わせが効かない (bh と同じ理由)
@@ -1504,21 +1505,26 @@ int input_data(FILE *fp)
 		}
 		// 交流の発熱 : 周波数は 1 点 (温度場はその周波数での釣り合い)。非線形 (B-H) の
 		// 実効磁気抵抗率の反復とは入れ子にしない (どちらも反復なので収束を保証できない)
-		if (Analysis == ANALYSIS_A) {
+		if ((Analysis == ANALYSIS_A) || (Analysis == ANALYSIS_F)) {
 			if (NFreqSweep > 0) {
-				printf("%s\n", "*** thermal with analysis A cannot be combined with "
+				printf("%s\n", "*** thermal with analysis A / F cannot be combined with "
 					"frequencysweep (solve each frequency separately)");
+				return 1;
+			}
+			if (Freq <= 0) {
+				printf("%s\n", "*** thermal with analysis A / F needs the frequency key");
 				return 1;
 			}
 			for (int m = 0; m < NMaterial; m++) {
 				if (Material[m].nbh[0] > 0) {
-					printf("%s\n", "*** thermal with analysis A supports linear "
+					printf("%s\n", "*** thermal with analysis A / F supports linear "
 						"materials only (remove bh)");
 					return 1;
 				}
 			}
 		}
-		if (Tline) {
+		// F は断面 2 次元 (tline が要る)。電流は絶対値で、発熱・R は単位長あたり
+		if (Tline && (Analysis != ANALYSIS_F)) {
 			printf("%s\n", "*** thermal cannot be combined with tline (the drive "
 				"current and the heat are absolute, not per unit length)");
 			return 1;

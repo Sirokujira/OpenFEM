@@ -287,6 +287,12 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
   (`assemble_eddy3d()` は NULL で呼ぶので従来の答えは不変)。100 Hz では DC の熱連成
   (電流 I/√2) と 9 桁一致するのが σ(T) の配線の検査。端子電流を実数にそろえる複素倍率の
   位相は損失に効かない (|s|² だけ) ので、その誤りは検出できない (等価)。
+  **断面 2 次元 (`thermal` + `F`) は `eddy2d_heat_solve` (solve.c)**: 要素ごとの σ(T) を
+  `assemble_mass_tri_sig()` に渡し (NULL なら従来の CondSigma)、損失 ½∫σ|V'−jωAz|² を
+  組み立てと同じ質量行列の上で積分するので Σf = ½|I|²R が厳密。σ(T) は F の系統
+  (`conductortempco`) で掛け直す。**k/h の比が大きい板では熱の CG の定数分の残差が 6e-10 残る**
+  (恒等式の許容 1e-9 に近い) ので、恒等式は h を大きくしたケースで見る (実測)。
+  質量の誤りは収支の恒等式では見えず、断熱・α = 0 の過渡の T_mean(t) の閉形式でだけ落ちる。
 - **静磁場の過渡解析 (`M` + `transient`) は solve.c の `mag_transient`** (後退 Euler、
   断面 2 次元の構造格子)。孤立した導電領域ごとに正味の電流 0 を射影質量で消去する。
   **σ = 0 で刻みを電流掃引の点に揃えると準静的な掃引と解の列が一致する**ように、
