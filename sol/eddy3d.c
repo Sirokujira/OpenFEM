@@ -1303,6 +1303,7 @@ static int ed_ja_step(ed_ja_t *J, const crs_t *Kl, crs_t *Kt, const double *rhs,
 				for (int l = 0; l < 6; l++) {
 					const double *cl = &cv[l * 3];
 					const int64_t p = crs_find_en(Kt, J->ed[(j * 6) + k], J->ed[(j * 6) + l]);
+					if (p < 0) continue;		// 分散した行列 (mpisolve = 2) の他の rank の行
 					Kt->val[p] += J->vol[j] * ((nc[0] * cl[0]) + (nc[1] * cl[1]) + (nc[2] * cl[2]));
 				}
 			}
@@ -1354,9 +1355,9 @@ int solve_eddy3d_transient(FILE *fp_log)
 	crs_t K, M;
 	crs_alloc_edge_node(&K);
 	crs_alloc_edge_node(&M);
-	// mpisolve = 2 : 線形の過渡解析は積と CG だけなので K・M とも自分の行ブロックだけを持つ (端子電流は
-	// 積の結果から取る。ヒステリシス・B-H の固定点は行列を直接引くので setup が弾く)
-	if (!hyst) crs_distribute_pair(fp_log, &K, &M);
+	// mpisolve = 2 : 過渡解析は積と CG だけなので K・M (とヒステリシス・B-H の接線 Kt) を自分の行ブロックだけ
+	// 持つ (端子電流は積の結果から取る)
+	crs_distribute_pair(fp_log, &K, &M);
 	assemble_eddy3d_tr(&K, &M, dt, hyst);
 
 	unsigned char *fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));
@@ -1397,7 +1398,10 @@ int solve_eddy3d_transient(FILE *fp_log)
 	if (hyst && ed_ja_open(&J, fp_log)) ierr = 1;
 	crs_t Kt;
 	memset(&Kt, 0, sizeof(Kt));
-	if (hyst) crs_alloc_edge_node(&Kt);
+	if (hyst) {
+		crs_alloc_edge_node(&Kt);
+		crs_distribute(&Kt);		// mpisolve = 2 : K と同じ分け方 (Kt = K の値の写し + 接線)
+	}
 	double bref = 0;
 	long fptotal = 0;
 
@@ -1501,6 +1505,7 @@ int eddy3d_heat_open(FILE *fp_log)
 
 	crs_alloc_edge_node(&EH.Kr);
 	crs_alloc_edge_node(&EH.Ki);
+	crs_distribute_pair(NULL, &EH.Kr, &EH.Ki);		// mpisolve = 2 : 交流の発熱の A-φ も自分の行ブロックだけ
 
 	// Dirichlet は solve_eddy3d と同じ : awall の辺、電極の節点、非導電領域の節点
 	EH.fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));

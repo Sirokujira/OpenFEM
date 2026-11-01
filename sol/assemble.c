@@ -1323,6 +1323,7 @@ void assemble_newton(crs_t *J, const double *az, double *res)
 		for (int l = 0; l < 8; l++) {
 			const int li = LI(l), lj = LJ(l), lk = LK(l);
 			res[nd[l]] += re[l];
+			if (!crs_owns(J, nd[l])) continue;		// 分散した行列 (mpisolve = 2) : 他の rank の行 (残差は全行)
 			const int64_t rowstart = J->rowptr[nd[l]];
 			for (int m = 0; m < 8; m++) {
 				const int64_t p = crs_offset(rowstart, i + li, j + lj, k + lk,
@@ -1392,6 +1393,7 @@ void assemble_nu6(crs_t *A, const double *nu6)
 		for (int l = 0; l < 8; l++) {
 			const int li = LI(l), lj = LJ(l), lk = LK(l);
 			const int64_t row = node_index(i + li, j + lj, k + lk);
+			if (!crs_owns(A, row)) continue;		// 分散した行列 (mpisolve = 2) : 他の rank の行
 			const int64_t rowstart = A->rowptr[row];
 			for (int mm = 0; mm < 8; mm++) {
 				const int64_t p = crs_offset(rowstart, i + li, j + lj, k + lk, LI(mm) - li, LJ(mm) - lj, LK(mm) - lk);

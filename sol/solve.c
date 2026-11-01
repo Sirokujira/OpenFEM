@@ -387,6 +387,7 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 	}
 	crs_t Ms;
 	crs_alloc(&Ms);
+	crs_distribute(&Ms);		// mpisolve = 2 : 剛性と同じ分け方 (A += Ms/Δt を値の配列で足す)
 	assemble_mass_cell(&Ms, sig);
 
 	// 孤立した導電領域 (節点を共有するセルどうしを 1 つにまとめる)
@@ -647,7 +648,7 @@ static int solve_magnetostatic(FILE *fp_log)
 	fflush(fp_log);
 
 	crs_t A;
-	crs_alloc_dist(&A);		// mpisolve = 2 なら自分の行ブロックだけ (線形のときだけ。setup の判定)
+	crs_alloc_dist(&A);		// mpisolve = 2 なら自分の行ブロックだけ
 	{
 		int64_t r0, r1;
 		if (crs_dist_info(&A, &r0, &r1)) {
@@ -973,6 +974,7 @@ static int solve_magnetostatic(FILE *fp_log)
 
 		crs_t J;
 		crs_alloc(&J);
+		crs_distribute(&J);		// mpisolve = 2 : ヤコビアンも自分の行ブロックだけ
 		double *res = (double *)malloc(n * sizeof(double));
 		double *del = (double *)malloc(n * sizeof(double));
 
@@ -1718,16 +1720,6 @@ static void sweep_row(FILE *fp, sweepcol_t k, FILE *fp_log)
 }
 
 
-// 非線形 (B-H・J-A) の材料があるか (mpisolve = 2 の対応の判定)
-static int mpi_any_nonlin(void)
-{
-	for (int m = 0; m < NMaterial; m++) {
-		if (Material[m].ja.on || (Material[m].nbh[0] > 0)) return 1;
-	}
-	return 0;
-}
-
-
 int solve(FILE *fp_log)
 {
 	int ierr = 0;
@@ -1744,12 +1736,9 @@ int solve(FILE *fp_log)
 	しか無いので、黙って直列で走らず入力エラーにする。
 	*/
 	if ((msize > 1) && (MpiSolve == 2)
-	 && (Direct || (Analysis & ~(ANALYSIS_C | ANALYSIS_L | ANALYSIS_R | ANALYSIS_A | ANALYSIS_M | ANALYSIS_F))
-	     || ((Analysis & ANALYSIS_A) && TransientOn && ((TetOrder >= 2) || mpi_any_nonlin()))
-	     || ((Analysis & ANALYSIS_M) && (TransientOn || mpi_any_nonlin())))) {
-		fprintf(fp_log, "*** mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R, "
-			"A and F in the frequency domain, the linear M, the linear first-order A transient and thermal only "
-			"(no direct = 1); use mpisolve = 1\n");
+	 && (Direct || (Analysis & ~(ANALYSIS_C | ANALYSIS_L | ANALYSIS_R | ANALYSIS_A | ANALYSIS_M | ANALYSIS_F)))) {
+		fprintf(fp_log, "*** mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R / M / F / A "
+			"and thermal (not the self tests E / P, no direct = 1); use mpisolve = 1\n");
 		return 1;
 	}
 	if ((msize > 1) && MpiSolve) {

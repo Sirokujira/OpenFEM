@@ -1437,7 +1437,7 @@ else
 				fi
 			done
 		done
-		# 行列の分散 (mpisolve = 2、C / L / R と A の周波数領域・1 次の A の線形の過渡解析)。各 rank は行ブロック (構造格子は x 方向に切った板) の行だけを
+		# 行列の分散 (mpisolve = 2、C / L / R / M / F / A と熱連成。自己検証の E / P だけは入力エラー)。各 rank は行ブロック (構造格子は x 方向に切った板) の行だけを
 		# 組み立てて持ち、対角・反作用は持ち主から集める。行ごとの和の順は直列と同じなので出力はバイト一致。
 		# 「分散したこと」は rank 0 が持つ行の数 (= n / np) で見る (分散し忘れても答えは同じになるので)
 		cp "$SRC/resistor_bar.ofe" "$SRC/coupled_microstrip.ofe" "$WORK/"
@@ -1534,11 +1534,39 @@ else
 				status=1
 			fi
 		done
-		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2.msh"; next} /^frequency/{next} /^analysis/{print "mpisolve = 2"; print "transient = 2e-4 5"} {print}' > "$WORK/mdx_a.ofe"
-		(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 mdx_a.ofe > /dev/null 2>&1) \
-			&& { echo "  mpisolve = 2 with the second-order A transient : accepted -> NG" >&2; status=1; } \
-			|| echo "  mpisolve = 2 with the second-order A transient : rejected -> OK"
-		grep -q "mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R," "$WORK/ofe.log" \
+		# 非線形の M (Newton の B-H・J-A・渦電流 + J-A の過渡) と、非線形の A の過渡解析 (1 次の J-A、2 次の B-H。接線の
+		# 行列 Kt も同じ分け方で詰める)
+		cp "$SRC/plate_line_bh.ofe" "$SRC/plate_line_ja.ofe" "$SRC/lamination_step.ofe" "$SRC/bar_tet2c.msh" "$WORK/"
+		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^frequency/{next} /^voltage/{print "voltage = 1e-4"; next}
+			/^analysis/{print "transient = 2e-4 10"; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"; print "nlsolver = 200 1e-9 1"} {print}' > "$WORK/a1ja.ofe"
+		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2c.msh"; next} /^frequency/{next} /^voltage/{print "voltage = 1e-4"; next}
+			/^analysis/{print "transient = 2e-4 10"; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "nlsolver = 50 1e-9 1"} {print}' > "$WORK/a2bh.ofe"
+		for c in plate_line_bh plate_line_ja lamination_step a1ja a2bh; do
+			awk '/^analysis/{print "mpisolve = 2"} {print}' "$WORK/$c.ofe" > "$WORK/mn_$c.ofe"
+			rm -f "$WORK/ofe.out" "$WORK/ofe_transient.csv" "$WORK/mn_ref.csv"
+			(cd "$WORK" && "$OFE" -n 2 "mn_$c.ofe" > /dev/null 2>&1) || { echo "  mpisolve = 2 $c : the serial run failed -> NG" >&2; status=1; }
+			cp "$WORK/ofe.out" "$WORK/mn_ref.out" 2> /dev/null || true
+			[ -f "$WORK/ofe_transient.csv" ] && cp "$WORK/ofe_transient.csv" "$WORK/mn_ref.csv"
+			rm -f "$WORK/ofe.out" "$WORK/ofe_transient.csv"
+			(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 "mn_$c.ofe" > /dev/null 2>&1) || true
+			k=$(grep -c "the matrix is distributed by rows" "$WORK/ofe.log" || true)
+			r=OK
+			cmp -s "$WORK/mn_ref.out" "$WORK/ofe.out" || r=NG
+			if [ -f "$WORK/mn_ref.csv" ]; then cmp -s "$WORK/mn_ref.csv" "$WORK/ofe_transient.csv" || r=NG; fi
+			if [ "$r" = OK ] && [ "$k" -ge 1 ]; then
+				echo "  mpisolve = 2, np = 2 : nonlinear $c gives byte-identical output, $k distributed matrices logged : OK"
+			else
+				echo "  mpisolve = 2, np = 2 : nonlinear $c differs from the serial run (or $k matrices distributed) -> NG" >&2
+				status=1
+			fi
+		done
+		# 自己検証 (E / P) は分散しない (入力エラー)
+		awk '/^analysis/{print "mpisolve = 2"} {print}' "$SRC/edge_test.ofe" > "$WORK/mdx_e.ofe"
+		cp "$SRC/box_tet.msh" "$WORK/"
+		(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 mdx_e.ofe > /dev/null 2>&1) \
+			&& { echo "  mpisolve = 2 with analysis E : accepted -> NG" >&2; status=1; } \
+			|| echo "  mpisolve = 2 with analysis E : rejected -> OK"
+		grep -q "mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R / M / F / A" "$WORK/ofe.log" \
 			|| { echo "  *** it was rejected for a different reason" >&2; status=1; }
 		;;
 	esac

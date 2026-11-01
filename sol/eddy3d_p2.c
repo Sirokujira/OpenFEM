@@ -891,6 +891,7 @@ static int p2_assemble_tr(FILE *fp_log, double dt, int skipnl)
 		for (int k = 0; k < 20; k++) {
 			for (int l = 0; l < 20; l++) {
 				const int64_t p = p2_find(&P2.Kr, dof[k], dof[l]);
+				if (p < 0) continue;		// 分散した行列 (mpisolve = 2) の他の rank の行
 				const double s = sgn[k] * sgn[l];
 				P2.Kr.val[p] += s * (((skipnl && p2_nonlin(m)) ? 0 : se[k][l]) + (te[k][l] / dt));
 				P2.Ki.val[p] += s * te[k][l] / dt;
@@ -899,15 +900,20 @@ static int p2_assemble_tr(FILE *fp_log, double dt, int skipnl)
 				const double v = sgn[k] * ce[k][a] / dt;
 				const int64_t p1 = p2_find(&P2.Kr, dof[k], dof[20 + a]);
 				const int64_t p2 = p2_find(&P2.Kr, dof[20 + a], dof[k]);
-				P2.Kr.val[p1] += v;
-				P2.Kr.val[p2] += v;
-				P2.Ki.val[p1] += v;
-				P2.Ki.val[p2] += v;
+				if (p1 >= 0) {
+					P2.Kr.val[p1] += v;
+					P2.Ki.val[p1] += v;
+				}
+				if (p2 >= 0) {
+					P2.Kr.val[p2] += v;
+					P2.Ki.val[p2] += v;
+				}
 			}
 		}
 		for (int a = 0; a < 10; a++) {
 			for (int b = 0; b < 10; b++) {
 				const int64_t p = p2_find(&P2.Kr, dof[20 + a], dof[20 + b]);
+				if (p < 0) continue;
 				P2.Kr.val[p] += pe[a][b] / dt;
 				P2.Ki.val[p] += pe[a][b] / dt;
 			}
@@ -1190,7 +1196,8 @@ static void p2nl_tangent(p2nl_t *J, const crs_t *Kl, crs_t *Kt)
 		const double *ke = &J->loc[(int64_t)j * 400];
 		for (int k = 0; k < 20; k++) {
 			for (int l = 0; l < 20; l++) {
-				Kt->val[p2_find(Kt, J->dof[(j * 20) + k], J->dof[(j * 20) + l])] += ke[(k * 20) + l];
+				const int64_t p = p2_find(Kt, J->dof[(j * 20) + k], J->dof[(j * 20) + l]);
+				if (p >= 0) Kt->val[p] += ke[(k * 20) + l];		// 分散した行列の他の rank の行は飛ばす
 			}
 		}
 	}
@@ -1293,6 +1300,7 @@ int solve_eddy3d_p2_transient(FILE *fp_log)
 	if (hyst) {
 		if (p2nl_open(&J, fp_log)) ierr = 1;
 		p2_crs(&Kt, n, P2.fe, P2.ne, P2.nf, nn);
+		crs_distribute(&Kt);		// mpisolve = 2 : K と同じ分け方 (Kt = K の値の写し + 接線)
 	}
 	double bref = 0;
 	long fptotal = 0;
