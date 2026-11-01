@@ -94,6 +94,11 @@ typedef struct {
 	double alpha;				// 磁区間結合 α
 	double k;					// ピン止め k [A/m]
 	double c;					// 可逆成分の割合 c
+	// 異方性 (jaaxis) : 全体の軸 x / y / z ごとの (Ms, a, α, k, c)。指定しない軸は ja の行の値。
+	// ベクトル J-A (javector の断面 2 次元と 3 次元の A) だけが読む
+	int aniso;					// 1 : 軸ごとのパラメータを使う
+	int axset;					// 指定された軸 (bit 0..2)
+	double axp[3][5];
 } ja_t;
 
 // 分散材料の極 (時間因子 e^{jωt}、ε = ε' - jε'')

@@ -242,6 +242,8 @@ int input_data(FILE *fp)
 		Material[m].eps6_given = 0;
 		Material[m].bhaniso = 0;
 		Material[m].ja.on = 0;
+		Material[m].ja.aniso = 0;
+		Material[m].ja.axset = 0;
 		for (int d = 0; d < 3; d++) Material[m].nbh[d] = 0;
 		for (int d = 0; d < 6; d++) {
 			Material[m].eps6[d] = 0;	// 0 : anisoeps 未指定 (最後に epsr で埋める)
@@ -457,6 +459,8 @@ int input_data(FILE *fp)
 			Material[NMaterial].eps6_given = 0;
 			Material[NMaterial].bhaniso = 0;
 			Material[NMaterial].ja.on = 0;
+			Material[NMaterial].ja.aniso = 0;
+			Material[NMaterial].ja.axset = 0;
 			for (int d = 0; d < 3; d++) Material[NMaterial].nbh[d] = 0;
 			for (int d = 0; d < 6; d++) {
 				Material[NMaterial].eps6[d] = 0;
@@ -1220,6 +1224,29 @@ int input_data(FILE *fp)
 			}
 			ja->on = 1;
 		}
+		else if (!strcmp(strkey, "jaaxis")) {
+			// jaaxis = <material_id> <x|y|z> <Ms> <a> <alpha> <k> <c>
+			//   異方性の J-A : その軸の成分のパラメータ (指定しない軸は ja の行の値)。ベクトル J-A 専用
+			if (nval < 7) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			const char ax = (char)tolower((int)token[3][0]);
+			const int d = ((ax == 'x') ? 0 : (ax == 'y') ? 1 : (ax == 'z') ? 2 : -1);
+			if ((mid < 2) || (mid >= NMaterial) || (d < 0) || (token[3][1] != '\0')) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ja_t *ja = &Material[mid].ja;
+			for (int q = 0; q < 5; q++) ja->axp[d][q] = atof(token[4 + q]);
+			const double *pa = ja->axp[d];
+			if ((pa[0] <= 0) || (pa[1] <= 0) || (pa[3] <= 0) || (pa[2] < 0) || (pa[4] < 0) || (pa[4] >= 1)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ja->axset |= (1 << d);
+		}
 		else if (!strcmp(strkey, "currentsweep")) {
 			// currentsweep = <I1> <I2> ...  : 履歴に沿って順に解く
 			if (nval < 1) {
@@ -1383,6 +1410,21 @@ int input_data(FILE *fp)
 		}
 	}
 
+	// 異方性の J-A : 指定しない軸を ja の行の値で埋める (温度補正の Ms の倍率より前に)
+	for (int m = 0; m < NMaterial; m++) {
+		ja_t *ja = &Material[m].ja;
+		if (!ja->axset) continue;
+		if (!ja->on) {
+			printf("*** jaaxis : material %d has no ja line (give the Jiles-Atherton parameters with ja first)\n", m);
+			return 1;
+		}
+		for (int d = 0; d < 3; d++) {
+			if (ja->axset & (1 << d)) continue;
+			ja->axp[d][0] = ja->ms; ja->axp[d][1] = ja->a; ja->axp[d][2] = ja->alpha;
+			ja->axp[d][3] = ja->k; ja->axp[d][4] = ja->c;
+		}
+		ja->aniso = 1;
+	}
 	// 分散材料の展開と異方性の埋め (周波数掃引では material_freq を呼び直す)
 	// 導電率の温度補正 σ(T) = σ0/(1 + α(T-T0))。
 	// σ の読み出し箇所は Material[].sigma (R / A / E) と CondSigma[] (Rs / F) の
@@ -1415,6 +1457,9 @@ int input_data(FILE *fp)
 			for (int i = 0; i < mt->nbh[d]; i++) mt->bh_b[d][i] *= fac;
 		}
 		if (mt->ja.on) mt->ja.ms *= fac;		// 飽和磁化も同じ割合で動く
+		if (mt->ja.aniso) {
+			for (int d = 0; d < 3; d++) mt->ja.axp[d][0] *= fac;
+		}
 	}
 	// εr / μr の係数はここでは掛けないが、符号が破綻していないかは見ておく
 	for (int m = 0; m < NMaterial; m++) {
@@ -2086,6 +2131,13 @@ int input_data(FILE *fp)
 		}
 	}
 	if (hysteresis) {
+		// 異方性の J-A はベクトル J-A だけが読む (スカラーの J-A は場の向きを持たない)
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.aniso && !JaVector) {
+				printf("%s\n", "*** jaaxis (anisotropic J-A) needs javector = 1 with analysis M");
+				return 1;
+			}
+		}
 		if (!(Analysis & ANALYSIS_M)) {
 			printf("%s\n", "*** the ja key needs analysis M (magnetostatic)");
 			return 1;

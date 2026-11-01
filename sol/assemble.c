@@ -472,6 +472,111 @@ void ja_eval(const ja_t *ja, double b0, double h0, double m0, double b,
 // 1 次元では (1−c)|f|/(k − α|f|) = (1−c) f/(δk − αf) (δ = sign f) なので ja_dmdh と同じ式になる。
 // B が駆動変数なので dH = (μ0 (I + χ))⁻¹ dB、dM = χ dH を Heun 法で積分する (ja_eval と同じ)。
 
+
+// ---- 異方性のベクトル J-A (jaaxis) ----
+//
+// 成分 i (全体の軸 ax[i]) が自分の (Ms_i, a_i, α_i, k_i, c_i) を持つ。等方性の式を軸ごとに書いたもので、
+//   He = H + α M (α は対角)、M_an,i = Ms_i L(|He| / a_i) e_i   (e = He / |He|)
+//   χ_an,ij = dM_an,i/dHe_j = M'_i e_i e_j + (M_an,i/|He|) (δ_ij − e_i e_j)
+//   f = M_an − M、不可逆 : |f| / (k_f − α_f |f|) f̂ f̂ᵀ、k_f = Σ k_i f̂_i²、α_f = Σ α_i f̂_i² (f の向きへの射影)
+//   χ = (I − C χ_an α)⁻¹ [ (I − C) 不可逆 + C χ_an ]   (C = diag c)
+// **場が 1 つの軸に沿えばその軸のパラメータのスカラーの J-A に厳密に退化し、全軸が同じなら等方性の式と
+// 一致する** (どちらも検証に使う)。等方性の材料は従来の関数をそのまま通るので答えは変わらない。
+static void ja_langevin_ma(double ms, double a, double he, double *man, double *dman)
+{
+	const double x = he / a;
+	if (fabs(x) < 1e-4) {
+		*man = ms * x / 3;
+		*dman = ms / (3 * a);
+	}
+	else {
+		const double sh = sinh(x);
+		*man = ms * ((cosh(x) / sh) - (1 / x));
+		*dman = (ms / a) * ((1 / (x * x)) - (1 / (sh * sh)));
+	}
+}
+
+
+static int inv3j(const double a[3][3], double r[3][3]);
+
+// n = 2 / 3 成分。成分 i のパラメータは ja->axp[ax[i]]
+static void ja_chi_an(const ja_t *ja, int n, const int ax[3], const double *h, const double *m, const double *db,
+	double chi[3][3])
+{
+	double ms[3], aa[3], al[3], kk[3], cc[3], he[3], e[3] = {1, 0, 0};
+	for (int i = 0; i < n; i++) {
+		const double *p = ja->axp[ax[i]];
+		ms[i] = p[0]; aa[i] = p[1]; al[i] = p[2]; kk[i] = p[3]; cc[i] = p[4];
+		he[i] = h[i] + (al[i] * m[i]);
+	}
+	double hn2 = 0;
+	for (int i = 0; i < n; i++) hn2 += he[i] * he[i];
+	const double hn = sqrt(hn2);
+	if (hn > 0) {
+		for (int i = 0; i < n; i++) e[i] = he[i] / hn;
+	}
+	double sec[3], dm[3], can[3][3], f[3];
+	for (int i = 0; i < n; i++) {
+		double man;
+		ja_langevin_ma(ms[i], aa[i], hn, &man, &dm[i]);
+		sec[i] = ((hn > (1e-4 * aa[i])) ? (man / hn) : dm[i]);
+		f[i] = (sec[i] * he[i]) - m[i];
+	}
+	for (int i = 0; i < n; i++) {
+		for (int j = 0; j < n; j++) can[i][j] = (dm[i] * e[i] * e[j]) + (sec[i] * (((i == j) ? 1 : 0) - (e[i] * e[j])));
+	}
+	double fn2 = 0, fd = 0;
+	for (int i = 0; i < n; i++) {
+		fn2 += f[i] * f[i];
+		fd += f[i] * db[i];
+	}
+	const double fn = sqrt(fn2);
+	double irr = 0, fh[3] = {0, 0, 0};
+	if ((fn > 0) && (fd > 0)) {
+		double kf = 0, af = 0, s1 = 0, cf = 0;
+		for (int i = 0; i < n; i++) {
+			fh[i] = f[i] / fn;
+			kf += kk[i] * fh[i] * fh[i];
+			af += al[i] * fh[i] * fh[i];
+			s1 += (1 - cc[i]) * fh[i] * fh[i];
+		}
+		const double den = kf - (af * fn);
+		if (fabs(den) > 0) irr = fn / den;
+		for (int i = 0; i < n; i++) {
+			for (int j = 0; j < n; j++) cf += fh[i] * cc[i] * can[i][j] * fh[j];
+		}
+		// 単調性 : f の向きの帯磁率を負にしない (等方性の式と同じ)
+		const double along = (irr * s1) + cf;
+		if ((along < 0) && (s1 > 0)) irr -= along / s1;
+	}
+	double x[3][3], a[3][3], ai[3][3];
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			x[i][j] = a[i][j] = ((i == j) ? 1 : 0);
+			chi[i][j] = 0;
+		}
+	}
+	for (int i = 0; i < n; i++) {
+		for (int j = 0; j < n; j++) {
+			x[i][j] = ((1 - cc[i]) * irr * fh[i] * fh[j]) + (cc[i] * can[i][j]);
+			a[i][j] = ((i == j) ? 1 : 0) - (cc[i] * can[i][j] * al[j]);
+		}
+	}
+	if (inv3j(a, ai)) {
+		for (int i = 0; i < n; i++) {
+			for (int j = 0; j < n; j++) chi[i][j] = x[i][j];
+		}
+		return;
+	}
+	for (int i = 0; i < n; i++) {
+		for (int j = 0; j < n; j++) {
+			double v = 0;
+			for (int l = 0; l < n; l++) v += ai[i][l] * x[l][j];
+			chi[i][j] = v;
+		}
+	}
+}
+
 static int inv2(const double a[2][2], double r[2][2])
 {
 	const double d = (a[0][0] * a[1][1]) - (a[0][1] * a[1][0]);
@@ -488,6 +593,17 @@ static int inv2(const double a[2][2], double r[2][2])
 static void ja_chi_vec(const ja_t *ja, const double h[2], const double m[2], const double db[2],
 	double chi[2][2])
 {
+	if (ja->aniso) {
+		// 面内の成分 (B_p, B_q) は伝送線路軸 t の次の 2 軸 (assemble_ja と同じ)
+		const int it = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
+		const int ax[3] = {(it + 1) % 3, (it + 2) % 3, it};
+		double c3[3][3];
+		ja_chi_an(ja, 2, ax, h, m, db, c3);
+		for (int i = 0; i < 2; i++) {
+			for (int j = 0; j < 2; j++) chi[i][j] = c3[i][j];
+		}
+		return;
+	}
 	const double he[2] = {h[0] + (ja->alpha * m[0]), h[1] + (ja->alpha * m[1])};
 	const double hn = sqrt((he[0] * he[0]) + (he[1] * he[1]));
 	double man, dman;
@@ -655,6 +771,11 @@ static int inv3j(const double a[3][3], double r[3][3])
 static void ja_chi_vec3(const ja_t *ja, const double h[3], const double m[3], const double db[3],
 	double chi[3][3])
 {
+	if (ja->aniso) {
+		const int ax[3] = {0, 1, 2};
+		ja_chi_an(ja, 3, ax, h, m, db, chi);
+		return;
+	}
 	double he[3];
 	for (int i = 0; i < 3; i++) he[i] = h[i] + (ja->alpha * m[i]);
 	const double hn = sqrt((he[0] * he[0]) + (he[1] * he[1]) + (he[2] * he[2]));
@@ -832,17 +953,39 @@ void ja_eval_vec3(const ja_t *ja, const double b0[3], const double h0[3], const 
 // ベクトル J-A (3 成分) の自己検証 : 向きを固定した B の経路 (u = (1, 2, 2)/3 に沿って往復) では
 // スカラーの ja_eval と同じ Heun の刻みになるので、H が丸めを除いて一致し、横成分は 0 になる。
 // 戻り値は max |H_vec − H_s u| / max |H_s| (式の誤りは刻みの次数の誤りまで含めて 1e-6 以上になる)
+static double ja_vec3_selftest_dir(const ja_t *ja, const ja_t *js, const double u[3]);
+
+// 3 成分のベクトル J-A を向きを固定した経路で動かし、スカラーの J-A と比べる。異方性 (jaaxis) なら
+// 各軸に沿った経路をその軸のパラメータのスカラーの J-A と比べる (成分ごとのパラメータの取り違えの検査)
 double ja_vec3_selftest(const ja_t *ja)
 {
+	if (!ja->aniso) {
+		const double u[3] = {1.0 / 3, 2.0 / 3, 2.0 / 3};
+		return ja_vec3_selftest_dir(ja, ja, u);
+	}
+	double emax = 0;
+	for (int d = 0; d < 3; d++) {
+		ja_t js = *ja;
+		js.aniso = 0;
+		js.ms = ja->axp[d][0]; js.a = ja->axp[d][1]; js.alpha = ja->axp[d][2]; js.k = ja->axp[d][3]; js.c = ja->axp[d][4];
+		const double u[3] = {((d == 0) ? 1.0 : 0.0), ((d == 1) ? 1.0 : 0.0), ((d == 2) ? 1.0 : 0.0)};
+		const double e = ja_vec3_selftest_dir(ja, &js, u);
+		if (!(e <= emax)) emax = e;
+	}
+	return emax;
+}
+
+
+static double ja_vec3_selftest_dir(const ja_t *ja, const ja_t *js, const double u[3])
+{
 	static const double bp[8] = {0.3, 0.9, 1.4, 0.6, -0.4, -1.3, -0.2, 0.8};
-	const double u[3] = {1.0 / 3, 2.0 / 3, 2.0 / 3};
 	const int safe = JaSafeSlope;
 	JaSafeSlope = 0;
 	double bs = 0, hs = 0, ms = 0, bv[3] = {0, 0, 0}, hv[3] = {0, 0, 0}, mv[3] = {0, 0, 0};
 	double emax = 0, hmax = 0;
 	for (int q = 0; q < 8; q++) {
 		double h, m, dhdb, bn[3], hn[3], mn[3], ns[6];
-		ja_eval(ja, bs, hs, ms, bp[q], &h, &m, &dhdb);
+		ja_eval(js, bs, hs, ms, bp[q], &h, &m, &dhdb);
 		for (int i = 0; i < 3; i++) bn[i] = bp[q] * u[i];
 		ja_eval_vec3(ja, bv, hv, mv, bn, u, hn, mn, ns);
 		for (int i = 0; i < 3; i++) {

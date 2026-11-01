@@ -5119,6 +5119,35 @@ for N in 24 48; do
 	eval "jv_e$N=\$1"
 	echo "  rotating field ($N points per turn) : |B_FEM - B_H-driven| / max|B| = $1 (max |B| = $2 T)"
 done
+#     異方性の J-A (jaaxis、成分ごとの Ms / a / α / k / c) : 全軸を ja と同じにすると等方性の掃引と表が一致し、
+#     q 軸 (y) だけ別のパラメータにした回転磁界が、同じ式を H 駆動の順方向で独立に積分した awk
+#     (ja_vector_fwd_aniso.awk) に刻みの 2 乗で近づく (実測 2.1e-2 -> 5.9e-3、比 3.6)。等方性の awk とは 0.47 ずれる
+#     (パラメータが効いている)。α の添字の取り違えは 48 点で 8.3e-3、k の射影・q 軸の χ_an・c の添字の誤りは
+#     24 点で 6e-2 以上になる (どれも実測)
+awk '/^ja =/{print; print "jaaxis = 2 x 1.6e6 1100 1.6e-3 400 0.2"; print "jaaxis = 2 y 1.6e6 1100 1.6e-3 400 0.2"; next} {print}' "$WORK/jv_rot24.ofe" > "$WORK/jva_eq.ofe"
+(cd "$WORK" && "$OFE" -n 2 jv_rot24.ofe > /dev/null 2>&1 && grep -E "^  probe" ofe.log > jva_iso.txt) || true
+(cd "$WORK" && "$OFE" -n 2 jva_eq.ofe > /dev/null 2>&1 && grep -E "^  probe" ofe.log > jva_eq.txt) || true
+if [ -s "$WORK/jva_iso.txt" ] && cmp -s "$WORK/jva_iso.txt" "$WORK/jva_eq.txt"; then
+	echo "  anisotropic J-A with every axis equal to ja == isotropic : the probe table is identical -> OK"
+else
+	echo "  anisotropic J-A with every axis equal to ja == isotropic : the probe tables differ -> NG" >&2; status=1
+fi
+for N in 24 48; do
+	awk '/^ja =/{print; print "jaaxis = 2 y 1.2e6 800 1.0e-3 250 0.3"; next} {print}' "$WORK/jv_rot$N.ofe" > "$WORK/jva_rot$N.ofe"
+	(cd "$WORK" && "$OFE" -n 2 "jva_rot$N.ofe" > /dev/null 2>&1) || { echo "  jva_rot$N : the run failed -> NG" >&2; status=1; }
+	set -- $(awk -v msp=1.6e6 -v aap=1100 -v alp=1.6e-3 -v kkp=400 -v ccp=0.2 -v msq=1.2e6 -v aaq=800 -v alq=1.0e-3 -v kkq=250 -v ccq=0.3 \
+		-f "$SRC/ja_vector_fwd_aniso.awk" "$WORK/ofe.log")
+	eval "jva_e$N=\$1"
+	[ "$N" = 48 ] && jva_iso=$(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -f "$SRC/ja_vector_fwd.awk" "$WORK/ofe.log" | awk '{ print $1 }')
+done
+res=$(awk -v a="$jva_e24" -v b="$jva_e48" -v c="$jva_iso" 'BEGIN { ok = (b <= 7e-3) && (a >= 3 * b) && (c > 0.1)
+	printf "%s (24 points %.2e, 48 points %.2e, ratio %.2f; isotropic awk %.2f)", ok ? "OK" : "NG", a, b, (b > 0) ? a / b : 0, c }')
+echo "  anisotropic J-A, rotating field : FEM -> independent H-driven anisotropic vector J-A (awk) : $res"
+case "$res" in NG*) status=1 ;; esac
+awk '/^javector/{next} /^ja =/{print; print "jaaxis = 2 y 1.2e6 800 1.0e-3 250 0.3"; next} {print}' "$SRC/ja_rotating.ofe" > "$WORK/jvax_s.ofe"
+th_reject "jaaxis with the scalar J-A" jvax_s.ofe "needs javector = 1"
+awk '/^ja =/{print "jaaxis = 2 y 1.2e6 800 1.0e-3 250 0.3"; next} {print}' "$SRC/ja_rotating.ofe" > "$WORK/jvax_n.ofe"
+th_reject "jaaxis without a ja line" jvax_n.ofe "has no ja line"
 #     sample の 24 点は jv_rot 24 と同じ掃引 (書き換えで同じ入力になること)
 awk '/^currentsweep/' "$SRC/ja_rotating.ofe" > "$WORK/jv_a.txt"
 awk '/^currentsweep/' "$WORK/jv_rot24.ofe" > "$WORK/jv_b.txt"
@@ -5448,6 +5477,44 @@ if [ "${nfp:-0}" -ge 64 ] && [ "${nfp:-0}" -le 1100 ]; then
 else
 	echo "  quasi-static sine : fixed-point iterations = ${nfp:-none} (expected 64..1100) -> NG"; status=1
 fi
+#   (g) 異方性の J-A (jaaxis) を粗い棒 (bar_tet_c.msh = mkmesh.py bar -nx 8 -ny 1 -nz 8) で:
+#       全軸を ja と同じにすると I(t) が等方性と一致、B の向き (y) の軸だけを別のパラメータにすると損が
+#       その軸のパラメータの awk に 1% (粗い格子の誤差。等方性でも −0.54%)、座標を巡回させた格子と
+#       軸のパラメータを同じく巡回させた入力で I(t) と反復回数が一致 (成分と軸の対応の検査)
+cp "$SRC/bar_tet_c.msh" "$WORK/"
+awk '/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 } f && NF == 4 { printf "%s %.17g %.17g %.17g\n", $1, $4, $2, $3; next } { print }' \
+	"$WORK/bar_tet_c.msh" > "$WORK/bar_tet_c_perm.msh"
+jax() {	# jax <名前> <格子> <x の行> <y の行> <z の行> : aja_qs を粗い格子と jaaxis で解いて csv を残す
+	awk -v m="$2" -v px="$3" -v py="$4" -v pz="$5" '/^mesh/{print "mesh = " m; next}
+		/^ja =/{print; if (px != "") print "jaaxis = 2 x " px; if (py != "") print "jaaxis = 2 y " py; if (pz != "") print "jaaxis = 2 z " pz; next} {print}' \
+		"$WORK/aja_qs.ofe" > "$WORK/jax_$1.ofe"
+	(cd "$WORK" && "$OFE" -n 2 "jax_$1.ofe" > /dev/null 2>&1 && cp ofe_transient.csv "jax_$1.csv" && cp ofe.log "jax_$1.log") || { echo "  jax_$1 : the run failed -> NG" >&2; status=1; }
+}
+jaP="1.6e6 1100 1.6e-3 400 0.2"; jaQ="1.2e6 800 1.0e-3 250 0.3"; jaP1="2.0e6 1300 2.0e-3 500 0.15"; jaP2="1.0e6 900 1.2e-3 300 0.25"
+jax iso bar_tet_c.msh "" "" ""
+jax eq bar_tet_c.msh "$jaP" "$jaP" "$jaP"
+jax ay bar_tet_c.msh "" "$jaQ" ""
+jax a3 bar_tet_c.msh "$jaP1" "$jaQ" "$jaP2"
+jax a3p bar_tet_c_perm.msh "$jaP2" "$jaP1" "$jaQ"
+jax_same() {	# jax_same <ラベル> <a> <b> : I(t) と反復回数が一致
+	res=$(paste -d, "$WORK/jax_$2.csv" "$WORK/jax_$3.csv" | awk -F, -v na="$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/jax_$2.log")" \
+		-v nb="$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/jax_$3.log")" '
+		NR > 1 { d = ($3 - $10) / 0.5; if (d < 0) d = -d; if (d > m) m = d; n++ }
+		END { ok = "NG"; if ((n == 64) && (m < 1e-9) && (na + 0 > 0) && (na == nb)) ok = "OK"
+		      printf "%s (max %.1e of the peak, iterations %d / %d)", ok, m + 0, na, nb }')
+	echo "  anisotropic J-A : $1 : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+jax_same "every axis equal to ja == isotropic" iso eq
+jax_same "cyclically permuted mesh and axis parameters == original" a3 a3p
+wfem=$(awk -F, 'NR == 33 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/jax_ay.csv")
+set -- $jaQ
+wq=$(awk -v ms="$1" -v aa="$2" -v al="$3" -v kk="$4" -v cc="$5" -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=32 -f "$SRC/ja_bar_loop.awk")
+compare "anisotropic J-A, B along y with the y-axis parameters : loss == scalar J-A of those parameters (awk) [J]" "$wfem" "$wq" 1e-2
+wiso=$(awk -F, 'NR == 33 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/jax_iso.csv")
+res=$(awk -v a="$wfem" -v b="$wiso" 'BEGIN { d = (a - b) / b; if (d < 0) d = -d; printf "%s (%.0f%%)", (d > 0.1) ? "OK" : "NG", 100 * d }')
+echo "  anisotropic J-A : the y-axis parameters change the loss from the isotropic one : $res"
+case "$res" in NG*) status=1 ;; esac
 # (c) 段差を保つ (σ = 1e5、J-A の μr ~ 1000 で τ ~ 1.3e-5 s。20 刻み x 1e-4 s で DC)
 grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^material/{print "material = 1.0 1e5"; next} /^voltage/{print "voltage = 0.04"; next}
 	/^analysis/{print "transient = 2e-3 20"; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"; print "nlsolver = 200 1e-9 1"} {print}' > "$WORK/aja_dc.ofe"
