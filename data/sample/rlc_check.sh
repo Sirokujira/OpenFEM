@@ -1437,7 +1437,7 @@ else
 				fi
 			done
 		done
-		# 行列の分散 (mpisolve = 2、構造格子の C / L / R)。各 rank は行ブロック (x 方向に切った板) の行だけを
+		# 行列の分散 (mpisolve = 2、C / L / R と 1 次の A)。各 rank は行ブロック (構造格子は x 方向に切った板) の行だけを
 		# 組み立てて持ち、対角・反作用は持ち主から集める。行ごとの和の順は直列と同じなので出力はバイト一致。
 		# 「分散したこと」は rank 0 が持つ行の数 (= n / np) で見る (分散し忘れても答えは同じになるので)
 		cp "$SRC/resistor_bar.ofe" "$SRC/coupled_microstrip.ofe" "$WORK/"
@@ -1464,11 +1464,32 @@ else
 				fi
 			done
 		done
-		awk '/^analysis/{print "mpisolve = 2"} {print}' "$WORK/bar_eddy.ofe" > "$WORK/mdx_a.ofe"
+		# 非構造格子 (四面体・3 次の曲がった同軸・六面体 + ピラミッド + 四面体の混在) の C、四面体の R、1 次の A-φ
+		# (四面体・空気層・六面体。実部 Kr と虚部 Ki を同じ分け方で詰める)。A は節点の行列と A-φ の行列の 2 つが分散する
+		cp "$SRC/box_tet.ofe" "$SRC/box_tet.msh" "$SRC/coax_p3.ofe" "$SRC/coax_p3.msh" "$SRC/box_hexpyrtet.ofe" "$SRC/box_hexpyrtet.msh" \
+		   "$SRC/bar_air.ofe" "$SRC/bar_air.msh" "$SRC/bar_hex.ofe" "$SRC/bar_hex.msh" "$WORK/"
+		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^frequency/{next} /^awall/{next} /^analysis/{print "analysis = R"; next} {print}' > "$WORK/bar_r.ofe"
+		for c in box_tet coax_p3 box_hexpyrtet bar_r bar_eddy bar_air bar_hex; do
+			awk '/^analysis/{print "mpisolve = 2"} {print}' "$WORK/$c.ofe" > "$WORK/mu_$c.ofe"
+			rm -f "$WORK/ofe.out"
+			(cd "$WORK" && "$OFE" -n 2 "mu_$c.ofe" > /dev/null 2>&1) || { echo "  mpisolve = 2 $c : the serial run failed -> NG" >&2; status=1; }
+			cp "$WORK/ofe.out" "$WORK/mu_ref.out" 2> /dev/null || true
+			nd=1; case "$c" in bar_eddy|bar_air|bar_hex) nd=2 ;; esac
+			rm -f "$WORK/ofe.out"
+			(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 "mu_$c.ofe" > /dev/null 2>&1) || true
+			k=$(grep -c "the matrix is distributed by rows" "$WORK/ofe.log" || true)
+			if cmp -s "$WORK/mu_ref.out" "$WORK/ofe.out" && [ "$k" = "$nd" ]; then
+				echo "  mpisolve = 2, np = 2 : $c (unstructured) gives a byte-identical ofe.out, $k distributed matrices : OK"
+			else
+				echo "  mpisolve = 2, np = 2 : $c (unstructured) differs from the serial run (or $k of $nd matrices distributed) -> NG" >&2
+				status=1
+			fi
+		done
+		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "mpisolve = 2"; print "transient = 2e-4 5"} {print}' > "$WORK/mdx_a.ofe"
 		(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 mdx_a.ofe > /dev/null 2>&1) \
-			&& { echo "  mpisolve = 2 with analysis A : accepted -> NG" >&2; status=1; } \
-			|| echo "  mpisolve = 2 with analysis A : rejected -> OK"
-		grep -q "mpisolve = 2 (the matrix distributed over the ranks) supports the structured grid" "$WORK/ofe.log" \
+			&& { echo "  mpisolve = 2 with the A transient : accepted -> NG" >&2; status=1; } \
+			|| echo "  mpisolve = 2 with the A transient : rejected -> OK"
+		grep -q "mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R and" "$WORK/ofe.log" \
 			|| { echo "  *** it was rejected for a different reason" >&2; status=1; }
 		;;
 	esac
