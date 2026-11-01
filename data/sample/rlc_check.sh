@@ -4045,6 +4045,26 @@ awk '/^thermal/{print; print "heatcap = 2 3.4e6"; print "transient = 0.5 20 0.5"
 	"$WORK/rxt.ofe" > "$WORK/rxt_tr.ofe"
 th_run rxt_tr.ofe
 th_balance "radiation exchange, tetrahedra, transient (CN)"
+#     2 値の判定 (向き合うか・遮られるか) が丸めで割れないこと : 節点の座標を 1 ulp 程度
+#     揺らした格子でも同じ答え (同一平面の対の n・d = ±1e-20 や、共有辺を通る線分。
+#     どちらも CI の Linux / macOS でだけ落ちたことがある)
+rx_pert() {	# rx_pert <格子> : 座標に相対 2e-16 の乱数を掛けた <格子>_p.msh
+	awk 'BEGIN { srand(11) } /^\$Nodes/ { n = 1; print; getline; print; next } /^\$EndNodes/ { n = 0 }
+		n { printf "%d %.17g %.17g %.17g\n", $1, $2 * (1 + (rand() - 0.5) * 4e-16), $3 * (1 + (rand() - 0.5) * 4e-16), $4 * (1 + (rand() - 0.5) * 4e-16); next }
+		{ print }' "$WORK/$1.msh" > "$WORK/$1_p.msh"
+}
+rx_pert thermal_cavity_tet
+awk '/^mesh/{print "mesh = thermal_cavity_tet_p.msh"; next} {print}' "$WORK/rxt.ofe" > "$WORK/rxtp.ofe"
+th_run rxtp.ofe
+compare "tetrahedra, perturbed by 1 ulp : cavity floor -> opening (Hottel) [-]" "$(rx_row 2)" "$fpar" 1e-10
+compare "tetrahedra, perturbed by 1 ulp : sum A F_inf / sum A == 0.2 [-]" "$(rx_sum)" 0.2 1e-10
+rx_pert thermal_cavity2_hex
+rx_x20 thrx2s.ofe rxg.ofe
+th_run rxg.ofe; f0=$(rx_sum)
+rx_unst thermal_cavity2_hex_p rxg.ofe rxhp.ofe
+th_run rxhp.ofe
+compare "two cavities, hexahedra perturbed by 1 ulp == structured grid : sum A F_inf / sum A [-]" \
+	"$(awk -v s="$(rx_sum)" 'BEGIN { printf "%.15e", 1 + s }')" "$(awk -v s="$f0" 'BEGIN { printf "%.15e", 1 + s }')" 1e-12
 # (6) 弾くべき入力
 awk '/^radiationexchange/{print; print "radiationtemptable = 0 1 500 1.2"; next} {print}' "$SRC/thermal_cavity.ofe" > "$WORK/thrxx_tab.ofe"
 th_reject "radiationexchange with radiationtemptable" thrxx_tab.ofe "cannot be combined with radiationtemptable"
