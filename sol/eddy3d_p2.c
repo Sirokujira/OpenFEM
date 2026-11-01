@@ -168,11 +168,34 @@ static void p2_dofs(int e, const int32_t *fe, int ne, int nf, int nn, int32_t do
 }
 
 
-// 積分点での 20 個の A の基底 (値と回転、局所の向き) と 10 個の φ の基底 (値と勾配)
+// 10 節点の形状関数の値 nv と物理空間の勾配 g から、20 個の A の基底 (値と回転、局所の向き) と
+// 10 個の φ の基底 (値と勾配) を作る
+static void p2_basis_core(int e, const double nv[ELEM_NMAX], const double g[ELEM_NMAX][3],
+	double wv[20][3], double wc[20][3], double pn[10], double pg[10][3]);
+
+// 積分点 q で
 static int p2_basis(int e, int q, double wv[20][3], double wc[20][3], double pn[10], double pg[10][3], double *wq)
 {
 	double nv[ELEM_NMAX], g[ELEM_NMAX][3];
 	if (elem3d_ip(e, q, nv, g, wq)) return 1;
+	p2_basis_core(e, nv, g, wv, wc, pn, pg);
+	return 0;
+}
+
+
+// 任意の参照点 (重心座標) で (場の出力)
+static int p2_basis_at(int e, const double lam[4], double wv[20][3], double wc[20][3], double pn[10], double pg[10][3])
+{
+	double nv[ELEM_NMAX], g[ELEM_NMAX][3], det;
+	if (tet_ho_point(e, lam, nv, g, &det)) return 1;
+	p2_basis_core(e, nv, g, wv, wc, pn, pg);
+	return 0;
+}
+
+
+static void p2_basis_core(int e, const double nv[ELEM_NMAX], const double g[ELEM_NMAX][3],
+	double wv[20][3], double wc[20][3], double pn[10], double pg[10][3])
+{
 	// 引き戻した重心座標とその物理空間の勾配 (λ_i = Σ_a λ_i(ξ_a) N_a)
 	double lam[4] = {0, 0, 0, 0}, gl[4][3];
 	for (int i = 0; i < 4; i++) {
@@ -232,7 +255,6 @@ static int p2_basis(int e, int q, double wv[20][3], double wc[20][3], double pn[
 		pn[4 + k] = lam[a] * lam[b];
 		for (int c = 0; c < 3; c++) pg[4 + k][c] = (lam[a] * gl[b][c]) + (lam[b] * gl[a][c]);
 	}
-	return 0;
 }
 
 
@@ -535,6 +557,51 @@ static int p2_solve_port(FILE *fp_log, int jc, FILE *fp_iter, const char *label,
 }
 
 
+// 場の出力 (ポート 1 の励振) : 要素の重心での B = ∇×A (実部) と J = −σ (jωA + ∇φ) (実部・虚部)。
+// どちらもゲージ不変なのでゲージを固定しない解から作ってよい (1 次と同じ名前・同じ符号)
+static void p2_fields(void)
+{
+	const int ne = P2.ne, nf = P2.nf, nn = P2.nn, nt = NTet;
+	const double omega = P2.omega;
+	const double lc[4] = {0.25, 0.25, 0.25, 0.25};
+	double *bv = (double *)calloc((size_t)nt * 3, sizeof(double));
+	double *jr = (double *)calloc((size_t)nt * 3, sizeof(double));
+	double *ji = (double *)calloc((size_t)nt * 3, sizeof(double));
+	for (int e = 0; e < nt; e++) {
+		int32_t dof[P2_NDOF];
+		double sgn[P2_NDOF];
+		p2_dofs(e, P2.fe, ne, nf, nn, dof, sgn);
+		double wv[20][3], wc[20][3], pn[10], pg[10][3];
+		if (p2_basis_at(e, lc, wv, wc, pn, pg)) continue;
+		double br[3] = {0, 0, 0}, er[3] = {0, 0, 0}, ei[3] = {0, 0, 0};
+		for (int k = 0; k < 20; k++) {
+			const double ar = sgn[k] * P2.ur[dof[k]], ai = sgn[k] * P2.ui[dof[k]];
+			for (int c = 0; c < 3; c++) {
+				br[c] += ar * wc[k][c];
+				er[c] += -omega * ai * wv[k][c];
+				ei[c] += omega * ar * wv[k][c];
+			}
+		}
+		for (int a = 0; a < 10; a++) {
+			for (int c = 0; c < 3; c++) {
+				er[c] += P2.ur[dof[20 + a]] * pg[a][c];
+				ei[c] += P2.ui[dof[20 + a]] * pg[a][c];
+			}
+		}
+		const double sg = Material[elem3d_mat(e)].sigma;
+		for (int c = 0; c < 3; c++) {
+			bv[(e * 3) + c] = br[c];
+			jr[(e * 3) + c] = -sg * er[c];
+			ji[(e * 3) + c] = -sg * ei[c];
+		}
+	}
+	field_add_cellvec("B_A_re", bv);
+	field_add_cellvec("J_A_re", jr);
+	field_add_cellvec("J_A_im", ji);
+	free(bv); free(jr); free(ji);
+}
+
+
 int solve_eddy3d_p2(FILE *fp_log)
 {
 	const int np = NPort;
@@ -559,6 +626,7 @@ int solve_eddy3d_p2(FILE *fp_log)
 			yi[((kc - 1) * np) + (jc - 1)] = qi[kc] / Volt;
 		}
 		fprintf(fp_log, "  port %d : I = %.6e %+.6e j [A] (V = %.6e [V])\n", jc, qr[jc], qi[jc], Volt);
+		if (FieldOut && (jc == 1)) p2_fields();
 	}
 
 	if (!ierr) {

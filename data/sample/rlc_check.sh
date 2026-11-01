@@ -5210,8 +5210,17 @@ th_reject "10-node mesh with folded elements" p2x_fold.ofe "is degenerate or inv
 grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2.msh"; next} {print}' > "$WORK/p2base.ofe"
 awk '/^analysis/{print "gauge = 1"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_g.ofe"
 th_reject "order-2 A with gauge = 1" p2x_g.ofe "second-order (10-node) mesh supports gauge = 0"
-awk '/^analysis/{print "fieldout = 1"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_f.ofe"
-th_reject "order-2 A with fieldout = 1" p2x_f.ofe "supports no field output"
+# (f) 場の出力 (重心の B・J、ゲージ不変)。100 Hz では J が一様なので 1 次と同じ恒等式が使える :
+#     体積・|J| = σV/L・符号つきの平均・場の損失 Σ|J|²V/(2σ) = ½Re(V I)
+sed -e "s/^frequency = .*/frequency = 1e2/" -e "s/^analysis = A/fieldout = 1\nanalysis = A/" "$WORK/p2base.ofe" > "$WORK/p2_fld.ofe"
+(cd "$WORK" && "$OFE" -n 2 p2_fld.ofe > /dev/null 2>&1) || { echo "  p2_fld : the run failed -> NG" >&2; status=1; }
+compare "order 2, field output : volume of the 10-node cells [m^3]" "$(vtk vol J_A_re)" 5.0e-10 1e-9
+compare "order 2, field output : |J| max (sigma V / L) [A/m^2]" "$(vtk vmax J_A_re)" 2.9e10 1e-4
+compare "order 2, field output : |J| min [A/m^2]" "$(vtk vmin J_A_re)" 2.9e10 1e-4
+compare "order 2, field output : mean J_x (signed) [A/m^2]" "$(vtk mean0 J_A_re)" -2.9e10 1e-4
+pf=$(awk -v r="$(vtk int2 J_A_re)" -v m="$(vtk int2 J_A_im)" 'BEGIN{ printf "%.10e", (r + m) / (2 * 5.8e7) }')
+pt=$(awk '/port 1 : I =/{ printf "%.10e", 0.5 * $6 }' "$WORK/ofe.log")
+compare "order 2, field output : ohmic loss from the field == 1/2 Re(V I) [W]" "$pf" "$pt" 1e-6
 awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_t.ofe"
 th_reject "order-2 A with transient" p2x_t.ofe "supports the frequency domain"
 awk '/^analysis/{print "analysis = E"; next} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_e.ofe"

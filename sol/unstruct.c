@@ -3515,6 +3515,24 @@ int elem3d_face_ip(int e, const int32_t *cn, int k, int q, double nv[ELEM_NMAX],
 }
 
 
+// 高次の四面体の任意の参照点 (重心座標 lam) での形状関数の値と物理空間の勾配、det J
+// (elem3d_ip の高次の四面体の分岐を積分点でない点で使う。2 次の A の場の出力が重心で使う)
+int tet_ho_point(int e, const double lam[4], double nv[ELEM_NMAX], double g[ELEM_NMAX][3], double *det)
+{
+	if (TetOrder < 2) return 1;
+	int32_t nd[TET_NMAX];
+	const int nen = tet_nodes(e, nd);
+	double gn[TET_NMAX][3];
+	if (tet20_grad(nd, lam, gn, det)) return 1;
+	for (int a = 0; a < nen; a++) {
+		double dl[4];
+		nv[a] = lagr_tet(TetOrder, tet_ho_a(a), lam, dl);
+		for (int c = 0; c < 3; c++) g[a][c] = gn[a][c];
+	}
+	return 0;
+}
+
+
 int elem3d_nip(int e)
 {
 	const int kind = elem3d_kind(e);
