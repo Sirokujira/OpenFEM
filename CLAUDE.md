@@ -186,10 +186,11 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
   断面 2 次元の 3 次三角形 (tri10) も同じ規約の実測の表 (`TRI3_A`) で、3 次特有の基底は
   表皮効果の解 (`plate2d_p3` の 10 MHz) と同じ頂点の 2 次格子との誤差比でしか検査できない
   (DC の Az は 2 次なので P2 の部分空間で厳密)。
-- **3 次の六面体 (hexa64) / 角柱 (prism40) の局所節点の並びは gmsh 4.15.2 の出力を分類した実測の表**
-  (`HEX3_I` / `PRISM3_A`)。形状関数は次数によらない Lagrange の式 (`lagp` / `lagp_tri`)、積分は各方向
+- **3 次 / 4 次の六面体 (hexa64 / hexa125) / 角柱 (prism40 / prism75) の局所節点の並びは gmsh 4.15.2 の
+  出力を分類した実測の表** (`HEX3_I` / `PRISM3_A` / `HEX4_I` / `PRISM4_A`、次数は節点数から `hexp_order` /
+  `prismp_order`)。積分は各方向 p + 1 点 (`ho_gauss`)。4 次は幾何の誤差が h⁶ なので 3 次に勝つことを assert する。形状関数は次数によらない Lagrange の式 (`lagp` / `lagp_tri`)、積分は各方向
   4 点。**3 次特有の基底を検査できるのは P の 3 次の場の恒等式と曲がった形の収束だけ** (平行平板は
-  節点の表を入れ替えても全桁一致で通る)。`ELEM_NMAX` は 64、`Hex2` / `Prism2` / `Quad2` の欄は
+  節点の表を入れ替えても全桁一致で通る)。`ELEM_NMAX` は 125、`Hex2` / `Prism2` / `Quad2` の欄は
   `HEX2_W` / `PRISM2_W` / `QUAD2_W`。**配列の宣言を大きくしたら `memset(ke, 0, 27 * 27)` のような
   「元の大きさ」の初期化を必ず直す** (2 次元配列の行の幅が変わるので、要素の行列が 11 行目以降だけ
   初期化されずに残る)。格子の 1 行は `BUFSIZ` に頼らない (MSVC 512 で 64 節点の要素の行が入らない)。

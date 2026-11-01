@@ -4000,6 +4000,71 @@ sed -e "s/box_hex2.msh/box_hex3.msh/" -e "s/^analysis.*/analysis = E/" "$SRC/box
 mesh_reject "analysis E on a hexa64 mesh" h3x_e.ofe
 (cd "$WORK" && "$OFE" -n 2 h3x_e.ofe 2>&1 | grep -q "need a first-order mesh") || { echo "  *** rejected for a different reason" >&2; status=1; }
 
+# ---- 4 次の六面体 (125 節点、gmsh の hexa125) と角柱 (75 節点、prism75) ----
+#
+# 3 次と同じ形 (表 HEX4_I / PRISM4_A、各方向 5 点、角柱は面内 Duffy 25 点 x ζ 5 点)。4 次は曲がった
+# 境界の幾何の誤差が h⁶ なので、**同じ h の 3 次に勝つことを assert してよい** (四面体の 4 次と同じ)
+#   (a) 平行平板の C が全桁、4 形式で完全一致、4 次の場 (x⁴, x²y², yz³, xyz² を足す) の恒等式
+#   (b) 曲がった同軸 : 1/4 周 2 -> 4 分割で 六面体 64 倍・角柱 75 倍 (h⁶、実測)、同じ格子の 3 次の
+#       13.7 / 10.2 倍よい
+#   (c) 熱連成 : 片面を冷やす板が機械精度、曲がった面を冷やす円環が同じ格子の 3 次の 10 倍よい
+echo "[order-4 hex/prism] 125-node hexahedra / 75-node prisms (gmsh hexa125 / prism75)"
+for m in box_hex4 box_prism4; do
+	for f in "" _41 _bin_22 _bin_41; do cp "$SRC/$m$f.msh" "$WORK/"; done
+done
+for m in coax_hex4a coax_hex4b coax_prism4a coax_prism4b slab_hex4 slab_prism4 ann_hex4a ann_prism4a; do cp "$SRC/$m.msh" "$WORK/"; done
+for m in box_hex4 box_prism4; do
+	h3_c "$m" C
+	compare "$m : C (parallel plate) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/h3_22.csv"
+	for f in _41 _bin_22 _bin_41; do
+		h3_c "$m$f" C
+		grep -v '^title' "$WORK/rlc.csv" > "$WORK/h3_f.csv"
+		if [ -s "$WORK/h3_22.csv" ] && cmp -s "$WORK/h3_22.csv" "$WORK/h3_f.csv"; then echo "  $m : 2.2 vs ${f#_} : rlc.csv identical -> OK"
+		else echo "  $m : 2.2 vs ${f#_} : differ -> NG" >&2; status=1; fi
+	done
+	h3_c "$m" P
+	if grep -q '^\*\*\*' "$WORK/ofe.log" || ! grep -q "quartic field : phi" "$WORK/ofe.log"; then
+		echo "  $m (analysis P) : the quartic-field identity failed or did not run -> NG" >&2; status=1
+	else
+		echo "  $m (analysis P) : linear and quartic field identities ($(awk '/quartic field : phi/ { print $NF }' "$WORK/ofe.log")) -> OK"
+	fi
+done
+for k in hex prism; do
+	for r in 3a 4a 4b; do
+		sed -e "s/coax_hex2.msh/coax_${k}$r.msh/" "$SRC/coax_hex2.ofe" | awk '/^analysis/{print "analysis = C"; next} {print}' > "$WORK/h3cx.ofe"
+		(cd "$WORK" && "$OFE" -n 2 h3cx.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  coax_${k}$r : the run failed -> NG" >&2; status=1; }
+		eval "c_$r=\$(value_of C)"
+	done
+	compare "curved coax ($k, order 4, finer) : C' [F/m]" "$c_4b" "$cex" 1e-5
+	res=$(awk -v a="$c_4a" -v b="$c_4b" -v t="$c_3a" -v e="$cex" 'BEGIN {
+		ea = (a - e) / e; if (ea < 0) ea = -ea; eb = (b - e) / e; if (eb < 0) eb = -eb; et = (t - e) / e; if (et < 0) et = -et
+		ok = (ea > 40 * eb) && (et > 5 * ea)
+		printf "%s (order 4 : %.2e -> %.2e, ratio %.1f; order 3 on the coarse mesh %.2e)", ok ? "OK" : "NG", ea, eb, (eb > 0) ? ea / eb : 0, et }')
+	echo "  curved coax ($k) : order 4 converges at h^6 and beats order 3 on the same mesh : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+for m in slab_hex4:8 slab_prism4:16; do
+	g=${m%%:*}; nf=${m#*:}
+	printf 'OpenFEM 1 0\ntitle = order-4 slab cooled on one face\nmesh = %s.msh\nmaterial = 1.0 1e6\ntempco = 2 0 0\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\nconvection = 5000 20 0 2e-3 0 1e-3 0 0\ntemperature = 20\nthermal = 10\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' "$g" > "$WORK/h3th.ofe"
+	th_run h3th.ofe
+	compare "$g : bottom face cooled : T_max (parabola) [degC]" "$(th_t)" 125 1e-9
+	compare "$g : bottom face cooled : T_mean [degC]" "$(t3_tm)" 123.333333333 1e-9
+	th_nface "$g : convection on the bottom face only" "$nf"
+	th_energy "$g"
+done
+for m in ann_hex4a ann_prism4a; do
+	printf 'OpenFEM 1 0\ntitle = order-4 annulus cooled on its curved faces\nmesh = %s.msh\nmaterial = 1.0 1e6\ntempco = 2 0 0\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\nconvection = 2000 20\ntemperature = 20\nthermal = 10\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' "$m" > "$WORK/h3an.ofe"
+	th_run h3an.ofe
+	th_energy "$m"
+	eval "e_$m=\$(awk -v t=\"\$(t3_tm)\" -v x=\"\$h3ta\" 'BEGIN { d = (t - 20 - x) / x; if (d < 0) d = -d; printf \"%.6e\", d }')"
+done
+res=$(awk -v h3="$e_ann_hex3a" -v h4="$e_ann_hex4a" -v p3="$e_ann_prism3a" -v p4="$e_ann_prism4a" 'BEGIN {
+	ok = (h4 <= 2e-4) && (p4 <= 2e-4) && (h3 > 5 * h4) && (p3 > 5 * p4)
+	printf "%s (hexa125 %.2e vs hexa64 %.2e, prism75 %.2e vs prism40 %.2e)", ok ? "OK" : "NG", h4, h3, p4, p3 }')
+echo "  annulus (coarse) : order 4 beats order 3 on the curved faces (geometry h^6 vs h^4) : $res"
+case "$res" in NG*) status=1 ;; esac
+
 # ---- 交流の発熱 (thermal + analysis = A) ----
 #
 # 3 次元渦電流 (A-φ) の時間平均の損失 Q_e = ½ eᴴ T_e e (e = jωa + Gφ) で温度を解く。
