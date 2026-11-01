@@ -1209,14 +1209,20 @@ static int rx_hit_tri(const double a[3], const double b[3], const double *v0, co
 	const double det = (e1[0] * pv[0]) + (e1[1] * pv[1]) + (e1[2] * pv[2]);
 	if (fabs(det) <= 0) return 0;					// 面と平行
 	const double tv[3] = {a[0] - v0[0], a[1] - v0[1], a[2] - v0[2]};
+	// **辺の上は「当たり」にする** (許容 1e-9)。隣り合う三角形の共有辺をちょうど通る
+	// 線分は、丸めで両方の三角形を外れることがある (水密でない) ので、境界を厳密に
+	// 判定すると壁越しの対が OS によって見えたり見えなかったりする (実測 : CI の
+	// Linux / macOS でだけ 2 つの空洞の F∞ が 6e-4 ずれた)。端点は面から浮かせてあるので、
+	// 線分の両端の近く (自分の面とその隣) は t の許容で除く
+	const double tol = 1e-9;
 	const double u = ((tv[0] * pv[0]) + (tv[1] * pv[1]) + (tv[2] * pv[2])) / det;
-	if ((u < 0) || (u > 1)) return 0;
+	if ((u < -tol) || (u > 1 + tol)) return 0;
 	const double qv[3] = {(tv[1] * e1[2]) - (tv[2] * e1[1]), (tv[2] * e1[0]) - (tv[0] * e1[2]),
 	                      (tv[0] * e1[1]) - (tv[1] * e1[0])};
 	const double v = ((d[0] * qv[0]) + (d[1] * qv[1]) + (d[2] * qv[2])) / det;
-	if ((v < 0) || ((u + v) > 1)) return 0;
+	if ((v < -tol) || ((u + v) > 1 + tol)) return 0;
 	const double t = ((e2[0] * qv[0]) + (e2[1] * qv[1]) + (e2[2] * qv[2])) / det;
-	return ((t > 0) && (t < 1));
+	return ((t > 1e-6) && (t < 1 - 1e-6));
 }
 
 
@@ -1326,13 +1332,19 @@ static int rx_build_tet(FILE *fp_log)
 	int nvis = 0;
 	for (int i = 0; i < n; i++) {
 		for (int j = i + 1; j < n; j++) {
-			double fi = 0, fj = 0;
+			double fi = 0, fj = 0, dd = 0;
 			for (int a = 0; a < 3; a++) {
 				const double dc = RX.ctr[(j * 3) + a] - RX.ctr[(i * 3) + a];
 				fi += RX.nrm[(i * 3) + a] * dc;
 				fj -= RX.nrm[(j * 3) + a] * dc;
+				dd += dc * dc;
 			}
-			if ((fi <= 0) || (fj <= 0)) continue;		// 向き合っていない (同一平面を含む)
+			// 向き合っていない (同一平面を含む)。**判定は相対の許容で** : 同一平面の三角形は
+			// 厳密には fi = 0 だが、座標の丸めで ±1e-20 になり、その対の (厳密には 0 の)
+			// 形態係数の数値積分の誤差 (相対 1e-9) が F に入る (実測 : 座標を 1 ulp 揺らすと
+			// 見える対が 19300 -> 19658 に増えて F∞ が 3e-9 ずれ、CI の OS で結果が割れた)
+			const double ftol = 1e-9 * sqrt(dd);
+			if ((fi <= ftol) || (fj <= ftol)) continue;
 			if (rx_blocked_tet(i, j)) continue;
 			const double aif = rx_aif_poly(i, j);
 			if (aif <= 0) continue;
