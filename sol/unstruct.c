@@ -136,11 +136,11 @@ static int elem_store(int type, int tag, const int32_t *nd)
 	                 : ((type == 71) || (type == 42)) ? 6
 	                 : ((type == 72) || (type == 43)) ? 7 : 1);
 
-	if ((type == 5) || (type == 12) || (type == 17) || (type == 92) || (type == 93)) {
+	if ((type == 5) || (type == 12) || (type == 17) || (type == 92) || (type == 93) || (type == 94)) {
 		// 六面体 (8 / 27 / 20 節点)。局所の並びは Gmsh のまま使う。
 		// 頂点 8 個を Hex に、2 次の残り (辺 12 + 面 6 + 体心 1) を Hex2 に
 		// 入れる。次数は最初の 1 個で決め、以後は混在を許さない
-		const int hn = ((type == 5) ? 8 : (type == 12) ? 27 : (type == 92) ? 64 : (type == 93) ? 125 : 20);
+		const int hn = ((type == 5) ? 8 : (type == 12) ? 27 : (type == 92) ? 64 : (type == 93) ? 125 : (type == 94) ? 216 : 20);
 		if (HexNen == 0) HexNen = hn;
 		if (HexNen != hn) {
 			printf("*** mesh : mixed hexahedron orders (%d-node after %d-node)\n",
@@ -161,10 +161,10 @@ static int elem_store(int type, int tag, const int32_t *nd)
 
 		return 0;
 	}
-	if ((type == 6) || (type == 13) || (type == 18) || (type == 90) || (type == 91)) {
+	if ((type == 6) || (type == 13) || (type == 18) || (type == 90) || (type == 91) || (type == 106)) {
 		// 角柱 (6 / 18 / 15 節点)。局所の並びは Gmsh のまま使う。
 		// 頂点 6 個を Prism に、2 次の残り (辺 9 + 四角形面 3) を Prism2 に入れる
-		const int pn = ((type == 6) ? 6 : (type == 13) ? 18 : (type == 90) ? 40 : (type == 91) ? 75 : 15);
+		const int pn = ((type == 6) ? 6 : (type == 13) ? 18 : (type == 90) ? 40 : (type == 91) ? 75 : (type == 106) ? 126 : 15);
 		if (PrismNen == 0) PrismNen = pn;
 		if (PrismNen != pn) {
 			printf("*** mesh : mixed prism orders (%d-node after %d-node)\n",
@@ -197,11 +197,11 @@ static int elem_store(int type, int tag, const int32_t *nd)
 
 		return 0;
 	}
-	if ((type == 3) || (type == 16) || (type == 10) || (type == 36) || (type == 37)) {
+	if ((type == 3) || (type == 16) || (type == 10) || (type == 36) || (type == 37) || (type == 38)) {
 		// 四角形 (境界面、4 / 8 / 9 節点)。六面体格子の電極面はこれになる。
 		// 2 次の中間節点 (辺 4 + 中心) は Quad2 に入れる。無い位置は -1 で
 		// 埋める (realloc した領域は未初期化なので、必ず全 5 要素を書くこと)
-		const int qn = ((type == 3) ? 4 : (type == 16) ? 8 : (type == 36) ? 16 : (type == 37) ? 25 : 9);
+		const int qn = ((type == 3) ? 4 : (type == 16) ? 8 : (type == 36) ? 16 : (type == 37) ? 25 : (type == 38) ? 36 : 9);
 		if (NQuad % ARRAY_INC == 0) {
 			Quad = (int32_t *)realloc(Quad, (size_t)(NQuad + ARRAY_INC) * 4 * sizeof(int32_t));
 			QuadTag = (int *)realloc(QuadTag, (size_t)(NQuad + ARRAY_INC) * sizeof(int));
@@ -680,7 +680,7 @@ static int elem_finish(void)
 		// 角柱格子。電極面は上下の三角形でも側面の四角形でもよい
 		MeshElem = MESHELEM_PRISM;
 		MeshDim = 3;
-		TetOrder = ((PrismNen == 75) ? 4 : (PrismNen == 40) ? 3 : (PrismNen > 6) ? 2 : 1);
+		TetOrder = (prismp_order(PrismNen) ? prismp_order(PrismNen) : (PrismNen > 6) ? 2 : 1);
 		if ((NTri < 1) && (NQuad < 1)) {
 			printf("%s\n", "*** mesh : a prism mesh needs triangular or "
 				"quadrilateral boundary faces for the electrodes");
@@ -739,7 +739,7 @@ static int elem_finish(void)
 		// 六面体格子 (1 次の 8 節点、または 2 次の 20 / 27 節点)
 		MeshElem = MESHELEM_HEX;
 		MeshDim = 3;
-		TetOrder = ((HexNen == 125) ? 4 : (HexNen == 64) ? 3 : (HexNen > 8) ? 2 : 1);
+		TetOrder = (hexp_order(HexNen) ? hexp_order(HexNen) : (HexNen > 8) ? 2 : 1);
 		// 3 次 / 4 次の六面体 (64 / 125 節点) の電極面は 16 / 25 節点四角形 (面の内部の節点まで固定する)
 		if (TetOrder >= 3) {
 			const int p = TetOrder, nqx = ((p + 1) * (p + 1)) - 4;
@@ -855,7 +855,8 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              : (type == 13) ? 18 : (type == 18) ? 15
 		              : (type == 10) ? 9 : (type == 16) ? 8
 		              : (type == 92) ? 64 : (type == 90) ? 40 : (type == 36) ? 16
-		              : (type == 93) ? 125 : (type == 91) ? 75 : (type == 37) ? 25 : 0);
+		              : (type == 93) ? 125 : (type == 91) ? 75 : (type == 37) ? 25
+		              : (type == 94) ? 216 : (type == 106) ? 126 : (type == 38) ? 36 : 0);
 		if (nn == 0) continue;			// 点・線分など、使わない要素型
 		if (nv < off + nn) continue;
 
@@ -1030,7 +1031,8 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              : (type == 13) ? 18 : (type == 18) ? 15
 		              : (type == 10) ? 9 : (type == 16) ? 8
 		              : (type == 92) ? 64 : (type == 90) ? 40 : (type == 36) ? 16
-		              : (type == 93) ? 125 : (type == 91) ? 75 : (type == 37) ? 25 : 0);
+		              : (type == 93) ? 125 : (type == 91) ? 75 : (type == 37) ? 25
+		              : (type == 94) ? 216 : (type == 106) ? 126 : (type == 38) ? 36 : 0);
 		// 物理タグはエンティティ側にある (2.2 と違い要素の行には無い)
 		const int phys = ent_phys((int)dim, tag);
 
@@ -1108,6 +1110,10 @@ static int gmsh_nnode(long type)
 	if (type == 93) return 125;
 	if (type == 91) return 75;
 	if (type == 37) return 25;
+	// 5 次の六面体・角柱・四角形
+	if (type == 94) return 216;
+	if (type == 106) return 126;
+	if (type == 38) return 36;
 	// 6 次 / 7 次の四面体・三角形
 	if (type == 71) return 84;
 	if (type == 72) return 120;
@@ -1217,7 +1223,7 @@ static int read_elements_bin22(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 		              || (type == 12) || (type == 17) || (type == 13) || (type == 18)
 		              || (type == 10) || (type == 16) || (type == 92) || (type == 90) || (type == 36)
-		              || (type == 93) || (type == 91) || (type == 37));
+		              || (type == 93) || (type == 91) || (type == 37) || (type == 94) || (type == 106) || (type == 38));
 
 		for (long e = 0; e < cnt; e++) {
 			int32_t etag = 0;
@@ -1386,7 +1392,7 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 		              || (type == 12) || (type == 17) || (type == 13) || (type == 18)
 		              || (type == 10) || (type == 16) || (type == 92) || (type == 90) || (type == 36)
-		              || (type == 93) || (type == 91) || (type == 37));
+		              || (type == 93) || (type == 91) || (type == 37) || (type == 94) || (type == 106) || (type == 38));
 
 		for (int64_t e = 0; e < cnt; e++) {
 			int64_t etag = 0;
@@ -2935,11 +2941,60 @@ static const signed char PRISM4_A[75][4] = {
 };
 
 // 次数 p (3 / 4) の表の行
-static const signed char *hexp_i(int p, int a) { return ((p == 4) ? HEX4_I[a] : HEX3_I[a]); }
-static const signed char *prismp_a(int p, int a) { return ((p == 4) ? PRISM4_A[a] : PRISM3_A[a]); }
+/*
+5 次 (hexa216 = 型 94 / prism126 = 型 106、境界面の 36 節点四角形 = 型 38) も同じ方法の**実測の表**。gmsh 4.15.2 の
+出力を分類する同じ手順 (data/sample/gmsh_hp_order.py) が 3 次・4 次の表 (HEX3_I〜PRISM4_A) を全項再現することを
+確かめてから作った (六面体 8 要素・角柱 16 要素がすべて同じ並び)
+*/
+static const signed char HEX5_I[216][3] = {
+	{0, 0, 0}, {5, 0, 0}, {5, 5, 0}, {0, 5, 0}, {0, 0, 5}, {5, 0, 5}, {5, 5, 5}, {0, 5, 5}, {1, 0, 0},
+	{2, 0, 0}, {3, 0, 0}, {4, 0, 0}, {0, 1, 0}, {0, 2, 0}, {0, 3, 0}, {0, 4, 0}, {0, 0, 1}, {0, 0, 2},
+	{0, 0, 3}, {0, 0, 4}, {5, 1, 0}, {5, 2, 0}, {5, 3, 0}, {5, 4, 0}, {5, 0, 1}, {5, 0, 2}, {5, 0, 3},
+	{5, 0, 4}, {4, 5, 0}, {3, 5, 0}, {2, 5, 0}, {1, 5, 0}, {5, 5, 1}, {5, 5, 2}, {5, 5, 3}, {5, 5, 4},
+	{0, 5, 1}, {0, 5, 2}, {0, 5, 3}, {0, 5, 4}, {1, 0, 5}, {2, 0, 5}, {3, 0, 5}, {4, 0, 5}, {0, 1, 5},
+	{0, 2, 5}, {0, 3, 5}, {0, 4, 5}, {5, 1, 5}, {5, 2, 5}, {5, 3, 5}, {5, 4, 5}, {4, 5, 5}, {3, 5, 5},
+	{2, 5, 5}, {1, 5, 5}, {1, 1, 0}, {1, 4, 0}, {4, 4, 0}, {4, 1, 0}, {1, 2, 0}, {1, 3, 0}, {2, 4, 0},
+	{3, 4, 0}, {4, 3, 0}, {4, 2, 0}, {3, 1, 0}, {2, 1, 0}, {2, 2, 0}, {2, 3, 0}, {3, 3, 0}, {3, 2, 0},
+	{1, 0, 1}, {4, 0, 1}, {4, 0, 4}, {1, 0, 4}, {2, 0, 1}, {3, 0, 1}, {4, 0, 2}, {4, 0, 3}, {3, 0, 4},
+	{2, 0, 4}, {1, 0, 3}, {1, 0, 2}, {2, 0, 2}, {3, 0, 2}, {3, 0, 3}, {2, 0, 3}, {0, 1, 1}, {0, 1, 4},
+	{0, 4, 4}, {0, 4, 1}, {0, 1, 2}, {0, 1, 3}, {0, 2, 4}, {0, 3, 4}, {0, 4, 3}, {0, 4, 2}, {0, 3, 1},
+	{0, 2, 1}, {0, 2, 2}, {0, 2, 3}, {0, 3, 3}, {0, 3, 2}, {5, 1, 1}, {5, 4, 1}, {5, 4, 4}, {5, 1, 4},
+	{5, 2, 1}, {5, 3, 1}, {5, 4, 2}, {5, 4, 3}, {5, 3, 4}, {5, 2, 4}, {5, 1, 3}, {5, 1, 2}, {5, 2, 2},
+	{5, 3, 2}, {5, 3, 3}, {5, 2, 3}, {4, 5, 1}, {1, 5, 1}, {1, 5, 4}, {4, 5, 4}, {3, 5, 1}, {2, 5, 1},
+	{1, 5, 2}, {1, 5, 3}, {2, 5, 4}, {3, 5, 4}, {4, 5, 3}, {4, 5, 2}, {3, 5, 2}, {2, 5, 2}, {2, 5, 3},
+	{3, 5, 3}, {1, 1, 5}, {4, 1, 5}, {4, 4, 5}, {1, 4, 5}, {2, 1, 5}, {3, 1, 5}, {4, 2, 5}, {4, 3, 5},
+	{3, 4, 5}, {2, 4, 5}, {1, 3, 5}, {1, 2, 5}, {2, 2, 5}, {3, 2, 5}, {3, 3, 5}, {2, 3, 5}, {1, 1, 1},
+	{4, 1, 1}, {4, 4, 1}, {1, 4, 1}, {1, 1, 4}, {4, 1, 4}, {4, 4, 4}, {1, 4, 4}, {2, 1, 1}, {3, 1, 1},
+	{1, 2, 1}, {1, 3, 1}, {1, 1, 2}, {1, 1, 3}, {4, 2, 1}, {4, 3, 1}, {4, 1, 2}, {4, 1, 3}, {3, 4, 1},
+	{2, 4, 1}, {4, 4, 2}, {4, 4, 3}, {1, 4, 2}, {1, 4, 3}, {2, 1, 4}, {3, 1, 4}, {1, 2, 4}, {1, 3, 4},
+	{4, 2, 4}, {4, 3, 4}, {3, 4, 4}, {2, 4, 4}, {2, 2, 1}, {2, 3, 1}, {3, 3, 1}, {3, 2, 1}, {2, 1, 2},
+	{3, 1, 2}, {3, 1, 3}, {2, 1, 3}, {1, 2, 2}, {1, 2, 3}, {1, 3, 3}, {1, 3, 2}, {4, 2, 2}, {4, 3, 2},
+	{4, 3, 3}, {4, 2, 3}, {3, 4, 2}, {2, 4, 2}, {2, 4, 3}, {3, 4, 3}, {2, 2, 4}, {3, 2, 4}, {3, 3, 4},
+	{2, 3, 4}, {2, 2, 2}, {3, 2, 2}, {3, 3, 2}, {2, 3, 2}, {2, 2, 3}, {3, 2, 3}, {3, 3, 3}, {2, 3, 3}
+};
+static const signed char PRISM5_A[126][4] = {
+	{5, 0, 0, 0}, {0, 5, 0, 0}, {0, 0, 5, 0}, {5, 0, 0, 5}, {0, 5, 0, 5}, {0, 0, 5, 5}, {4, 1, 0, 0}, {3, 2, 0, 0},
+	{2, 3, 0, 0}, {1, 4, 0, 0}, {4, 0, 1, 0}, {3, 0, 2, 0}, {2, 0, 3, 0}, {1, 0, 4, 0}, {5, 0, 0, 1}, {5, 0, 0, 2},
+	{5, 0, 0, 3}, {5, 0, 0, 4}, {0, 4, 1, 0}, {0, 3, 2, 0}, {0, 2, 3, 0}, {0, 1, 4, 0}, {0, 5, 0, 1}, {0, 5, 0, 2},
+	{0, 5, 0, 3}, {0, 5, 0, 4}, {0, 0, 5, 1}, {0, 0, 5, 2}, {0, 0, 5, 3}, {0, 0, 5, 4}, {4, 1, 0, 5}, {3, 2, 0, 5},
+	{2, 3, 0, 5}, {1, 4, 0, 5}, {4, 0, 1, 5}, {3, 0, 2, 5}, {2, 0, 3, 5}, {1, 0, 4, 5}, {0, 4, 1, 5}, {0, 3, 2, 5},
+	{0, 2, 3, 5}, {0, 1, 4, 5}, {3, 1, 1, 0}, {1, 1, 3, 0}, {1, 3, 1, 0}, {2, 1, 2, 0}, {1, 2, 2, 0}, {2, 2, 1, 0},
+	{3, 1, 1, 5}, {1, 3, 1, 5}, {1, 1, 3, 5}, {2, 2, 1, 5}, {1, 2, 2, 5}, {2, 1, 2, 5}, {4, 1, 0, 1}, {1, 4, 0, 1},
+	{1, 4, 0, 4}, {4, 1, 0, 4}, {3, 2, 0, 1}, {2, 3, 0, 1}, {1, 4, 0, 2}, {1, 4, 0, 3}, {2, 3, 0, 4}, {3, 2, 0, 4},
+	{4, 1, 0, 3}, {4, 1, 0, 2}, {3, 2, 0, 2}, {2, 3, 0, 2}, {2, 3, 0, 3}, {3, 2, 0, 3}, {4, 0, 1, 1}, {4, 0, 1, 4},
+	{1, 0, 4, 4}, {1, 0, 4, 1}, {4, 0, 1, 2}, {4, 0, 1, 3}, {3, 0, 2, 4}, {2, 0, 3, 4}, {1, 0, 4, 3}, {1, 0, 4, 2},
+	{2, 0, 3, 1}, {3, 0, 2, 1}, {3, 0, 2, 2}, {3, 0, 2, 3}, {2, 0, 3, 3}, {2, 0, 3, 2}, {0, 4, 1, 1}, {0, 1, 4, 1},
+	{0, 1, 4, 4}, {0, 4, 1, 4}, {0, 3, 2, 1}, {0, 2, 3, 1}, {0, 1, 4, 2}, {0, 1, 4, 3}, {0, 2, 3, 4}, {0, 3, 2, 4},
+	{0, 4, 1, 3}, {0, 4, 1, 2}, {0, 3, 2, 2}, {0, 2, 3, 2}, {0, 2, 3, 3}, {0, 3, 2, 3}, {3, 1, 1, 1}, {3, 1, 1, 4},
+	{3, 1, 1, 2}, {3, 1, 1, 3}, {1, 3, 1, 1}, {1, 3, 1, 4}, {1, 3, 1, 2}, {1, 3, 1, 3}, {1, 1, 3, 1}, {1, 1, 3, 4},
+	{1, 1, 3, 2}, {1, 1, 3, 3}, {2, 2, 1, 1}, {2, 2, 1, 4}, {2, 2, 1, 2}, {2, 2, 1, 3}, {1, 2, 2, 1}, {1, 2, 2, 4},
+	{1, 2, 2, 2}, {1, 2, 2, 3}, {2, 1, 2, 1}, {2, 1, 2, 4}, {2, 1, 2, 2}, {2, 1, 2, 3}
+};
+static const signed char *hexp_i(int p, int a) { return ((p == 5) ? HEX5_I[a] : (p == 4) ? HEX4_I[a] : HEX3_I[a]); }
+static const signed char *prismp_a(int p, int a) { return ((p == 5) ? PRISM5_A[a] : (p == 4) ? PRISM4_A[a] : PRISM3_A[a]); }
 // 節点数から次数 (3 次以上の六面体 / 角柱、それ以外は 0)
-static int hexp_order(int nen) { return ((nen == 125) ? 4 : (nen == 64) ? 3 : 0); }
-static int prismp_order(int nen) { return ((nen == 75) ? 4 : (nen == 40) ? 3 : 0); }
+static int hexp_order(int nen) { return ((nen == 216) ? 5 : (nen == 125) ? 4 : (nen == 64) ? 3 : 0); }
+static int prismp_order(int nen) { return ((nen == 126) ? 5 : (nen == 75) ? 4 : (nen == 40) ? 3 : 0); }
 
 
 
@@ -2981,10 +3036,10 @@ static double lagp_tri(int p, const signed char al[3], const double lam[3], doub
 }
 
 
-// p 次 (3 / 4) の六面体の値と局所微分
+// p 次 (3〜5) の六面体の値と局所微分
 static void hexp_shape(int p, double x, double y, double z, double nv[HEXP_NMAX], double dn[HEXP_NMAX][3])
 {
-	double lx[5], dx[5], ly[5], dy[5], lz[5], dz[5];
+	double lx[GL_NMAX], dx[GL_NMAX], ly[GL_NMAX], dy[GL_NMAX], lz[GL_NMAX], dz[GL_NMAX];		// p + 1 個
 	for (int i = 0; i <= p; i++) {
 		lagp(p, i, x, &lx[i], &dx[i]);
 		lagp(p, i, y, &ly[i], &dy[i]);
@@ -3004,11 +3059,11 @@ static void hexp_shape(int p, double x, double y, double z, double nv[HEXP_NMAX]
 }
 
 
-// p 次 (3 / 4) の角柱の値と局所微分 (u, v は λ1, λ2、λ0 = 1 - u - v)
+// p 次 (3〜5) の角柱の値と局所微分 (u, v は λ1, λ2、λ0 = 1 - u - v)
 static void prismp_shape(int p, double u, double v, double ze, double nv[PRISMP_NMAX], double dn[PRISMP_NMAX][3])
 {
 	const double lam[3] = {1 - u - v, u, v};
-	double lz[5], dz[5];
+	double lz[GL_NMAX], dz[GL_NMAX];		// p + 1 個
 	for (int k = 0; k <= p; k++) lagp(p, k, ze, &lz[k], &dz[k]);
 	const int nen = ((p + 1) * (p + 2) / 2) * (p + 1);
 	for (int a = 0; a < nen; a++) {
@@ -3151,18 +3206,21 @@ static const double GW4[4] = {0.3478548451374538, 0.6521451548625461,
 // 各方向 n 点 (3 / 4 / 5) の Gauss-Legendre ([-1, 1])。3 / 4 点は従来の定数 (2 次・3 次の答えを変えない)
 static void ho_gauss(int n, const double **x, const double **w)
 {
-	static double x5[5], w5[5];
-	static int init = 0;
+	// [-1,1] の n 点 (3 / 4 は表、5 以上は gauss01 から作って n ごとに保持する。**表に無い n を 5 点に落とさない**
+	// こと : 以前は 5 以外の n でも 5 点が返った)。最初の呼び出しは格子の組み立て (直列) で起きる
+	static double xs[GL_NMAX + 1][GL_NMAX], ws[GL_NMAX + 1][GL_NMAX];
+	static int init[GL_NMAX + 1];
 	if (n == 3) { *x = GX3; *w = GW3; return; }
 	if (n == 4) { *x = GX4; *w = GW4; return; }
-	if (!init) {
-		double t[5], u[5];
-		gauss01(5, t, u);
-		for (int k = 0; k < 5; k++) { x5[k] = (2 * t[k]) - 1; w5[k] = 2 * u[k]; }
-		init = 1;
+	if (n > GL_NMAX) n = GL_NMAX;
+	if (!init[n]) {
+		double t[GL_NMAX], u[GL_NMAX];
+		gauss01(n, t, u);
+		for (int k = 0; k < n; k++) { xs[n][k] = (2 * t[k]) - 1; ws[n][k] = 2 * u[k]; }
+		init[n] = 1;
 	}
-	*x = x5;
-	*w = w5;
+	*x = xs[n];
+	*w = ws[n];
 }
 
 
@@ -3379,7 +3437,7 @@ static int prism2_element(int e, const double c[6], double ke[PRISMP_NMAX][PRISM
 	const int nen = prism_nodes(e, nd);
 
 	// 2 次は面内 Duffy 9 点 x ζ 3 点、3 次は 16 点 x 4 点
-	double lam[36][3], wq[36];
+	double lam[QTRI_MAX][3], wq[QTRI_MAX];
 	int ntq = NQTRI, ngz = 3;
 	if (prismp_order(nen)) { ngz = prismp_order(nen) + 1; ntq = tri_quad_pub(ngz, lam, wq); }
 	else tri_quad(lam, wq);
@@ -3643,7 +3701,7 @@ int elem3d_face_ip(int e, const int32_t *cn, int k, int q, double nv[ELEM_NMAX],
 			for (int m = 1; m < 3; m++) {
 				if (PRISM2_Z[loc[m]] != PRISM2_Z[loc[0]]) return 0;
 			}
-			double lam[36][3], wq[36];
+			double lam[QTRI_MAX][3], wq[QTRI_MAX];
 			if (o3) tri_quad_pub(ng, lam, wq);
 			else tri_quad(lam, wq);
 			u = lam[q][1];
@@ -3908,7 +3966,7 @@ int elem3d_ip(int e, int q, double nv[ELEM_NMAX], double g[ELEM_NMAX][3], double
 		const double *gz, *gwz;
 		ho_gauss(ngz, &gz, &gwz);
 		if ((q < 0) || (q >= (ntq * ngz))) return 1;
-		double lam[36][3], wq[36];
+		double lam[QTRI_MAX][3], wq[QTRI_MAX];
 		if (pp) tri_quad_pub(ngz, lam, wq);
 		else tri_quad(lam, wq);
 		int32_t nd[PRISMP_NMAX];
@@ -5351,6 +5409,23 @@ static void cubic_grad(const double r[3], const double av[3], const double bm[3]
 }
 
 
+// 5 次の六面体・角柱の自己検証の 5 次の項。各軸をその軸の格子の大きさ ax[] で割った X, Y, Z で
+//   L (0.9 X²Y²Z − 0.5 Y⁵ + 0.7 X Z⁴ + 3 X Z⁵ (+ 3 X⁵ Y : 六面体だけ。角柱の面内 P5 に入らない))
+// (L は全体の大きさ、勾配が線形の項と同じ桁になる)。値を返し、勾配を g に足す。**X Z⁵ と X⁵ Y が要素の行列の積分点の
+// 数を検査する** : (∂φ/∂x)² が z の 10 次、(∂φ/∂y)² が x の 10 次なので各方向 6 点で厳密、5 点に落とすと外れる。
+// 軸ごとに割るのは、薄い箱 (z が 0.2mm) で全体の大きさで割ると Z⁵ の項が 6e-6 しか効かず、5 点に落とす誤りが
+// 素通りしたから (実測)
+static double quintic_term(double l, const double ax[3], int prism, const double r[3], double g[3])
+{
+	const double x = r[0] / ax[0], y = r[1] / ax[1], z = r[2] / ax[2];
+	const double a = 0.9 * l, b = -0.5 * l, c = 0.7 * l, d = 3.0 * l, e = (prism ? 0 : 3.0 * l);
+	const double z4 = z * z * z * z, x4 = x * x * x * x;
+	g[0] += ((2 * a * x * y * y * z) + (c * z4) + (d * z4 * z) + (5 * e * x4 * y)) / ax[0];
+	g[1] += ((2 * a * x * x * y * z) + (5 * b * y * y * y * y) + (e * x4 * x)) / ax[1];
+	g[2] += ((a * x * x * y * y) + (4 * c * x * z * z * z) + (5 * d * x * z4)) / ax[2];
+	return (a * x * x * y * y * z) + (b * y * y * y * y * y) + (c * x * z4) + (d * x * z4 * z) + (e * x4 * x * y);
+}
+
 static double cubic_val(const double r[3], const double av[3], const double bm[3][3], const double gm[9])
 {
 	const double x = r[0], y = r[1], z = r[2];
@@ -5382,6 +5457,15 @@ static int nodal_test_ho3(FILE *fp_log, int prism)
 		if (m > lmax) lmax = m;
 	}
 	if (lmax <= 0) lmax = 1;
+	double axl[3] = {0, 0, 0};		// 軸ごとの大きさ (5 次の項 quintic_term)
+	for (int i = 0; i < NNode; i++) {
+		if (fabs(Xp[i]) > axl[0]) axl[0] = fabs(Xp[i]);
+		if (fabs(Yp[i]) > axl[1]) axl[1] = fabs(Yp[i]);
+		if (fabs(Zp[i]) > axl[2]) axl[2] = fabs(Zp[i]);
+	}
+	for (int k = 0; k < 3; k++) {
+		if (axl[k] <= 0) axl[k] = lmax;
+	}
 	double gm[9] = {1.3, -0.8, 1.1, 0.6, -0.7, 0.9, -1.2, 0.5, 1.4};
 	double bs[3][3];
 	for (int k = 0; k < 5; k++) gm[k] /= (lmax * lmax);
@@ -5506,7 +5590,7 @@ static int nodal_test_ho3(FILE *fp_log, int prism)
 		naff++;
 		// 角の 1 次の写像の上で 5 点則 (アフィンなので det J は一定)
 		if (prism) {
-			double lq[36][3], wq[36];
+			double lq[QTRI_MAX][3], wq[QTRI_MAX];
 			const int nq = tri_quad_pub(nr, lq, wq);
 			double j1[3], j2[3], j3[3];
 			for (int k = 0; k < 3; k++) {
@@ -5527,6 +5611,7 @@ static int nodal_test_ho3(FILE *fp_log, int prism)
 					}
 					double g[3];
 					cubic_grad(r, av, bs, gm, g);
+					if (po >= 5) (void)quintic_term(lmax, axl, prism, r, g);
 					double gcg = 0;
 					for (int i = 0; i < 3; i++) {
 						for (int j = 0; j < 3; j++) gcg += g[i] * cm[i][j] * g[j];
@@ -5556,6 +5641,7 @@ static int nodal_test_ho3(FILE *fp_log, int prism)
 				                      + (jm[0][2] * ((jm[1][0] * jm[2][1]) - (jm[1][1] * jm[2][0]))));
 				double g[3];
 				cubic_grad(r, av, bs, gm, g);
+				if (po >= 5) (void)quintic_term(lmax, axl, prism, r, g);
 				double gcg = 0;
 				for (int a = 0; a < 3; a++) {
 					for (int b = 0; b < 3; b++) gcg += g[a] * cm[a][b] * g[b];
@@ -5569,20 +5655,22 @@ static int nodal_test_ho3(FILE *fp_log, int prism)
 	if (naff == ne) {
 		for (int i = 0; i < NNode; i++) {
 			const double r[3] = {Xp[i], Yp[i], Zp[i]};
-			phi[i] = cubic_val(r, av, bs, gm);
+			double gd[3] = {0, 0, 0};
+			phi[i] = cubic_val(r, av, bs, gm) + ((po >= 5) ? quintic_term(lmax, axl, prism, r, gd) : 0);
 		}
 		double q3 = 0;
 		for (int i = 0; i < NNode; i++) q3 += phi[i] * crs_row_dot(&A, i, phi);
 		const double err = fabs(q3 - exact) / fabs(exact);
-		fprintf(fp_log, "  %s field : phi^T K phi = %.10e, exact = %.10e, rel. error = %.2e\n", ((po >= 4) ? "quartic" : "cubic"), q3, exact, err);
-		if (!(err <= 1e-10)) {
+		fprintf(fp_log, "  %s field : phi^T K phi = %.10e, exact = %.10e, rel. error = %.2e\n", ((po >= 5) ? "quintic" : (po >= 4) ? "quartic" : "cubic"), q3, exact, err);
+		// 許容 1e-12 (実測 1e-15〜7e-14)。1e-10 では 5 次の積分点を 5 点に落とす誤り (1e-11 しか動かない) が素通りした
+		if (!(err <= 1e-12)) {
 			fprintf(fp_log, "*** the order-%d field identity failed (this is the only test that exercises the order-%d basis)\n", po, po);
 			ierr = 1;
 		}
 	}
 	else {
 		fprintf(fp_log, "  %s field : skipped (%d of %d elements are affine and straight; the identity needs all of them)\n",
-			((po >= 4) ? "quartic" : "cubic"),
+			((po >= 5) ? "quintic" : (po >= 4) ? "quartic" : "cubic"),
 			naff, ne);
 	}
 	free(phi);

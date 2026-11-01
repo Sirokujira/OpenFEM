@@ -4229,6 +4229,59 @@ res=$(awk -v h3="$e_ann_hex3a" -v h4="$e_ann_hex4a" -v p3="$e_ann_prism3a" -v p4
 echo "  annulus (coarse) : order 4 beats order 3 on the curved faces (geometry h^6 vs h^4) : $res"
 case "$res" in NG*) status=1 ;; esac
 
+# ---- 5 次の六面体 (216 節点、gmsh の hexa216 = 型 94) と角柱 (126 節点、prism126 = 型 106) ----
+#
+# 3 次 / 4 次と同じ形 (実測の表 HEX5_I / PRISM5_A、各方向 6 点)。表は gmsh の出力を分類する gmsh_hp_order.py で作り、
+# 同じ分類が 3 次・4 次の表を全項再現することを先に確かめた。境界面は 36 節点四角形 (型 38) と 21 節点三角形。
+#   (a) 平行平板の C が全桁、2.2 / バイナリ 4.1 で rlc.csv が一致、5 次の場の恒等式 (許容 1e-12、実測 4e-16 / 8e-15)。
+#       **5 次の場は軸ごとの大きさで割る** (薄い箱で全体の大きさで割ると Z⁵ の項が 6e-6 しか効かず、積分点を 5 点に
+#       落とす誤りが 1e-11 しか動かなかった、実測)
+#   (b) 曲がった同軸 : 1/4 周 2 -> 4 分割で 六面体 166 倍・角柱 182 倍 (h⁶ 以上、実測)、同じ格子の 4 次の 14 / 13 倍よい
+#   (c) 熱連成 : 片面を冷やす板が閉形式に機械精度 (四角形の面 / 三角形の面)
+echo "[order-5 hex/prism] 216-node hexahedra / 126-node prisms (gmsh hexa216 / prism126)"
+for m in box_hex5 box_hex5_bin_41 box_prism5 box_prism5_bin_41 coax_hex5a coax_hex5b coax_prism5a coax_prism5b slab_hex5 slab_prism5; do
+	cp "$SRC/$m.msh" "$WORK/"
+done
+for m in box_hex5 box_prism5; do
+	h3_c "$m" C
+	compare "$m : C (parallel plate) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/h5_22.csv"
+	rm -f "$WORK/rlc.csv"
+	h3_c "${m}_bin_41" C
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/h5_f.csv" 2> /dev/null
+	if [ -s "$WORK/h5_22.csv" ] && cmp -s "$WORK/h5_22.csv" "$WORK/h5_f.csv"; then echo "  $m : 2.2 vs bin_41 : rlc.csv identical -> OK"
+	else echo "  $m : 2.2 vs bin_41 : differ -> NG" >&2; status=1; fi
+	h3_c "$m" P
+	if grep -q '^\*\*\*' "$WORK/ofe.log" || ! grep -q "quintic field : phi" "$WORK/ofe.log"; then
+		echo "  $m (analysis P) : the quintic-field identity failed or did not run -> NG" >&2; status=1
+	else
+		echo "  $m (analysis P) : linear and quintic field identities ($(awk '/quintic field : phi/ { print $NF }' "$WORK/ofe.log")) -> OK"
+	fi
+done
+for k in hex prism; do
+	for r in 4a 5a 5b; do
+		sed -e "s/coax_hex2.msh/coax_${k}$r.msh/" "$SRC/coax_hex2.ofe" | awk '/^analysis/{print "analysis = C"; next} {print}' > "$WORK/h5cx.ofe"
+		(cd "$WORK" && "$OFE" -n 2 h5cx.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  coax_${k}$r : the run failed -> NG" >&2; status=1; }
+		eval "c_$r=\$(value_of C)"
+	done
+	compare "curved coax ($k, order 5, finer) : C' [F/m]" "$c_5b" "$cex" 1e-6
+	res=$(awk -v a="$c_5a" -v b="$c_5b" -v t="$c_4a" -v e="$cex" 'BEGIN {
+		ea = (a - e) / e; if (ea < 0) ea = -ea; eb = (b - e) / e; if (eb < 0) eb = -eb; et = (t - e) / e; if (et < 0) et = -et
+		ok = (ea > 64 * eb) && (et > 5 * ea)
+		printf "%s (order 5 : %.2e -> %.2e, ratio %.1f; order 4 on the coarse mesh %.2e)", ok ? "OK" : "NG", ea, eb, (eb > 0) ? ea / eb : 0, et }')
+	echo "  curved coax ($k) : order 5 converges at h^6 or faster and beats order 4 on the same mesh : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+for m in slab_hex5:8 slab_prism5:16; do
+	g=${m%%:*}; nf=${m#*:}
+	printf 'OpenFEM 1 0\ntitle = order-5 slab cooled on one face\nmesh = %s.msh\nmaterial = 1.0 1e6\ntempco = 2 0 0\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\nconvection = 5000 20 0 2e-3 0 1e-3 0 0\ntemperature = 20\nthermal = 10\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' "$g" > "$WORK/h5th.ofe"
+	th_run h5th.ofe
+	compare "$g : bottom face cooled : T_max (parabola) [degC]" "$(th_t)" 125 1e-9
+	compare "$g : bottom face cooled : T_mean [degC]" "$(t3_tm)" 123.333333333 1e-9
+	th_nface "$g : convection on the bottom face only" "$nf"
+	th_energy "$g"
+done
+
 # ---- 高次の種別混在 (同じ次数の四面体・六面体・角柱) ----
 #
 # 面のトレースは三角形なら P_p、四角形なら Q_p なので、同じ次数の種別どうしは面で適合する
