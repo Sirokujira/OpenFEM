@@ -2254,6 +2254,13 @@ static const int *tet_ho_a(int i)
 }
 
 
+// 公開 : 局所節点 i の多重指数 (重心座標 x 次数。3 次以上の Nedelec の eddy3d_pr.c が λ の引き戻しに使う)
+const int *tet_ho_index(int i)
+{
+	return tet_ho_a(i);
+}
+
+
 // [0,1] の n 点 Gauss-Legendre (n = 3〜7 は表、8 以上 (GL_NMAX まで) は Legendre 多項式の根を Newton で求める。
 // 3 点は 3 次の剛性には足りない : 変異解析用)。**表に無い n を黙って 5 点に落とさないこと** (以前は 8 点を
 // 頼むと 5 点が返った)

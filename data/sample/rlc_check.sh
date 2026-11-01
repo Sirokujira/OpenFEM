@@ -501,18 +501,7 @@ mesh_reject() {	# mesh_reject <ラベル> <ofe ファイル>
 	fi
 }
 echo "[mesh order] inputs the solver must reject"
-# 辺要素 (E / A) は 1 次と 2 次 (10 節点四面体、[A order 2]) の格子だけ。3 次の格子は弾く。
-# 導電率と周波数を入れないと別の検査で弾かれてしまい、次数の検査が空回りする
-# (通っているように見えて何も見ていない状態になる)
-sed -e 's/^analysis = .*/analysis = A/' \
-    -e 's/^material = .*/material = 4.0 5.8e7/' \
-    -e 's/^solver = .*/frequency = 1e4\nawall = 10/' \
-    "$SRC/box_p3.ofe" > "$WORK/p2_edge.ofe"
-mesh_reject "analysis A on an order-3 mesh" p2_edge.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 p2_edge.ofe 2>&1 | grep -q "need a first-order mesh"); then
-	echo "  *** it was rejected for a different reason than the mesh order" >&2
-	status=1
-fi
+# 辺要素 (E / A) は四面体ならどの次数でも解ける ([A order 2] / [A order 3+])。高次の六面体・角柱は弾く (h3x_e)
 # 次数の混在 (四面体を 1 個だけ 1 次に落とす)
 awk '/^[0-9]+ 11 2 / && !done { print $1, 4, 2, $4, $5, $6, $7, $8, $9; done = 1; next } { print }' \
     "$SRC/box_p2.msh" > "$WORK/mixed.msh"
@@ -3599,8 +3588,7 @@ compare "Ldc (2-D P4) [H/m]" "$(value_of Ldc)" 2.932153e-07 1e-5
 awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 23) { s = $1 " 21"; for (i = 3; i <= 3 + $3 + 10; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p4.msh" > "$WORK/box_p4_tri10.msh"
 sed 's/^mesh = .*/mesh = box_p4_tri10.msh/' "$WORK/box_p4.ofe" > "$WORK/p4x_tri.ofe"
 th_reject "35-node tetrahedra with 10-node electrode triangles" p4x_tri.ofe "triangles are supported only as the faces of 20-node"
-sed 's/^analysis = .*/analysis = E/' "$WORK/box_p4.ofe" > "$WORK/p4x_e.ofe"
-th_reject "analysis E on a 35-node tetrahedral mesh" p4x_e.ofe "need a first-order mesh"
+#   analysis E (辺要素の自己検証) は [A order 3+] の (h) で通す
 
 # ---- 5 次要素 (gmsh の tet56 = 型 31 / tri21 = 型 25) ----
 #
@@ -3655,8 +3643,7 @@ compare "Ldc (2-D P5) [H/m]" "$(value_of Ldc)" 2.932153e-07 1e-5
 awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 25) { s = $1 " 23"; for (i = 3; i <= 3 + $3 + 15; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p5.msh" > "$WORK/box_p5_tri15.msh"
 sed 's/^mesh = .*/mesh = box_p5_tri15.msh/' "$WORK/box_p5.ofe" > "$WORK/p5x_tri.ofe"
 mesh_reject "56-node tetrahedra with 15-node electrode triangles" p5x_tri.ofe
-sed 's/^analysis = .*/analysis = E/' "$WORK/box_p5.ofe" > "$WORK/p5x_e.ofe"
-th_reject "analysis E on a 56-node tetrahedral mesh" p5x_e.ofe "need a first-order mesh"
+#   analysis E (辺要素の自己検証) は [A order 3+] の (h) で通す
 
 # ---- 6 次 / 7 次要素 (gmsh の tet84 = 型 71 / tet120 = 型 72 / tri28 = 型 42 / tri36 = 型 43) ----
 #
@@ -3725,8 +3712,7 @@ case "$res" in NG*) status=1 ;; esac
 awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 42) { s = $1 " 25"; for (i = 3; i <= 3 + $3 + 21; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p6.msh" > "$WORK/box_p6_tri21.msh"
 sed 's/^mesh = .*/mesh = box_p6_tri21.msh/' "$WORK/box_p6.ofe" > "$WORK/p6x_tri.ofe"
 th_reject "84-node tetrahedra with 21-node electrode triangles" p6x_tri.ofe "21-node (order 5) triangles are supported only as the faces of 56-node"
-sed 's/^analysis = .*/analysis = E/' "$WORK/box_p6.ofe" > "$WORK/p6x_e.ofe"
-th_reject "analysis E on an 84-node tetrahedral mesh" p6x_e.ofe "need a first-order mesh"
+#   analysis E (辺要素の自己検証) は [A order 3+] の (h) で通す
 
 # ---- 次数の違う四面体 / 三角形が面を共有する格子 (低い次数を最高次数 P に上げる、unstruct.c の ho_raise) ----
 #
@@ -5369,8 +5355,7 @@ case "$res" in NG*) status=1 ;; esac
 awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 29) { s = $1 " 4"; for (i = 3; i <= 3 + $3 + 4; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p3.msh" > "$WORK/box_p3_tet4.msh"
 sed 's/^mesh = .*/mesh = box_p3_tet4.msh/' "$SRC/box_p3.ofe" > "$WORK/p3x_t4.ofe"
 th_reject "10-node triangles on 4-node tetrahedra" p3x_t4.ofe "supported only as the faces of 20-node tetrahedra"
-sed 's/^analysis = .*/analysis = E/' "$SRC/box_p3.ofe" > "$WORK/p3x_e.ofe"
-th_reject "analysis E on a 20-node tetrahedral mesh" p3x_e.ofe "need a first-order mesh"
+#   analysis E (辺要素の自己検証) は [A order 3+] の (h) で通す
 awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 21) { s = $1 " 2"; for (i = 3; i <= 3 + $3 + 3; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p3.msh" > "$WORK/box_p3_tri3.msh"
 sed 's/^mesh = .*/mesh = box_p3_tri3.msh/' "$SRC/box_p3.ofe" > "$WORK/p3x_tri.ofe"
 th_reject "20-node tetrahedra with 3-node electrode triangles" p3x_tri.ofe "triangle is not"
@@ -5675,6 +5660,135 @@ compare "order 2, electrodes off awall : gauge = 1 + direct = 1 == gauge = 0 : R
 compare "order 2, electrodes off awall : gauge = 1 + direct = 1 == gauge = 0 : L [H]" "$6" "$2" 1e-6
 mesh_reject "order-2 A, gauge = 1 with electrodes not connected through awall" p2x_gw.ofe
 grep -q "not connected through awall" "$WORK/ofe.log" || { echo "  *** it was rejected for a different reason than: not connected through awall" >&2; status=1; }
+# ---- 3 次以上の Nedelec 要素 (analysis = A / E、3〜7 次の四面体、eddy3d_pr.c) ----
+#
+# A を次数 r の Nedelec (第 1 種、Arnold-Falk-Winther の基底 λ^α φ_σ)、φ を次数 r の節点要素で解く。格子は
+# bar_eddy と同じ棒を gmsh が幾何から次数 r で切ったもの (gmsh_bar_ho.py、h = 0.25 mm。離散の格子は gmsh が
+# 3 次以上に上げられない)。bar_ho2.msh は同じ頂点の 2 次 (eddy3d_p2.c で解く対照)。
+#   (a) 100 Hz : DC の場は空間に入るので R・L が 1e-7 (実測 1.5e-9)
+#   (b) 100 kHz (t/δ = 4.8) : 3 次は 1e-4 以内 (実測 −1.9e-5) で同じ頂点の 2 次 (+2.7e-3) より 30 倍以上よい。
+#       4 次は 2e-6 以内 (実測 2e-7) で 3 次より 30 倍以上よい (誤差は次数で指数的に減る。5 次は 3e-10 で CI では回さない)
+#   (c) 剛体回転した格子 (J が対角でない) で R・L が 8 桁一致
+#   (d) 内部の節点 (頂点以外) をずらした曲がった要素 : 100 Hz が 1e-5、100 kHz が 1e-4、analysis R が閉形式に 1e-8
+#   (e) 空気層 (導体と空気の 2 材料、bar_air の閉形式) : 3 次が 1e-4 以内 (実測 −2.1e-5) で同じ頂点の 2 次より 30 倍よい
+#   (f) 磁性導体 (mur = 50、100 Hz、t/δ = 1.1) : 閉形式に 1e-5
+#   (g) 場の出力 (100 Hz、重心の B・J) : 2 次と同じ恒等式 (体積・|J| = σV/L・符号つき平均・損失 = ½Re(V I))
+#   (h) 辺要素の自己検証 (analysis = E) : 3〜7 次の直線の箱 (box_p3..p7) で、次数 r − 1 の一般の場 (Pra) と
+#       r' × q (q は r − 1 次の同次式、P_{r−1}³ に入らない、Prb) の σ 重み L2 射影の誤差 0・回転のエネルギー。
+#       3 次は異方性の ν と剛体回転した格子でも。曲がった格子 (coax_p3) は理由をつけて弾く
+#   (i) 対応しない組み合わせ (ゲージ・過渡解析・交流の発熱・B-H 曲線) は理由をつけて弾く (直接解法はゲージなしの A を
+#       入力段が弾く)
+echo "[A order 3+] 3-D eddy current on tetrahedra of order 3 and up (order-r Nedelec / nodal elements)"
+cp "$SRC/bar_ho2.msh" "$SRC/bar_ho3.msh" "$SRC/bar_ho4.msh" "$SRC/bar_air_ho2.msh" "$SRC/bar_air_ho3.msh" "$WORK/"
+pr_ratio() {	# pr_ratio <ラベル> <R の誤差 (低)> <L の誤差 (低)> <R の誤差 (高)> <L の誤差 (高)> <倍率>
+	res=$(awk -v a="$2" -v b="$3" -v c="$4" -v d="$5" -v k="$6" 'BEGIN { if (a < 0) a = -a; if (b < 0) b = -b; if (c < 0) c = -c; if (d < 0) d = -d
+		ok = "NG"; if ((c * k < a) && (d * k < b)) ok = "OK"; printf "%s (R %.0fx, L %.0fx)", ok, a / c, b / d }')
+	echo "  $1 by more than $6x : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+pr_err() {	# pr_err <R> <L> <R 厳密> <L 厳密> : "R の相対誤差 L の相対誤差"
+	awk -v r="$1" -v l="$2" -v re="$3" -v le="$4" 'BEGIN { if (r == "x") { print "1 1"; exit } printf "%.6e %.6e", r / re - 1, l / le - 1 }'
+}
+p2_case "order 3, 100 Hz" bar_ho3.msh 1e2 1e-7
+p2_case "order 2 (same vertices), 100 kHz (reference only)" bar_ho2.msh 1e5 1e-2
+set -- $(awk -v f=1e5 -f "$SRC/bar_eddy_z.awk"); bre=$1; ble=$2
+set -- $(pr_err "$P2R" "$P2L" "$bre" "$ble"); e2r=$1; e2l=$2
+p2_case "order 3, 100 kHz" bar_ho3.msh 1e5 1e-4
+r3=$P2R; l3=$P2L
+set -- $(pr_err "$P2R" "$P2L" "$bre" "$ble"); e3r=$1; e3l=$2
+pr_ratio "order 3 beats order 2 on the same vertices at 100 kHz" "$e2r" "$e2l" "$e3r" "$e3l" 30
+p2_case "order 4, 100 kHz" bar_ho4.msh 1e5 2e-6
+set -- $(pr_err "$P2R" "$P2L" "$bre" "$ble"); e4r=$1; e4l=$2
+pr_ratio "order 4 beats order 3 on the same vertices at 100 kHz" "$e3r" "$e3l" "$e4r" "$e4l" 30
+# (c)
+awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+	{ print }' "$WORK/bar_ho3.msh" > "$WORK/bar_ho3_rot.msh"
+p2_case "order 3, rigidly rotated mesh, 100 kHz" bar_ho3_rot.msh 1e5 1e-4
+res=$(awk -v a="$P2R" -v b="$r3" -v c="$P2L" -v d="$l3" 'BEGIN { x = a / b - 1; y = c / d - 1; if (x < 0) x = -x; if (y < 0) y = -y
+	printf "%s (%.1e, %.1e)", ((x < 1e-8) && (y < 1e-8)) ? "OK" : "NG", x, y }')
+echo "  order 3, rigidly rotated mesh : R, L == axis-aligned mesh : $res"
+case "$res" in NG*) status=1 ;; esac
+# (d) 内部の頂点以外の節点 (20 節点の 5..20 番目) を決まった擬似乱数でずらす
+awk '/\$Elements/{f=1;getline;next} /\$EndElements/{f=0} f && $2==29 { nt = $3; for (k = 4 + nt + 4; k <= 4 + nt + 19; k++) print $k }' "$WORK/bar_ho3.msh" | sort -u > "$WORK/p3mid.txt"
+awk -v amp=2e-6 -v mf="$WORK/p3mid.txt" 'BEGIN { s = 12345; while ((getline l < mf) > 0) mid[l] = 1 }
+	function rnd() { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648 }
+	/^\$Nodes/ { f = 1; print; getline; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; e = 1e-12
+		inner = (x > e) && (x < 2e-3 - e) && (y > e) && (y < 0.25e-3 - e) && (z > e) && (z < 1e-3 - e)
+		if (inner && ($1 in mid)) { x += (rnd() - 0.5) * amp; y += (rnd() - 0.5) * amp; z += (rnd() - 0.5) * amp; nm++ }
+		printf "%s %.17g %.17g %.17g\n", $1, x, y, z; next } { print }
+	END { if (nm < 100) print "*** only " nm " nodes moved" > "/dev/stderr" }' "$WORK/bar_ho3.msh" > "$WORK/bar_ho3_cm.msh"
+p2_case "order 3, curved elements (interior nodes moved), 100 Hz" bar_ho3_cm.msh 1e2 1e-5
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho3_cm.msh"; next} /^frequency/{next} /^awall/{next} /^analysis/{print "analysis = R"; next} {print}' > "$WORK/p3r.ofe"
+(cd "$WORK" && "$OFE" -n 2 p3r.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  p3r : the run failed -> NG" >&2; status=1; }
+compare "order 3, curved elements : analysis R == L / (sigma W t) [ohm]" \
+	"$(awk -F, '$1 == "R" { a = 1; next } a && $1 == "1" { print $2; exit }' "$WORK/rlc.csv")" 1.3793103448e-04 1e-8
+p2_case "order 3, curved elements, 100 kHz" bar_ho3_cm.msh 1e5 1e-4
+# (e) 空気層 (bar_air.ofe の閉形式、100 kHz : R = 4.7930357804e-04, L = 9.7419014024e-10)
+for o in 2 3; do
+	grep -v '^#' "$SRC/bar_air.ofe" | awk -v m="bar_air_ho$o.msh" '/^mesh/{print "mesh = " m; next} /^frequency/{print "frequency = 1e5"; next} {print}' > "$WORK/pra$o.ofe"
+	set -- $(p2_rl "pra$o.ofe")
+	set -- $(pr_err "$1" "$2" 4.7930357804e-04 9.7419014024e-10)
+	eval "ea${o}r=$1; ea${o}l=$2"
+done
+res=$(awk -v r="$ea3r" -v l="$ea3l" 'BEGIN { ok = "NG"; if ((r < 1e-4) && (r > -1e-4) && (l < 1e-4) && (l > -1e-4)) ok = "OK"; printf "%s (R %+.2e, L %+.2e)", ok, r, l }')
+echo "  order 3, conductor + air (2 materials), 100 kHz : R, L == bar_air closed form within 1e-4 : $res"
+case "$res" in NG*) status=1 ;; esac
+pr_ratio "order 3 beats order 2 with the air layer at 100 kHz" "$ea2r" "$ea2l" "$ea3r" "$ea3l" 30
+# (f)
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho3.msh"; next} /^frequency/{print "frequency = 1e2"; next} /^region = 1 2/{print; print "mur = 2 50"; next} {print}' > "$WORK/prmu.ofe"
+set -- $(p2_rl prmu.ofe) $(awk -v f=1e2 -v mur=50 -f "$SRC/bar_eddy_z.awk")
+set -- $(pr_err "$1" "$2" "$3" "$4")
+res=$(awk -v r="$1" -v l="$2" 'BEGIN { ok = "NG"; if ((r < 1e-5) && (r > -1e-5) && (l < 1e-5) && (l > -1e-5)) ok = "OK"; printf "%s (R %+.2e, L %+.2e)", ok, r, l }')
+echo "  order 3, magnetic conductor (mur = 50), 100 Hz : R, L == closed form within 1e-5 : $res"
+case "$res" in NG*) status=1 ;; esac
+# (g)
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho3.msh"; next} /^frequency/{print "frequency = 1e2"; next} /^analysis = A/{print "fieldout = 1"} {print}' > "$WORK/pr_fld.ofe"
+(cd "$WORK" && "$OFE" -n 2 pr_fld.ofe > /dev/null 2>&1) || { echo "  pr_fld : the run failed -> NG" >&2; status=1; }
+compare "order 3, field output : volume of the cells [m^3]" "$(vtk vol J_A_re)" 5.0e-10 1e-9
+compare "order 3, field output : |J| max (sigma V / L) [A/m^2]" "$(vtk vmax J_A_re)" 2.9e10 1e-4
+compare "order 3, field output : |J| min [A/m^2]" "$(vtk vmin J_A_re)" 2.9e10 1e-4
+compare "order 3, field output : mean J_x (signed) [A/m^2]" "$(vtk mean0 J_A_re)" -2.9e10 1e-4
+pf=$(awk -v r="$(vtk int2 J_A_re)" -v m="$(vtk int2 J_A_im)" 'BEGIN{ printf "%.10e", (r + m) / (2 * 5.8e7) }')
+pt=$(awk '/port 1 : I =/{ printf "%.10e", 0.5 * $6 }' "$WORK/ofe.log")
+compare "order 3, field output : ohmic loss from the field == 1/2 Re(V I) [W]" "$pf" "$pt" 1e-6
+# (h)
+for m in box_p3 box_p4 box_p5 box_p6 box_p7; do cp "$SRC/$m.msh" "$WORK/"; done
+cp "$SRC/edge_test.ofe" "$SRC/edge_test_aniso.ofe" "$WORK/"
+awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+	{ print }' "$WORK/box_p3.msh" > "$WORK/box_p3_rot.msh"
+for c in "edge_test box_p3 3" "edge_test_aniso box_p3 3" "edge_test box_p3_rot 3" "edge_test box_p4 4" "edge_test box_p5 5" "edge_test box_p6 6" "edge_test box_p7 7"; do
+	set -- $c
+	sed "s/^mesh = .*/mesh = $2.msh/" "$WORK/$1.ofe" > "$WORK/pre_$1_$2.ofe"
+	(cd "$WORK" && "$OFE" -n 2 "pre_$1_$2.ofe" > /dev/null 2>&1) || true
+	np=$(grep -c "^  (Pr[ab]) .* passed$" "$WORK/ofe.log" || true)
+	if [ "$np" = 2 ] && grep -q "order-$3 edge self test : passed" "$WORK/ofe.log"; then
+		echo "  order-$3 edge self test ($1 on $2) : (Pra) degree r-1, (Prb) + r x q : passed -> OK"
+	else
+		echo "  order-$3 edge self test ($1 on $2) : $np of 2 identities passed -> NG" >&2; status=1
+		grep "(Pr\|\*\*\*" "$WORK/ofe.log" | cut -c1-160 >&2
+	fi
+done
+cp "$SRC/coax_p3.msh" "$WORK/"
+sed "s/^mesh = .*/mesh = coax_p3.msh/" "$WORK/edge_test.ofe" > "$WORK/prx_ecurv.ofe"
+mesh_reject "order-3 edge self test on a curved mesh" prx_ecurv.ofe
+grep -q "needs straight-sided elements" "$WORK/ofe.log" || { echo "  *** it was rejected for a different reason than: needs straight-sided elements" >&2; status=1; }
+# (i)
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho3.msh"; next} {print}' > "$WORK/prbase.ofe"
+awk '/^analysis/{print "gauge = 1"} {print}' "$WORK/prbase.ofe" > "$WORK/prx_g.ofe"
+th_reject "order-3 A with gauge = 1" prx_g.ofe "supports gauge = 0 and the iterative solver only"
+cp "$SRC/thermal_ac.ofe" "$WORK/"
+sed 's/^mesh = .*/mesh = bar_ho3.msh/' "$WORK/thermal_ac.ofe" > "$WORK/prx_th.ofe"
+th_reject "order-3 A with thermal" prx_th.ofe "supports the frequency domain (no transient / thermal)"
+awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"} {print}' "$WORK/prbase.ofe" > "$WORK/prx_t.ofe"
+th_reject "order-3 A in the time domain" prx_t.ofe "supports the frequency domain"
+awk '/^region = 1 2/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "bh = 2 10000 1.2"; print "current = 1"; next} {print}' "$WORK/prbase.ofe" > "$WORK/prx_bh.ofe"
+th_reject "order-3 A with a B-H curve" prx_bh.ofe "supports linear materials"
+
 # ---- 3 次元渦電流の過渡解析 (analysis = A + transient、後退 Euler、電圧駆動) ----
 #
 # χ = Δt φ を未知数にすると係数行列が実対称・半正定値になる (eddy3d.c の solve_eddy3d_transient)。

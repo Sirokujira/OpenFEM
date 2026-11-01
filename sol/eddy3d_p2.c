@@ -91,8 +91,8 @@ static void nu_mul(const double nu[6], const double c[3], double r[3])
 }
 
 
-// 全体の面と、要素ごとの面番号 fe[4 e + f]
-static int32_t *p2_faces(int *nface, int32_t **fvert)
+// 全体の面と、要素ごとの面番号 fe[4 e + f] (3 次以上の eddy3d_pr.c も使う)
+int32_t *p2_faces(int *nface, int32_t **fvert)
 {
 	const int nt = NTet;
 	p2face_t *a = (p2face_t *)malloc((size_t)nt * 4 * sizeof(p2face_t));
@@ -124,7 +124,7 @@ static int32_t *p2_faces(int *nface, int32_t **fvert)
 
 
 // 面 (昇順の 3 頂点) の番号。無ければ -1
-static int p2_face_id(const int32_t *fvert, int nface, const int32_t v[3])
+int p2_face_id(const int32_t *fvert, int nface, const int32_t v[3])
 {
 	int lo = 0, hi = nface - 1;
 	while (lo <= hi) {

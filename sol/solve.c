@@ -1440,7 +1440,8 @@ static int solve_one(FILE *fp_log)
 
 	// 辺要素の自己検証 (3 次元渦電流の基盤。他の解析とは独立に走る)
 	if (Analysis & ANALYSIS_E) {
-		ierr |= ((MeshMode && (TetOrder == 2)) ? solve_edge_test_p2(fp_log) : solve_edge_test(fp_log));
+		ierr |= ((MeshMode && (TetOrder >= 3)) ? solve_edge_test_pr(fp_log)
+		      : (MeshMode && (TetOrder == 2)) ? solve_edge_test_p2(fp_log) : solve_edge_test(fp_log));
 		if (Analysis == ANALYSIS_E) return ierr;
 	}
 
@@ -1632,6 +1633,9 @@ static int solve_one(FILE *fp_log)
 		}
 		else if (TransientOn) {
 			ierr |= solve_eddy3d_transient(fp_log);
+		}
+		else if (MeshMode && (TetOrder >= 3)) {
+			ierr |= solve_eddy3d_pr(fp_log);
 		}
 		else if (MeshMode && (TetOrder == 2)) {
 			ierr |= solve_eddy3d_p2(fp_log);

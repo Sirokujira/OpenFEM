@@ -227,10 +227,27 @@ static int setup_unstruct(void)
 			return 1;
 		}
 	}
+	// 3 次以上の四面体 (20 / 35 / 56 / 84 / 120 節点) の A / E は次数 r の Nedelec 要素 (eddy3d_pr.c) で解く。
+	// 対応するのは周波数領域の線形材料・ゲージなし・反復解法・単体の四面体格子だけ
+	else if ((TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+		int nl = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.on || (Material[m].nbh[0] > 0)) nl = 1;
+		}
+		const char *why = NULL;
+		if (nl) why = "linear materials (no bh / ja)";
+		else if (TransientOn || ThermalOn) why = "the frequency domain (no transient / thermal)";
+		else if (GaugeTree || Direct) why = "gauge = 0 and the iterative solver";
+		else if (Hdf5Out) why = "no hdf5 series";
+		if (why != NULL) {
+			printf("*** analysis A / E on a mesh of order 3 and up (order-%d Nedelec) supports %s only\n", TetOrder, why);
+			return 1;
+		}
+	}
 	else if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
 		// "need a first-order mesh" は rlc_check.sh が理由として grep する (3 次 / 4 次 / 2 次の六面体)
 		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh "
-			"(or a second-order mesh of 10-node tetrahedra only)");
+			"(or a mesh of tetrahedra only for a high order)");
 		return 1;
 	}
 	// 10 節点の四面体も組み立てで積分点の det J の符号が揃わない要素を飛ばす (tet10_element が 1 を

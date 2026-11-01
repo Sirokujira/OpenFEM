@@ -75,6 +75,7 @@ set(SOL_SOURCES
     sol/edge.c
     sol/eddy3d.c
     sol/eddy3d_p2.c
+    sol/eddy3d_pr.c
     sol/expr.c
     sol/fieldout.c
     sol/hdf5out.c

@@ -112,6 +112,13 @@ int solve_eddy3d_p2_transient(FILE *);
 int eddy3d_p2_heat_open(FILE *);
 int eddy3d_p2_heat_solve(FILE *, const double *, double, double *, double *, double *, int);
 void eddy3d_p2_heat_close(void);
+int32_t *p2_faces(int *, int32_t **);
+int p2_face_id(const int32_t *, int, const int32_t [3]);
+
+// eddy3d_pr.c (3 次以上の Nedelec)
+int solve_eddy3d_pr(FILE *);
+int solve_edge_test_pr(FILE *);
+const int *tet_ho_index(int);
 
 // assemble.c (公開した材料係数)
 void material_coef_pub(int, int, double [6]);
