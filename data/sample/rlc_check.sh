@@ -3707,19 +3707,8 @@ for m in pri40 pyr80; do
 	compare "$m : adiabatic bar, CN : T == the discrete recurrence [degC]" "$(th_t)" "$2" 1e-9
 	th_balance "$m : adiabatic bar, CN"
 done
-# (6) 弾くべき入力 (解く段で弾くので理由はログを見る)
-t3_reject() {	# t3_reject <ラベル> <ofe> <理由の文字列>
-	mesh_reject "$1" "$2"
-	if ! grep -q "$3" "$WORK/ofe.log"; then
-		echo "  *** it was rejected for a different reason than: $3" >&2
-		status=1
-	fi
-}
-cp "$SRC/bar_hex.msh" "$SRC/box_hex2.msh" "$WORK/"
-awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
-	/^analysis/{print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next}
-	{print}' "$SRC/box_hex2.ofe" > "$WORK/t3x_hex2.ofe"
-t3_reject "thermal on a 20-node hexahedral mesh" t3x_hex2.ofe "first-order 3-D elements and higher-order tetrahedra"
+# (6) 2 次の六面体・角柱は [thermal second-order hex/prism] で解く (以前はここで弾いていた)
+cp "$SRC/bar_hex.msh" "$WORK/"
 
 # ---- 熱連成の高次の四面体 (2〜4 次、等パラメトリック、曲がった面) ----
 #
@@ -3795,7 +3784,104 @@ case "$res" in NG*) status=1 ;; esac
 # (4) 弾くべき入力 : 高次の四面体の交流の発熱 (A は 1 次格子だけ) と相互放射 (曲がった面)
 awk '/^thermal/{print "radiation = 0.8 10"; print "radiationexchange = 1"} {print}' "$WORK/tho_cy.ofe" > "$WORK/thox_rx.ofe"
 mesh_reject "radiationexchange on a higher-order tetrahedral mesh" thox_rx.ofe
-if ! grep -q "and higher-order tetrahedra (DC, without radiationexchange)" "$WORK/ofe.log"; then
+if ! grep -q "higher-order tetrahedra / hexahedra / prisms (DC, without radiationexchange)" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than radiationexchange" >&2; status=1
+fi
+
+# ---- 熱連成の 2 次の六面体・角柱 (20 / 27 / 15 / 18 節点、等パラメトリック) ----
+#
+# 剛性・発熱・質量・要素の温度は積分点の経路 (elem3d_ip、六面体 3x3x3 Gauss、角柱 面内 Duffy 9 点
+# x ζ 3 点 = 剛性の組み立てと同じ則)、露出面は親の要素の形状関数を面に制限して積分する
+# (elem3d_face_ip : 六面体・角柱の四角形 3 x 3 Gauss、角柱の三角形 Duffy 9 点。thermal.c の
+# surf_face_ho)。
+echo "[thermal second-order hex/prism] electro-thermal coupling on 20/27-node hexahedra and 15/18-node prisms"
+for m in box_hex2 box_hex2s box_prism2 box_prism2s thermal_slab_h27 thermal_slab_p18 \
+	thermal_ann_h27 thermal_ann_p18 thermal_ann_h8 thermal_ann_h27b; do cp "$SRC/$m.msh" "$WORK/"; done
+h2_write() {	# h2_write <格子> <電流> <追加の行 (\n 区切り)> : 熱連成 (α = 0) の入力を書く
+	printf 'OpenFEM 1 0\ntitle = second-order hex/prism thermal\nmesh = %s.msh\nmaterial = 1.0 1e6\ntempco = 2 0 0\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\n%b\ntemperature = 20\nthermal = %s\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' \
+		"$1" "$3" "$2" > "$WORK/th2.ofe"
+}
+h2_ofe() { h2_write "$@"; th_run th2.ofe; }
+# (1) 箱 (1mm x 1mm x 0.2mm、厚さ方向の電流、両方の電極がヒートシンク)、α = 0 :
+#     T(z) = T_s + q z (t - z)/(2k) は 2 次なので 4 種とも (serendipity を含めて) 厳密に表せる
+#     R = t/(σA) = 2e-4、T_max = 20 + q t²/(8k) = 25、T_mean = 20 + q t²/(12k) (q = 1e10)
+for m in box_hex2 box_hex2s box_prism2 box_prism2s; do
+	h2_ofe "$m" 100 'heatsink = 0 20\nheatsink = 1 20'
+	compare "$m : R = t / (sigma A) [ohm]" "$(th_r)" 2e-4 1e-9
+	compare "$m : T_max = T_s + q t^2 / (8k) [degC]" "$(th_t)" 25 1e-9
+	compare "$m : T_mean = T_s + q t^2 / (12k) [degC]" "$(t3_tm)" 23.3333333333 1e-9
+	th_energy "$m"
+done
+#     σ(T) あり (α = 4e-3) : 要素内一定の σ なので厳密でない。恒等式だけ
+h2_write box_hex2 100 'heatsink = 0 20\nheatsink = 1 20'
+awk '/^tempco/{print "tempco = 2 4e-3 20"; next} {print}' "$WORK/th2.ofe" > "$WORK/th2a.ofe"
+th_run th2a.ofe
+th_energy "box_hex2, alpha = 4e-3"
+#     断熱の過渡 (CN、σ(T) あり) : 一様な温度のまま進むので thermal_bar と同じ漸化式
+#     (断面 1mm² で J が同じ。漸化式は長さに依らない) に機械精度で一致する
+for m in box_hex2 box_prism2s; do
+	awk -v m="$m" '/^mesh/{print "mesh = " m ".msh"; next} /^heatsink/{next}
+		/^thermal/{print "heatcap = 2 3.4e6"; print "transient = 10 100 0.5"} {print}' "$SRC/thermal_tet.ofe" > "$WORK/th2ad.ofe"
+	th_run th2ad.ofe
+	set -- $(th_adia 100 0.5)
+	compare "$m : adiabatic, CN : T == the discrete recurrence [degC]" "$(th_t)" "$2" 1e-9
+	th_balance "$m : adiabatic, CN"
+done
+# (2) 板 (x 向きの電流、z = 0 の面だけを直方体で選んで対流、h = 5000、z = t は断熱)、α = 0 :
+#     T(z) = T_a + q t/h + q (t z - z²/2)/k が 2 次なので機械精度。六面体は四角形の面、
+#     角柱は三角形の面を通る。T_max = T_a + q t/h + q t²/(2k) = 125、
+#     T_mean = T_a + q t/h + q t²/(3k) = 123.333... (q = 2.5e9)。
+#     **両面を冷やすと検査にならない**: 面の形状関数を ζ について裏返す (z = 0 の面の熱を
+#     中央面の節点で取る) 誤りは、半分ずつが断熱の板 (厚さ t/2) になるだけで T_max・T_mean が
+#     全桁一致する (実測)。片面だけ冷やして対称性を壊す
+for m in thermal_slab_h27:8 thermal_slab_p18:16; do
+	g=${m%%:*}; nf=${m#*:}
+	h2_ofe "$g" 10 'convection = 5000 20 0 2e-3 0 1e-3 0 0'
+	compare "$g : R = L / (sigma A) [ohm]" "$(th_r)" 1e-2 1e-9
+	compare "$g : bottom face cooled : T_max (parabola) [degC]" "$(th_t)" 125 1e-9
+	compare "$g : bottom face cooled : T_mean [degC]" "$(t3_tm)" 123.333333333 1e-9
+	th_nface "$g : convection on the bottom face only" "$nf"
+	th_energy "$g"
+	#   輻射 (α = 0、0.5 A) : 面の Newton の接線・右辺・熱の評価点がそろっていることの恒等式
+	h2_ofe "$g" 0.5 'radiation = 0.8 20 0 2e-3 0 1e-3 0 0'
+	th_energy "$g : radiation"
+done
+# (3) 円環 (内径 0.5mm、外径 1mm、軸方向の電流、内外の円筒面 = 曲がった面を対流 h = 2000)、α = 0 :
+#     T(r) = T_a - q r²/(4k) + C1 ln r + C2 (両側の Robin 条件で C1, C2)。**曲がった面の積分を
+#     検査できるのはこれ** (面積の誤差が温度に直接入る)。周方向 12 分割で 2 次 +2.3e-4、24 分割で
+#     +1.3e-5 (h⁴、比 18)。1 次の折れ線 (同じ頂点) は +5.7%。許容は 2 次 5e-4、比 > 50
+set -- $(awk 'BEGIN { pi = atan2(0, -1); a = 0.5e-3; b = 1e-3; lz = 0.2e-3; s = 1e6; k = 10; h = 2000; I = 10
+	A = pi * (b * b - a * a); q = (I / A) ^ 2 / s
+	Pb = -q * b * b / (4 * k); Pa = -q * a * a / (4 * k)
+	a11 = -k / b - h * log(b); a12 = -h; r1 = h * Pb - q * b / 2
+	a21 = k / a - h * log(a); a22 = -h; r2 = h * Pa + q * a / 2
+	d = a11 * a22 - a12 * a21; c1 = (r1 * a22 - a12 * r2) / d; c2 = (a11 * r2 - a21 * r1) / d
+	n = 20000; num = 0; den = 0
+	for (i = 0; i < n; i++) { r = a + (b - a) * (i + 0.5) / n; num += r * (-q * r * r / (4 * k) + c1 * log(r) + c2); den += r }
+	printf "%.12e %.12e", lz / (s * A), num / den }')
+ran=$1; tan=$2
+for m in thermal_ann_h8 thermal_ann_h27 thermal_ann_p18 thermal_ann_h27b; do
+	h2_ofe "$m" 10 'convection = 2000 20'
+	e=$(awk -v t="$(t3_tm)" -v x="$tan" 'BEGIN { d = (t - 20 - x) / x; if (d < 0) d = -d; printf "%.6e", d }')
+	eval "e_$m=\$e"
+	th_energy "$m"
+	case "$m" in
+	*_h8) ;;
+	*) compare "$m : R = L / (sigma pi (b^2 - a^2)) [ohm]" "$(th_r)" "$ran" 5e-4
+	   compare "$m : curved faces cooled : volume-mean temperature rise [K]" \
+		"$(awk -v t="$(t3_tm)" 'BEGIN { printf "%.12e", t - 20 }')" "$tan" 5e-4 ;;
+	esac
+	case "$m" in *_h27b) th_nface "$m : convection on the curved faces only" 96 ;; *) th_nface "$m : convection on the curved faces only" 48 ;; esac
+done
+res=$(awk -v a="$e_thermal_ann_h8" -v b="$e_thermal_ann_h27" -v c="$e_thermal_ann_h27b" 'BEGIN {
+	ok = (a > 50 * b) && (b > 10 * c)
+	printf "%s (P1 %.2e, P2 %.2e, P2 refined %.2e)", ok ? "OK" : "NG", a, b, c }')
+echo "  annulus : curved P2 faces beat the P1 facets, and converge at h^4 : $res"
+case "$res" in NG*) status=1 ;; esac
+# (4) 弾くべき入力 : 2 次の六面体の相互放射
+h2_write box_hex2 100 'heatsink = 0 20\nradiation = 0.8 20\nradiationexchange = 1'
+mesh_reject "radiationexchange on a second-order hexahedral mesh" th2.ofe
+if ! grep -q "hexahedra / prisms (DC, without radiationexchange)" "$WORK/ofe.log"; then
 	echo "  *** it was rejected for a different reason than radiationexchange" >&2; status=1
 fi
 

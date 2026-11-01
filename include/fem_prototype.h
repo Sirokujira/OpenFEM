@@ -45,6 +45,7 @@ int elem3d_nip(int);
 int elem3d_ip(int, int, double [ELEM_NMAX], double [ELEM_NMAX][3], double *);
 int tet_face_shape(int, const int [3], const double [3], double [TET_NMAX], double [3], double [3]);
 int tri_quad_pub(int, double [][3], double *);
+int elem3d_face_ip(int, const int32_t *, int, int, double [ELEM_NMAX], double *);
 void assemble_hex(crs_t *, int);
 int hex_grad_center(int, double [8][3]);
 int hex2_grad_center(int, double [27][3], int *);

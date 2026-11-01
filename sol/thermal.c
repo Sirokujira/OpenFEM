@@ -730,6 +730,62 @@ static double surf_tri_ho(crs_t *B, double *g, const double *t, int rad, int f,
 }
 
 
+// 2 次の六面体・角柱の露出面 f (曲がった三角形・四角形) : 親の要素の形状関数を面に制限した
+// 積分点 (elem3d_face_ip、9 点) で対流・輻射・h(T) を組む。接線・右辺・熱の評価点は同じ
+static double surf_face_ho(crs_t *B, double *g, const double *t, int rad, int f,
+	double hc, double ta, int *bad)
+{
+	const int e = TFaceEl[f];
+	const int32_t *cn = &TFace[f * 4];
+	const int k = ((cn[3] < 0) ? 3 : 4);
+	int32_t nd[ELEM_NMAX];
+	const int nen = elem3d_nodes(e, nd);
+	static double me[ELEM_NMAX][ELEM_NMAX];
+	double ge[ELEM_NMAX], qsum = 0;
+	for (int a = 0; a < nen; a++) {
+		ge[a] = 0;
+		for (int b = 0; b < nen; b++) me[a][b] = 0;
+	}
+	for (int q = 0; q < 9; q++) {
+		double nv[ELEM_NMAX], w;
+		if (elem3d_face_ip(e, cn, k, q, nv, &w) != nen) { *bad = 1; return 0; }
+		double tg = 0;
+		if (t) {
+			for (int a = 0; a < nen; a++) tg += nv[a] * t[nd[a]];
+		}
+		if (!rad) {
+			for (int a = 0; a < nen; a++) {
+				ge[a] += hc * ta * w * nv[a];
+				for (int b = 0; b < nen; b++) me[a][b] += hc * w * nv[a] * nv[b];
+			}
+			if (t) qsum += hc * w * (tg - ta);
+		}
+		else {
+			double qv, dq;
+			surf_q(rad, hc, ta, tg, &qv, &dq, bad);
+			qsum += w * qv;
+			for (int a = 0; a < nen; a++) {
+				ge[a] += w * ((dq * tg) - qv) * nv[a];
+				for (int b = 0; b < nen; b++) me[a][b] += w * dq * nv[a] * nv[b];
+			}
+		}
+	}
+	if (B) {
+		for (int a = 0; a < nen; a++) {
+			for (int b = 0; b < nen; b++) {
+				if (me[a][b] == 0) continue;
+				const int64_t pos = crs_find_tri(B, nd[a], nd[b]);
+				if (pos >= 0) B->val[pos] += me[a][b];
+			}
+		}
+	}
+	if (g) {
+		for (int a = 0; a < nen; a++) g[nd[a]] += ge[a];
+	}
+	return qsum;
+}
+
+
 // surf_faces_grid の四面体版 (露出面は tet_faces_build で作った三角形)。
 // 対流の面の質量は h A (1 + δ_ij) / 12、右辺は h T_amb A / 3、熱は
 // h A (3 節点の平均 - T_amb) (いずれも 1 次の三角形で厳密)。
@@ -820,6 +876,17 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 				}
 				continue;
 			}
+			if ((HexNen > 8) || (PrismNen > 6)) {
+				// 2 次の六面体・角柱 : 曲がった四角形を親の要素の形状関数で積分する
+				const double xq = (Xp[nd[0]] + Xp[nd[1]] + Xp[nd[2]] + Xp[nd[3]]) / 4;
+				const double yq = (Yp[nd[0]] + Yp[nd[1]] + Yp[nd[2]] + Yp[nd[3]]) / 4;
+				const double zq = (Zp[nd[0]] + Zp[nd[1]] + Zp[nd[2]] + Zp[nd[3]]) / 4;
+				const surfbc_t *bq = surf_bc(((rad == 3) ? 0 : rad), xq, yq, zq, NULL);
+				if ((bq == NULL) || (bq->c <= 0)) continue;
+				nface++;
+				qsum += surf_face_ho(B, g, t, rad, f, bq->c, bq->t, &bad);
+				continue;
+			}
 			const double qv = surf_quad(B, g, t, rad, nd,
 				((RX.on && RX.fid) ? RX.fid[f] : -1), &bad, &nface);
 			qsum += qv;
@@ -844,6 +911,11 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 		if ((bc == NULL) || (bc->c <= 0)) continue;
 		nface++;
 		const double hc = bc->c, ta = bc->t;
+		if (PrismNen > 6) {
+			// 2 次の角柱の三角形の面 (TetOrder も 2 になるので四面体より先に見る)
+			qsum += surf_face_ho(B, g, t, rad, f, hc, ta, &bad);
+			continue;
+		}
 		if (TetOrder >= 2) {
 			// 高次の四面体 : 曲がった面を親の要素の形状関数で積分する
 			qsum += surf_tri_ho(B, g, t, rad, f, hc, ta, &bad);
@@ -2464,8 +2536,8 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	int ierr = 0;
 
 	fprintf(fp_log, "\n=== electro-thermal analysis ===\n");
-	// 非構造格子は 1 次の 3 次元要素 (四面体・六面体・角柱・ピラミッド、混在可)。
-	// 2 次以上と断面 2 次元は黙って誤答にせず入力エラー。交流の発熱 (A) は四面体だけ
+	// 非構造格子は 1 次の 3 次元要素 (四面体・六面体・角柱・ピラミッド、混在可)、高次の四面体、
+	// 2 次の六面体・角柱 (いずれも DC、相互放射なし)。それ以外は黙って誤答にせず入力エラー
 	// 断面 2 次元は交流の発熱 (F) の 1 次三角形だけ (F は断面 2 次元でしか解けない)
 	if (MeshMode && (MeshDim == 2) && (Analysis & ANALYSIS_F) && (TetOrder < 2)) {
 		if (RadExchange) {
@@ -2474,15 +2546,14 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 		}
 	}
 	else if ((Analysis & ANALYSIS_F) || (MeshMode && ((MeshDim != 3)
-	         || ((TetOrder >= 2) && ((MeshElem != MESHELEM_TET) || (Analysis & ANALYSIS_A) || RadExchange))
-	         || (HexNen > 8) || (PrismNen > 6)))) {
+	         || ((TetOrder >= 2) && ((Analysis & ANALYSIS_A) || RadExchange))))) {
 		if (Analysis & ANALYSIS_F) {
 			fprintf(fp_log, "*** AC heating with analysis F (thermal + F) needs a 2-D cross-section "
 				"mesh of 3-node triangles\n");
 			return 1;
 		}
 		fprintf(fp_log, "*** thermal on an unstructured mesh supports first-order 3-D elements "
-			"and higher-order tetrahedra (DC, without radiationexchange) only (this mesh is %d-D, element "
+			"and higher-order tetrahedra / hexahedra / prisms (DC, without radiationexchange) only (this mesh is %d-D, element "
 			"order %d, %d-node hexahedra, %d-node prisms)\n",
 			MeshDim, TetOrder, HexNen, PrismNen);
 		return 1;

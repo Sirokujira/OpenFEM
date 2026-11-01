@@ -40,6 +40,8 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
   coax_hex2 : 同軸を曲がった 2 次六面体 (hex27) で切る。全節点が円筒面上。
          物理タグ 1 = 体積、10 = 外側 r=b (電極 0)、11 = 内側 r=a (電極 1)
 
+  slab2 / annulus2 : 熱連成の検証用の板 (x 向きの電流、z 面を冷やす) / 円環 (軸方向の電流、
+    内外の円筒面を冷やす)。既定は hex27、-prism 1 で prism18、-linear 1 で 1 次
   box_hex2_warp / box_prism2_warp : ゆがんだ 2 次六面体 (hex27) / 2 次角柱
          (prism18)。角だけを乱数で動かし、中間節点は 1 次の写像の位置に置く。
          物理タグ 1 = 体積、10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
@@ -519,6 +521,91 @@ def make_coax_hex2(nr=4, nt=12, ra=0.5e-3, rb=1.5e-3, lz=0.1e-3):
             cells.append((tag, 10, [node(i2, a, k) for a, k in q]))
 
     return nodes, cells
+
+
+def make_grid2(n1, n2, n3, pos, wrap2=0, prism=0, linear=0, efaces="i"):
+    """(i, j, k) の構造格子を 2 次 (hex27 / prism18) か 1 次 (hex8 / prism6) で切る (熱連成の検証用)
+
+    pos(gi, gj, gk) が半分の刻みの格子座標 (0..2n) から座標を返す (中間節点も同じ写像に
+    載せるので曲がった形は等パラメトリックに表される)。wrap2 = 1 で j を周期にする。角柱は
+    (i, j) 面の四角形を対角線で 2 つの三角形に割って k に押し出す。電極 (タグ 10 / 11) は
+    efaces = "i" なら i = 0 / i = n1 の面、"k" なら k = 0 / k = n3 の面。体積のタグは 1
+    """
+    nodes = []
+    idx = {}
+
+    def node(a, b, c):
+        if wrap2:
+            b = b % (2 * n2)
+        if (a, b, c) not in idx:
+            idx[(a, b, c)] = len(nodes)
+            nodes.append(pos(a, b, c))
+        return idx[(a, b, c)]
+
+    tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
+    cells = []
+    for i in range(n1):
+        for j in range(n2):
+            for k in range(n3):
+                if not prism:
+                    xi = HEX27_XI[:8] if linear else HEX27_XI
+                    nd = [node((2 * i) + 1 + sx, (2 * j) + 1 + sy, (2 * k) + 1 + sz) for sx, sy, sz in xi]
+                    cells.append((1, 5 if linear else 12, nd))
+                    continue
+                for tri in tris:
+                    tp = {"A": (2 * (i + tri[0][0]), 2 * (j + tri[0][1])),
+                          "B": (2 * (i + tri[1][0]), 2 * (j + tri[1][1])),
+                          "C": (2 * (i + tri[2][0]), 2 * (j + tri[2][1]))}
+                    for e in (("AB", "A", "B"), ("BC", "B", "C"), ("CA", "C", "A")):
+                        tp[e[0]] = ((tp[e[1]][0] + tp[e[2]][0]) // 2, (tp[e[1]][1] + tp[e[2]][1]) // 2)
+                    tz = PRISM18_TZ[:6] if linear else PRISM18_TZ
+                    nd = [node(tp[t][0], tp[t][1], (2 * k) + z) for t, z in tz]
+                    cells.append((1, 6 if linear else 13, nd))
+
+    def quad(f, u, v):
+        # f(a, b) -> 格子座標。角 4 + 辺 4 + 中心 (Gmsh の 9 節点四角形の並び)
+        q = [(u, v), (u + 2, v), (u + 2, v + 2), (u, v + 2),
+             (u + 1, v), (u + 2, v + 1), (u + 1, v + 2), (u, v + 1), (u + 1, v + 1)]
+        q = q[:4] if linear else q
+        return (3 if linear else 10), [node(*f(a, b)) for a, b in q]
+
+    if efaces == "i":
+        for j in range(n2):
+            for k in range(n3):
+                for gi, tag in ((0, 10), (2 * n1, 11)):
+                    ty, nd = quad(lambda a, b, gi=gi: (gi, a, b), 2 * j, 2 * k)
+                    cells.append((tag, ty, nd))
+    else:
+        for i in range(n1):
+            for j in range(n2):
+                for gk, tag in ((0, 10), (2 * n3, 11)):
+                    if not prism:
+                        ty, nd = quad(lambda a, b, gk=gk: (a, b, gk), 2 * i, 2 * j)
+                        cells.append((tag, ty, nd))
+                        continue
+                    for tri in tris:
+                        v = [(2 * (i + a), 2 * (j + b)) for a, b in tri]
+                        m = [((v[0][0] + v[1][0]) // 2, (v[0][1] + v[1][1]) // 2),
+                             ((v[1][0] + v[2][0]) // 2, (v[1][1] + v[2][1]) // 2),
+                             ((v[2][0] + v[0][0]) // 2, (v[2][1] + v[0][1]) // 2)]
+                        pts = v if linear else v + m
+                        cells.append((tag, 2 if linear else 9, [node(a, b, gk) for a, b in pts]))
+    return nodes, cells
+
+
+def make_slab2(nx=4, ny=2, nz=2, lx=2e-3, ly=1e-3, lz=0.2e-3, prism=0, linear=0):
+    """x 向きに電流が流れる板 (電極は x = 0 / lx の面)。z 面だけを冷やす熱連成の検証用"""
+    return make_grid2(nx, ny, nz, lambda a, b, c: (lx * a / (2.0 * nx), ly * b / (2.0 * ny), lz * c / (2.0 * nz)),
+                      prism=prism, linear=linear, efaces="i")
+
+
+def make_annulus2(nr=3, nt=12, nz=1, ra=0.5e-3, rb=1.0e-3, lz=0.2e-3, prism=0, linear=0):
+    """軸方向に電流が流れる円環 (電極は z = 0 / lz の面)。内外の円筒面 (曲がった面) を冷やす"""
+    def pos(a, b, c):
+        r = ra + (rb - ra) * a / (2.0 * nr)
+        th = math.pi * b / nt
+        return (r * math.cos(th), r * math.sin(th), lz * c / (2.0 * nz))
+    return make_grid2(nr, nt, nz, pos, wrap2=1, prism=prism, linear=linear, efaces="k")
 
 
 def make_box_hex2_warp(nx=3, ny=3, nz=3, lx=1e-3, ly=1e-3, lz=0.2e-3, seed=20260803):
@@ -1443,6 +1530,11 @@ def main():
         nodes, cells = make_bar_hex(**opt)
         write_msh_cells(path, nodes, cells)
         print("%s : bar, %d nodes, %d cells" % (path, len(nodes), len(cells)))
+        return 0
+    elif kind in ("slab2", "annulus2"):
+        nodes, cells = (make_slab2(**opt) if kind == "slab2" else make_annulus2(**opt))
+        write_msh_cells(path, nodes, cells)
+        print("%s : %d nodes, %d cells" % (path, len(nodes), len(cells)))
         return 0
     elif kind in ("coax_hex2", "box_hex2_warp", "box_prism2_warp"):
         nodes, cells = (make_coax_hex2(**opt) if kind == "coax_hex2"
