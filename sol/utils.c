@@ -51,6 +51,10 @@ void monitor2(FILE *fp, int nthread)
 		fprintf(fp, "Mesh = %s (unstructured, mixed element types)\n", MeshFile);
 		fprintf(fp, "Nodes = %lld, Tetrahedra = %d, Hexahedra = %d, Prisms = %d, "
 			"Pyramids = %d\n", (long long)nnode, NTet, NHex, NPrism, NPyr);
+		if (MeshRaisedElem > 0) {
+			fprintf(fp, "Mixed orders : %d elements of order %d and up raised to order %d (%d nodes added)\n",
+				MeshRaisedElem, MeshRaisedFrom, TetOrder, MeshRaisedNode);
+		}
 	}
 	else if (MeshMode && (MeshElem == MESHELEM_PYR)) {
 		fprintf(fp, "Mesh = %s (unstructured, 5-node pyramids)\n", MeshFile);
@@ -61,6 +65,10 @@ void monitor2(FILE *fp, int nthread)
 		fprintf(fp, "Mesh = %s (unstructured, %d-node prisms)\n", MeshFile, PrismNen);
 		fprintf(fp, "Nodes = %lld, Prisms = %d, Triangles = %d, Quadrilaterals = %d\n",
 			(long long)nnode, NPrism, NTri, NQuad);
+		if (MeshRaisedElem > 0) {
+			fprintf(fp, "Mixed orders : %d elements of order %d and up raised to order %d (%d nodes added)\n",
+				MeshRaisedElem, MeshRaisedFrom, TetOrder, MeshRaisedNode);
+		}
 	}
 	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
 		fprintf(fp, "Mesh = %s (unstructured, %d-node %s hexahedra)\n", MeshFile,
@@ -68,6 +76,10 @@ void monitor2(FILE *fp, int nthread)
 			       : (HexNen == 64) ? "tricubic" : (HexNen == 125) ? "triquartic" : (HexNen == 216) ? "triquintic" : "triquadratic"));
 		fprintf(fp, "Nodes = %lld, Hexahedra = %d, Quadrilaterals = %d\n",
 			(long long)nnode, NHex, NQuad);
+		if (MeshRaisedElem > 0) {
+			fprintf(fp, "Mixed orders : %d elements of order %d and up raised to order %d (%d nodes added)\n",
+				MeshRaisedElem, MeshRaisedFrom, TetOrder, MeshRaisedNode);
+		}
 	}
 	else if (MeshMode && (MeshDim == 2)) {
 		fprintf(fp, "Mesh = %s (unstructured 2-D cross-section, %s triangles)\n", MeshFile,

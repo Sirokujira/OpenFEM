@@ -76,11 +76,26 @@ static int read_nodes(FILE *fp, int32_t **idmap, int32_t *maxid)
 
 // 要素の格納は 2.2 と 4.1 で共通 (読み方だけが違う)
 
-// 最初の四面体と次数の違う四面体 (elem_finish の ho_raise で最高次数に上げる)
+// 最初の同じ種別の要素と節点数の違う四面体・六面体・角柱 (elem_finish の ho_raise で最高次数に上げる)
 static int PendN = 0, PendCap = 0;
-static int *PendOrd = NULL, *PendTag = NULL;
-static int32_t *PendNd = NULL;		// [TET_NMAX * PendN] gmsh の局所の並び
+static int *PendKind = NULL, *PendNen = NULL, *PendTag = NULL;	// 種別 (MESHELEM_TET / HEX / PRISM)、節点数
+static int32_t *PendNd = NULL;		// [ELEM_NMAX * PendN] gmsh の局所の並び
 static int ho_raise(void);
+static void ho_pend(int kind, int nen, int tag, const int32_t *nd)
+{
+	if (PendN == PendCap) {
+		PendCap = ((PendCap > 0) ? (2 * PendCap) : 256);
+		PendKind = (int *)realloc(PendKind, (size_t)PendCap * sizeof(int));
+		PendNen = (int *)realloc(PendNen, (size_t)PendCap * sizeof(int));
+		PendTag = (int *)realloc(PendTag, (size_t)PendCap * sizeof(int));
+		PendNd = (int32_t *)realloc(PendNd, (size_t)PendCap * ELEM_NMAX * sizeof(int32_t));
+	}
+	PendKind[PendN] = kind;
+	PendNen[PendN] = nen;
+	PendTag[PendN] = tag;
+	for (int l = 0; l < nen; l++) PendNd[((size_t)PendN * ELEM_NMAX) + l] = nd[l];
+	PendN++;
+}
 
 static void elem_reset(void)
 {
@@ -88,6 +103,7 @@ static void elem_reset(void)
 	MeshRaisedElem = 0;
 	MeshRaisedNode = 0;
 	MeshRaisedFrom = 0;
+	MeshRaisedKinds = 0;
 	NTet = 0;
 	NTri = 0;
 	Tet = NULL;
@@ -153,9 +169,9 @@ static int elem_store(int type, int tag, const int32_t *nd)
 		const int hn = ((type == 5) ? 8 : (type == 12) ? 27 : (type == 92) ? 64 : (type == 93) ? 125 : (type == 94) ? 216 : 20);
 		if (HexNen == 0) HexNen = hn;
 		if (HexNen != hn) {
-			printf("*** mesh : mixed hexahedron orders (%d-node after %d-node)\n",
-				hn, HexNen);
-			return 1;
+			// 節点数の違う六面体 : 取っておき、読み終えてから最高次数に上げる (ho_raise)
+			ho_pend(MESHELEM_HEX, hn, tag, nd);
+			return 0;
 		}
 		if (NHex % ARRAY_INC == 0) {
 			Hex = (int32_t *)realloc(Hex, (size_t)(NHex + ARRAY_INC) * 8 * sizeof(int32_t));
@@ -177,9 +193,9 @@ static int elem_store(int type, int tag, const int32_t *nd)
 		const int pn = ((type == 6) ? 6 : (type == 13) ? 18 : (type == 90) ? 40 : (type == 91) ? 75 : (type == 106) ? 126 : 15);
 		if (PrismNen == 0) PrismNen = pn;
 		if (PrismNen != pn) {
-			printf("*** mesh : mixed prism orders (%d-node after %d-node)\n",
-				pn, PrismNen);
-			return 1;
+			// 節点数の違う角柱 : 取っておき、読み終えてから最高次数に上げる (ho_raise)
+			ho_pend(MESHELEM_PRISM, pn, tag, nd);
+			return 0;
 		}
 		if (NPrism % ARRAY_INC == 0) {
 			Prism = (int32_t *)realloc(Prism, (size_t)(NPrism + ARRAY_INC) * 6 * sizeof(int32_t));
@@ -232,17 +248,7 @@ static int elem_store(int type, int tag, const int32_t *nd)
 		if (TetOrder == 0) TetOrder = order;
 		if (TetOrder != order) {
 			// 次数の違う四面体 : 取っておき、読み終えてから全部を最高次数に上げる (ho_raise)
-			if (PendN == PendCap) {
-				PendCap = ((PendCap > 0) ? (2 * PendCap) : 256);
-				PendOrd = (int *)realloc(PendOrd, (size_t)PendCap * sizeof(int));
-				PendTag = (int *)realloc(PendTag, (size_t)PendCap * sizeof(int));
-				PendNd = (int32_t *)realloc(PendNd, (size_t)PendCap * TET_NMAX * sizeof(int32_t));
-			}
-			const int nn = (((order + 1) * (order + 2) * (order + 3)) / 6);
-			PendOrd[PendN] = order;
-			PendTag[PendN] = tag;
-			for (int l = 0; l < nn; l++) PendNd[((size_t)PendN * TET_NMAX) + l] = nd[l];
-			PendN++;
+			ho_pend(MESHELEM_TET, (((order + 1) * (order + 2) * (order + 3)) / 6), tag, nd);
 			return 0;
 		}
 		if (NTet % ARRAY_INC == 0) {
@@ -2377,275 +2383,6 @@ static double lagr_tet(int p, const int a[4], const double lam[4], double dn[4])
 }
 
 
-// ---- 次数の違う四面体 / 三角形が面を共有する格子 ----
-//
-// 読み込んだ後で、低い次数の四面体 (と三角形) を格子の最高次数 P に上げる。P 次の節点は多重指数 a (Σa = P) で、
-// 辺・面の上の節点は「全体の頂点番号と a の成分の組 (頂点番号の昇順)」を鍵にして隣の要素と共有する (隣が元から
-// P 次ならその節点をそのまま使う)。新しい節点の位置は元の要素の q 次の等パラメトリック写像 Σ N^q_b(a/P) x_b なので、
-// 低い次数の要素の形は変わらない (曲がった面を隣と共有するときは隣の P 次の節点に合わせる)。場の空間はどこでも P 次に
-// なり、面で適合する (遷移要素は要らない)。元の q 次の節点で P 次の位置と一致するもの (a/P = b/q) はそのまま使う。
-// 使われなくなった節点は行列の行が空になるだけ (ソルバーはそのまま解ける)。
-typedef struct { int32_t k[7]; int32_t id; } hokey_t;
-static hokey_t *HoTab = NULL;
-static size_t HoCap = 0;
-
-static size_t ho_hash(const int32_t k[7])
-{
-	uint64_t h = 1469598103934665603ULL;
-	for (int i = 0; i < 7; i++) { h ^= (uint64_t)(uint32_t)k[i]; h *= 1099511628211ULL; }
-	return (size_t)(h & (uint64_t)(HoCap - 1));
-}
-
-// 頂点 g[nv] と多重指数 a[nv] から鍵 (a > 0 の組を頂点番号の昇順、k[0] = 組の数) を作り、組の数を返す
-static int ho_key(const int32_t *g, const int *a, int nv, int32_t k[7])
-{
-	int32_t pg[4];
-	int pa[4], n = 0;
-	for (int v = 0; v < nv; v++) {
-		if (a[v] > 0) { pg[n] = g[v]; pa[n] = a[v]; n++; }
-	}
-	for (int x = 1; x < n; x++) {
-		for (int y = x; (y > 0) && (pg[y] < pg[y - 1]); y--) {
-			const int32_t tg = pg[y]; pg[y] = pg[y - 1]; pg[y - 1] = tg;
-			const int ta = pa[y]; pa[y] = pa[y - 1]; pa[y - 1] = ta;
-		}
-	}
-	for (int i = 0; i < 7; i++) k[i] = -1;
-	k[0] = n;
-	for (int m = 0; (m < n) && (m < 3); m++) { k[1 + (2 * m)] = pg[m]; k[2 + (2 * m)] = pa[m]; }
-	return n;
-}
-
-// 鍵を引く (無ければ id を登録して id を返す。id < 0 なら引くだけで、無ければ -1)
-static int32_t ho_find(const int32_t k[7], int32_t id)
-{
-	size_t h = ho_hash(k);
-	for (;;) {
-		hokey_t *e = &HoTab[h];
-		if (e->id < 0) {
-			if (id >= 0) {
-				for (int i = 0; i < 7; i++) e->k[i] = k[i];
-				e->id = id;
-			}
-			return id;
-		}
-		int same = 1;
-		for (int i = 0; i < 7; i++) same &= (e->k[i] == k[i]);
-		if (same) return e->id;
-		h = (h + 1) & (HoCap - 1);
-	}
-}
-
-static int HoNodeCap = 0;
-static int32_t ho_new_node(const double x[3])
-{
-	if (NNode >= HoNodeCap) {
-		HoNodeCap = ((HoNodeCap > NNode) ? HoNodeCap : NNode) * 2 + 64;
-		Xp = (double *)realloc(Xp, (size_t)HoNodeCap * sizeof(double));
-		Yp = (double *)realloc(Yp, (size_t)HoNodeCap * sizeof(double));
-		Zp = (double *)realloc(Zp, (size_t)HoNodeCap * sizeof(double));
-	}
-	Xp[NNode] = x[0]; Yp[NNode] = x[1]; Zp[NNode] = x[2];
-	MeshRaisedNode++;
-	return NNode++;
-}
-
-// q 次の要素 (頂点 nv = 4 : 四面体 / 3 : 三角形、節点 nd は gmsh の並び) を P 次に上げた節点 out[]。
-// reg = 1 なら P 次の要素の節点を登録するだけ (out は使わない)
-static void ho_elem(int nv, int q, const int32_t *nd, int P, int32_t *out, int reg)
-{
-	int aq[TET_NMAX][4], ap[TET_NMAX][4];
-	int nq, np;
-	if (nv == 4) { nq = tet_rule(q, aq); np = tet_rule(P, ap); }
-	else {
-		int t3[TRI_NMAX][3];
-		nq = tri_rule(q, t3);
-		for (int i = 0; i < nq; i++) { aq[i][0] = t3[i][0]; aq[i][1] = t3[i][1]; aq[i][2] = t3[i][2]; aq[i][3] = 0; }
-		np = tri_rule(P, t3);
-		for (int i = 0; i < np; i++) { ap[i][0] = t3[i][0]; ap[i][1] = t3[i][1]; ap[i][2] = t3[i][2]; ap[i][3] = 0; }
-	}
-	for (int i = 0; i < np; i++) {
-		int32_t k[7];
-		const int cnt = ho_key(nd, ap[i], nv, k);
-		if (cnt == 1) {
-			if (!reg) {
-				for (int v = 0; v < nv; v++) {
-					if (ap[i][v] > 0) out[i] = nd[v];
-				}
-			}
-			continue;
-		}
-		const int inner = (cnt == nv);		// 要素の内部 (三角形の面の内部も、その三角形だけのもの)
-		if (reg) {
-			if (!inner || (nv == 3)) (void)ho_find(k, nd[i]);
-			continue;
-		}
-		int32_t id = (inner && (nv == 4)) ? -1 : ho_find(k, -1);
-		if (id < 0) {
-			// 元の q 次の節点で同じ位置のもの (a / P = b / q)
-			for (int j = 0; (j < nq) && (id < 0); j++) {
-				int eq = 1;
-				for (int v = 0; v < 4; v++) eq &= ((aq[j][v] * P) == (ap[i][v] * q));
-				if (eq) id = nd[j];
-			}
-		}
-		if (id < 0) {
-			double lam[4] = {0, 0, 0, 0}, x[3] = {0, 0, 0};
-			for (int v = 0; v < nv; v++) lam[v] = (double)ap[i][v] / P;
-			for (int b = 0; b < nq; b++) {
-				double dn[4];
-				const double w = ((q == 1) ? lam[aq[b][0] ? 0 : aq[b][1] ? 1 : aq[b][2] ? 2 : 3] : lagr_tet(q, aq[b], lam, dn));
-				x[0] += w * Xp[nd[b]]; x[1] += w * Yp[nd[b]]; x[2] += w * Zp[nd[b]];
-			}
-			id = ho_new_node(x);
-		}
-		if (!(inner && (nv == 4))) (void)ho_find(k, id);
-		out[i] = id;
-	}
-}
-
-// 三角形 t の次数 (1〜7)
-static int ho_tri_order(int t)
-{
-	const int t3 = tri3_order(&Tri3[t * TRI_HO_MAX]);
-	return ((t3 >= 3) ? t3 : (Tri2[t * 3] != Tri[t * 3]) ? 2 : 1);
-}
-
-// 三角形 t の節点 (gmsh の並び)
-static int ho_tri_nodes(int t, int32_t *nd)
-{
-	const int q = ho_tri_order(t);
-	for (int l = 0; l < 3; l++) nd[l] = Tri[(t * 3) + l];
-	if (q == 2) { for (int l = 0; l < 3; l++) nd[3 + l] = Tri2[(t * 3) + l]; }
-	if (q >= 3) {
-		const int nho = (((q + 1) * (q + 2)) / 2) - 3;
-		for (int l = 0; l < nho; l++) nd[3 + l] = Tri3[(t * TRI_HO_MAX) + l];
-	}
-	return q;
-}
-
-// 三角形 t を P 次の節点 nd で書き直す
-static void ho_tri_store(int t, int P, const int32_t *nd)
-{
-	const int nho = (P >= 3) ? ((((P + 1) * (P + 2)) / 2) - 3) : 0;
-	for (int l = 0; l < 3; l++) Tri2[(t * 3) + l] = ((P == 2) ? nd[3 + l] : nd[l]);
-	for (int l = 0; l < TRI_HO_MAX; l++) Tri3[(t * TRI_HO_MAX) + l] = ((l < nho) ? nd[3 + l] : -1);
-}
-
-static int ho_raise(void)
-{
-	const int dim3 = ((NTet + PendN) > 0);
-	int P = TetOrder, qmin = TetOrder;
-	for (int i = 0; i < PendN; i++) {
-		if (PendOrd[i] > P) P = PendOrd[i];
-		if (PendOrd[i] < qmin) qmin = PendOrd[i];
-	}
-	int trimix = 0;
-	if (!dim3) {
-		// 断面 2 次元 : 三角形が要素
-		if (NTri < 1) return 0;
-		P = qmin = ho_tri_order(0);
-		for (int t = 1; t < NTri; t++) {
-			const int q = ho_tri_order(t);
-			if (q > P) P = q;
-			if (q < qmin) qmin = q;
-		}
-		if (P == qmin) return 0;
-		trimix = 1;
-	}
-	else if (PendN == 0) return 0;
-	if ((NHex + NPrism + NPyr) > 0) {
-		printf("%s\n", "*** mesh : tetrahedra of different orders are supported only in a tetrahedral mesh "
-			"(no hexahedra / prisms / pyramids)");
-		return 1;
-	}
-	if (dim3) {
-		for (int t = 0; t < NTri; t++) {
-			if (ho_tri_order(t) > P) {
-				printf("*** mesh : a triangle is order %d but the highest tetrahedron order is %d\n", ho_tri_order(t), P);
-				return 1;
-			}
-		}
-	}
-	const int ntall = NTet + PendN;
-	const int nep = (dim3 ? (((P + 1) * (P + 2) * (P + 3)) / 6) : (((P + 1) * (P + 2)) / 2));
-	size_t want = ((size_t)(dim3 ? ntall : 0) + (size_t)NTri) * (size_t)nep * 2 + 64;
-	HoCap = 64;
-	while (HoCap < want) HoCap *= 2;
-	HoTab = (hokey_t *)malloc(HoCap * sizeof(hokey_t));
-	if (HoTab == NULL) { printf("%s\n", "*** mesh : out of memory raising the element orders"); return 1; }
-	for (size_t h = 0; h < HoCap; h++) HoTab[h].id = -1;
-	HoNodeCap = NNode;
-	const int nn0 = NNode;
-	int32_t nd[TET_NMAX], out[TET_NMAX];
-
-	// 元の四面体の節点 (e < NTet は格納済み、それ以降は取っておいたもの)
-#define HO_TET(e, q, nd) do { \
-	if ((e) < NTet) { \
-		(q) = TetOrder; \
-		for (int l_ = 0; l_ < 4; l_++) (nd)[l_] = Tet[((e) * 4) + l_]; \
-		if (TetOrder == 2) { for (int l_ = 0; l_ < 6; l_++) (nd)[4 + l_] = Tet2[((e) * 6) + l_]; } \
-		if (TetOrder >= 3) { for (int l_ = 0; l_ < ((((TetOrder + 1) * (TetOrder + 2) * (TetOrder + 3)) / 6) - 4); l_++) (nd)[4 + l_] = Tet3[((e) * TET_HO_MAX) + l_]; } \
-	} else { \
-		const int i_ = (e) - NTet; \
-		(q) = PendOrd[i_]; \
-		for (int l_ = 0; l_ < (((PendOrd[i_] + 1) * (PendOrd[i_] + 2) * (PendOrd[i_] + 3)) / 6); l_++) (nd)[l_] = PendNd[((size_t)i_ * TET_NMAX) + l_]; \
-	} } while (0)
-
-	// (1) 元から P 次の要素の節点を登録する
-	if (dim3) {
-		for (int e = 0; e < ntall; e++) {
-			int q;
-			HO_TET(e, q, nd);
-			if (q == P) ho_elem(4, P, nd, P, NULL, 1);
-		}
-	}
-	for (int t = 0; t < NTri; t++) {
-		if (ho_tri_nodes(t, nd) == P) ho_elem(3, P, nd, P, NULL, 1);
-	}
-
-	// (2) 四面体を P 次に上げて格納し直す
-	int nraise = 0;
-	if (dim3) {
-		int32_t *nt = (int32_t *)malloc((size_t)ntall * 4 * sizeof(int32_t));
-		int *ntag = (int *)malloc((size_t)ntall * sizeof(int));
-		const int w = ((P == 2) ? 6 : TET_HO_MAX);
-		int32_t *nh = (int32_t *)malloc((size_t)ntall * w * sizeof(int32_t));
-		for (int e = 0; e < ntall; e++) {
-			int q;
-			HO_TET(e, q, nd);
-			if (q == P) { for (int l = 0; l < nep; l++) out[l] = nd[l]; }
-			else { ho_elem(4, q, nd, P, out, 0); nraise++; }
-			for (int l = 0; l < 4; l++) nt[(e * 4) + l] = out[l];
-			for (int l = 0; l < w; l++) nh[((size_t)e * w) + l] = (((4 + l) < nep) ? out[4 + l] : -1);
-			ntag[e] = ((e < NTet) ? TetTag[e] : PendTag[e - NTet]);
-		}
-		free(Tet); free(TetTag); free(Tet2); free(Tet3);
-		Tet = nt; TetTag = ntag; Tet2 = NULL; Tet3 = NULL;
-		if (P == 2) Tet2 = nh;
-		else Tet3 = nh;
-		NTet = ntall;
-		TetOrder = P;
-		free(PendOrd); free(PendTag); free(PendNd);
-		PendOrd = PendTag = NULL; PendNd = NULL; PendN = PendCap = 0;
-	}
-#undef HO_TET
-
-	// (3) 低い次数の三角形を P 次に上げる (3 次元では電極の面、断面 2 次元では要素)
-	for (int t = 0; t < NTri; t++) {
-		const int q = ho_tri_nodes(t, nd);
-		if (q == P) continue;
-		ho_elem(3, q, nd, P, out, 0);
-		ho_tri_store(t, P, out);
-		if (trimix) nraise++;
-	}
-	if (trimix) TetOrder = P;
-	free(HoTab); HoTab = NULL; HoCap = 0;
-	MeshRaisedElem = nraise;
-	MeshRaisedFrom = qmin;
-	(void)nn0;
-	return 0;
-}
 
 
 // 20 節点四面体の積分点 1 点での ∇N_i と det J (tet10_grad の 3 次版)。
@@ -3675,6 +3412,622 @@ static void prism2_nval(int nen, double u, double v, double ze, double nv[PRISMP
 		else if (t < 3) nv[a] = (lam[t] * ((2 * lam[t]) - 1) * (1 + (z * ze)) / 2) - (lam[t] * (1 - (ze * ze)) / 2);
 		else nv[a] = 2 * lam[TRI6_ED[t - 3][0]] * lam[TRI6_ED[t - 3][1]] * (1 + (z * ze));
 	}
+}
+
+
+// ---- 次数の違う要素が面を共有する格子 (四面体・六面体・角柱・三角形) ----
+//
+// 読み込んだ後で、低い次数の要素を格子の最高次数 P に上げる (P = 2 の六面体・角柱は完全 Lagrange の 27 / 18 節点。
+// serendipity と完全の混在もこれで適合する)。P 次の節点は参照座標の格子位置で表し、辺・面の上の節点は全体の頂点番号で
+// 決まる鍵で隣の要素と共有する (隣が元から P 次ならその節点をそのまま使う):
+//   辺 : 両端の (頂点番号, 重み) の組 (頂点番号の昇順。重みの和が P)
+//   三角形の面 : 3 頂点の (頂点番号, 重心座標 x P) の組 (昇順)
+//   四角形の面 : 4 頂点の番号 (昇順) と、最小番号の角を原点・その隣で番号の小さい方を第 1 軸にした格子位置 (s, t)
+// 新しい節点の位置は元の要素の q 次の等パラメトリック写像の上 (低い次数の要素の形は変わらない)。元の q 次の節点で
+// 位置の一致するもの (参照座標が同じ) は使い回す。使われなくなった節点は行列の行が空になるだけ。
+typedef struct { int32_t k[9]; int32_t id; } hokey_t;
+static hokey_t *HoTab = NULL;
+static size_t HoCap = 0;
+
+static size_t ho_hash(const int32_t k[9])
+{
+	uint64_t h = 1469598103934665603ULL;
+	for (int i = 0; i < 9; i++) { h ^= (uint64_t)(uint32_t)k[i]; h *= 1099511628211ULL; }
+	return (size_t)(h & (uint64_t)(HoCap - 1));
+}
+
+// 頂点 g[nv] と重み a[nv] から鍵 (a > 0 の組を頂点番号の昇順、k[0] = 組の数) を作り、組の数を返す
+static int ho_key(const int32_t *g, const int *a, int nv, int32_t k[9])
+{
+	int32_t pg[4];
+	int pa[4], n = 0;
+	for (int v = 0; v < nv; v++) {
+		if (a[v] > 0) { pg[n] = g[v]; pa[n] = a[v]; n++; }
+	}
+	for (int x = 1; x < n; x++) {
+		for (int y = x; (y > 0) && (pg[y] < pg[y - 1]); y--) {
+			const int32_t tg = pg[y]; pg[y] = pg[y - 1]; pg[y - 1] = tg;
+			const int ta = pa[y]; pa[y] = pa[y - 1]; pa[y - 1] = ta;
+		}
+	}
+	for (int i = 0; i < 9; i++) k[i] = -1;
+	k[0] = n;
+	for (int m = 0; (m < n) && (m < 3); m++) { k[1 + (2 * m)] = pg[m]; k[2 + (2 * m)] = pa[m]; }
+	return n;
+}
+
+// 四角形の面の内部の節点の鍵。角 c[4] は面の格子 (u, v) の (0,0) (P,0) (P,P) (0,P) の頂点番号
+static void ho_qkey(const int32_t c[4], int u, int v, int P, int32_t k[9])
+{
+	static const int cu[4] = {0, 1, 1, 0}, cv[4] = {0, 0, 1, 1};
+	int o = 0;
+	for (int m = 1; m < 4; m++) {
+		if (c[m] < c[o]) o = m;
+	}
+	const int ou = cu[o] * P, ov = cv[o] * P;
+	int nu = -1, nv = -1;
+	for (int m = 0; m < 4; m++) {
+		if ((cu[m] != cu[o]) && (cv[m] == cv[o])) nu = m;
+		if ((cu[m] == cu[o]) && (cv[m] != cv[o])) nv = m;
+	}
+	const int du = ((u > ou) ? (u - ou) : (ou - u)), dv = ((v > ov) ? (v - ov) : (ov - v));
+	int32_t sg[4] = {c[0], c[1], c[2], c[3]};
+	for (int x = 1; x < 4; x++) {
+		for (int y = x; (y > 0) && (sg[y] < sg[y - 1]); y--) { const int32_t t = sg[y]; sg[y] = sg[y - 1]; sg[y - 1] = t; }
+	}
+	k[0] = 9;
+	for (int m = 0; m < 4; m++) k[1 + m] = sg[m];
+	k[5] = ((c[nu] < c[nv]) ? du : dv);
+	k[6] = ((c[nu] < c[nv]) ? dv : du);
+	k[7] = k[8] = -1;
+}
+
+// 鍵を引く (無ければ id を登録して id を返す。id < 0 なら引くだけで、無ければ -1)
+static int32_t ho_find(const int32_t k[9], int32_t id)
+{
+	size_t h = ho_hash(k);
+	for (;;) {
+		hokey_t *e = &HoTab[h];
+		if (e->id < 0) {
+			if (id >= 0) {
+				for (int i = 0; i < 9; i++) e->k[i] = k[i];
+				e->id = id;
+			}
+			return id;
+		}
+		int same = 1;
+		for (int i = 0; i < 9; i++) same &= (e->k[i] == k[i]);
+		if (same) return e->id;
+		h = (h + 1) & (HoCap - 1);
+	}
+}
+
+static int HoNodeCap = 0, HoMiss = 0;
+static int32_t ho_new_node(const double x[3])
+{
+	if (NNode >= HoNodeCap) {
+		HoNodeCap = ((HoNodeCap > NNode) ? HoNodeCap : NNode) * 2 + 64;
+		Xp = (double *)realloc(Xp, (size_t)HoNodeCap * sizeof(double));
+		Yp = (double *)realloc(Yp, (size_t)HoNodeCap * sizeof(double));
+		Zp = (double *)realloc(Zp, (size_t)HoNodeCap * sizeof(double));
+	}
+	Xp[NNode] = x[0]; Yp[NNode] = x[1]; Zp[NNode] = x[2];
+	MeshRaisedNode++;
+	return NNode++;
+}
+
+// 要素の種別と節点数から次数 (六面体・角柱の 20 / 15 節点は 2)
+static int ho_kind_order(int kind, int nen)
+{
+	if (kind == MESHELEM_HEX) return ((nen == 8) ? 1 : (nen <= 27) ? 2 : hexp_order(nen));
+	if (kind == MESHELEM_PRISM) return ((nen == 6) ? 1 : (nen <= 18) ? 2 : prismp_order(nen));
+	for (int p = 1; p <= 7; p++) {
+		if ((((p + 1) * (p + 2) * (p + 3)) / 6) == nen) return p;
+	}
+	return 0;
+}
+
+// 種別 kind・節点数 nen の要素の局所節点 a の参照座標の格子位置 d[4] (次数 q = ho_kind_order):
+// 四面体 = 重心座標 x q、六面体 = (i, j, k) ∈ [0, q]、角柱 = (三角形の重心座標 x q, ζ の格子位置)
+static void ho_desc(int kind, int nen, int a, int d[4])
+{
+	const int q = ho_kind_order(kind, nen);
+	d[0] = d[1] = d[2] = d[3] = 0;
+	if (kind == MESHELEM_HEX) {
+		if (q >= 3) {
+			const signed char *ix = hexp_i(q, a);
+			for (int c = 0; c < 3; c++) d[c] = ix[c];
+		}
+		else {
+			for (int c = 0; c < 3; c++) d[c] = ((q == 2) ? (HEX2_XI[a][c] + 1) : ((HEX2_XI[a][c] + 1) / 2));
+		}
+		return;
+	}
+	if (kind == MESHELEM_PRISM) {
+		if (q >= 3) {
+			const signed char *al = prismp_a(q, a);
+			for (int c = 0; c < 4; c++) d[c] = al[c];
+			return;
+		}
+		const int t = PRISM2_T[a], z = PRISM2_Z[a];
+		if (q == 2) {
+			if (t < 3) d[t] = 2;
+			else { d[TRI6_ED[t - 3][0]] = 1; d[TRI6_ED[t - 3][1]] = 1; }
+			d[3] = z + 1;
+		}
+		else {
+			d[t] = 1;
+			d[3] = (z + 1) / 2;
+		}
+		return;
+	}
+	int ta[TET_NMAX][4];
+	tet_rule(q, ta);
+	for (int c = 0; c < 4; c++) d[c] = ta[a][c];
+}
+
+// 次数 P の目標の要素の節点数 (六面体・角柱の 2 次は完全 Lagrange)
+static int ho_target_nen(int kind, int P)
+{
+	if (kind == MESHELEM_HEX) return ((P == 2) ? 27 : ((P + 1) * (P + 1) * (P + 1)));
+	if (kind == MESHELEM_PRISM) return ((P == 2) ? 18 : ((((P + 1) * (P + 2)) / 2) * (P + 1)));
+	return (((P + 1) * (P + 2) * (P + 3)) / 6);
+}
+
+// 頂点 nd[] の要素の P 次の格子位置 d の節点の分類 : 戻り値 0 = 頂点 (*vid)、1 = 鍵つき (辺・面、k)、2 = 内部
+static int ho_classify(int kind, const int32_t *nd, const int d[4], int P, int32_t *vid, int32_t k[9])
+{
+	if (kind == MESHELEM_HEX) {
+		int nb = 0, fr[3], nf = 0;
+		for (int c = 0; c < 3; c++) {
+			if ((d[c] == 0) || (d[c] == P)) nb++;
+			else fr[nf++] = c;
+		}
+		// 格子位置 g (各成分 0 / 1) の角の頂点番号
+#define HO_HC(g0, g1, g2) nd[((g0) == 0) ? (((g1) == 0) ? (((g2) == 0) ? 0 : 4) : (((g2) == 0) ? 3 : 7)) : (((g1) == 0) ? (((g2) == 0) ? 1 : 5) : (((g2) == 0) ? 2 : 6))]
+		if (nb == 3) { *vid = HO_HC(d[0] / P, d[1] / P, d[2] / P); return 0; }
+		if (nb == 2) {
+			int ca[3], cb[3];
+			for (int c = 0; c < 3; c++) { ca[c] = d[c] / P; cb[c] = d[c] / P; }
+			ca[fr[0]] = 0; cb[fr[0]] = 1;
+			const int32_t g[2] = {HO_HC(ca[0], ca[1], ca[2]), HO_HC(cb[0], cb[1], cb[2])};
+			const int w[2] = {P - d[fr[0]], d[fr[0]]};
+			ho_key(g, w, 2, k);
+			return 1;
+		}
+		if (nb == 1) {
+			int fx = 0;
+			for (int c = 0; c < 3; c++) {
+				if ((c != fr[0]) && (c != fr[1])) fx = c;
+			}
+			int g4[4][3];
+			static const int qu[4] = {0, 1, 1, 0}, qv[4] = {0, 0, 1, 1};
+			int32_t cg[4];
+			for (int m = 0; m < 4; m++) {
+				g4[m][fx] = d[fx] / P;
+				g4[m][fr[0]] = qu[m];
+				g4[m][fr[1]] = qv[m];
+				cg[m] = HO_HC(g4[m][0], g4[m][1], g4[m][2]);
+			}
+#undef HO_HC
+			ho_qkey(cg, d[fr[0]], d[fr[1]], P, k);
+			return 1;
+		}
+		return 2;
+	}
+	if (kind == MESHELEM_PRISM) {
+		int nz = 0, iz[3];
+		for (int c = 0; c < 3; c++) {
+			if (d[c] > 0) iz[nz++] = c;
+		}
+		const int kb = ((d[3] == 0) || (d[3] == P));
+		const int lv = ((d[3] == P) ? 3 : 0);
+		if ((nz == 1) && kb) { *vid = nd[lv + iz[0]]; return 0; }
+		if (nz == 1) {
+			const int32_t g[2] = {nd[iz[0]], nd[3 + iz[0]]};
+			const int w[2] = {P - d[3], d[3]};
+			ho_key(g, w, 2, k);
+			return 1;
+		}
+		if ((nz == 2) && kb) {
+			const int32_t g[2] = {nd[lv + iz[0]], nd[lv + iz[1]]};
+			const int w[2] = {d[iz[0]], d[iz[1]]};
+			ho_key(g, w, 2, k);
+			return 1;
+		}
+		if (nz == 2) {
+			// 側面 : 三角形の辺 (i, j) x ζ。u = j の重み (i -> j)、v = ζ の格子位置
+			const int i = iz[0], j = iz[1];
+			const int32_t cg[4] = {nd[i], nd[j], nd[3 + j], nd[3 + i]};
+			ho_qkey(cg, d[j], d[3], P, k);
+			return 1;
+		}
+		if (kb) {
+			const int32_t g[3] = {nd[lv], nd[lv + 1], nd[lv + 2]};
+			ho_key(g, d, 3, k);
+			return 1;
+		}
+		return 2;
+	}
+	const int cnt = ho_key(nd, d, 4, k);
+	if (cnt == 1) {
+		for (int v = 0; v < 4; v++) {
+			if (d[v] > 0) *vid = nd[v];
+		}
+		return 0;
+	}
+	return ((cnt == 4) ? 2 : 1);
+}
+
+// 要素 (種別 kind、節点数 nen、節点 nd は gmsh の並び) の参照座標 d (次数 P の格子位置) の物理座標 (元の写像)
+static void ho_position(int kind, int nen, const int32_t *nd, const int d[4], int P, double x[3])
+{
+	double nv[ELEM_NMAX];
+	if (kind == MESHELEM_HEX) {
+		const double xi[3] = {-1 + ((2.0 * d[0]) / P), -1 + ((2.0 * d[1]) / P), -1 + ((2.0 * d[2]) / P)};
+		if (nen == 8) {
+			for (int a = 0; a < 8; a++) {
+				nv[a] = (1 + (HEX2_XI[a][0] * xi[0])) * (1 + (HEX2_XI[a][1] * xi[1])) * (1 + (HEX2_XI[a][2] * xi[2])) / 8;
+			}
+		}
+		else hex2_nval(nen, xi[0], xi[1], xi[2], nv);
+	}
+	else if (kind == MESHELEM_PRISM) {
+		const double u = (double)d[1] / P, v = (double)d[2] / P, ze = -1 + ((2.0 * d[3]) / P);
+		if (nen == 6) {
+			const double lam[3] = {1 - u - v, u, v};
+			for (int a = 0; a < 6; a++) nv[a] = lam[PRISM2_T[a]] * (1 + (PRISM2_Z[a] * ze)) / 2;
+		}
+		else prism2_nval(nen, u, v, ze, nv);
+	}
+	else {
+		const int q = ho_kind_order(kind, nen);
+		double lam[4];
+		for (int v = 0; v < 4; v++) lam[v] = (double)d[v] / P;
+		int aq[TET_NMAX][4];
+		tet_rule(q, aq);		// 新しい節点を作るときだけ呼ばれる
+		for (int b = 0; b < nen; b++) {
+			double dn[4];
+			nv[b] = ((q == 1) ? lam[b] : lagr_tet(q, aq[b], lam, dn));
+		}
+	}
+	x[0] = x[1] = x[2] = 0;
+	for (int b = 0; b < nen; b++) {
+		x[0] += nv[b] * Xp[nd[b]]; x[1] += nv[b] * Yp[nd[b]]; x[2] += nv[b] * Zp[nd[b]];
+	}
+}
+
+// 要素を P 次に上げた節点 out[] (目標の並び)。reg = 1 なら目標と同じ形の要素の節点を登録するだけ
+static void ho_desc_all(int kind, int nen, int (*d)[4])
+{
+	if (kind == MESHELEM_TET) {
+		tet_rule(ho_kind_order(kind, nen), d);
+		return;
+	}
+	for (int a = 0; a < nen; a++) ho_desc(kind, nen, a, d[a]);
+}
+
+static void ho_elem3(int kind, int nen, const int32_t *nd, int P, int32_t *out, int reg)
+{
+	const int nt = ho_target_nen(kind, P), q = ho_kind_order(kind, nen);
+	int dp[ELEM_NMAX][4], dq[ELEM_NMAX][4];
+	ho_desc_all(kind, nt, dp);
+	if (!reg) ho_desc_all(kind, nen, dq);
+	for (int i = 0; i < nt; i++) {
+		const int *d = dp[i];
+		int32_t vid = -1, k[9];
+		const int cl = ho_classify(kind, nd, d, P, &vid, k);
+		if (reg) {
+			if (cl == 1) (void)ho_find(k, nd[i]);
+			continue;
+		}
+		if (cl == 0) { out[i] = vid; continue; }
+		int32_t id = ((cl == 1) ? ho_find(k, -1) : -1);
+		if (id < 0) {
+			// 元の q 次の節点で同じ参照座標のもの
+			for (int j = 0; (j < nen) && (id < 0); j++) {
+				int eq = 1;
+				for (int c = 0; c < 4; c++) eq &= ((dq[j][c] * P) == (d[c] * q));
+				if (eq) id = nd[j];
+			}
+		}
+		if (id < 0) {
+			double x[3];
+			ho_position(kind, nen, nd, d, P, x);
+			id = ho_new_node(x);
+		}
+		if (cl == 1) (void)ho_find(k, id);
+		out[i] = id;
+	}
+}
+
+// 三角形 t の次数 (1〜7)
+static int ho_tri_order(int t)
+{
+	const int t3 = tri3_order(&Tri3[t * TRI_HO_MAX]);
+	return ((t3 >= 3) ? t3 : (Tri2[t * 3] != Tri[t * 3]) ? 2 : 1);
+}
+
+// 三角形 t の節点 (gmsh の並び)
+static int ho_tri_nodes(int t, int32_t *nd)
+{
+	const int q = ho_tri_order(t);
+	for (int l = 0; l < 3; l++) nd[l] = Tri[(t * 3) + l];
+	if (q == 2) { for (int l = 0; l < 3; l++) nd[3 + l] = Tri2[(t * 3) + l]; }
+	if (q >= 3) {
+		const int nho = (((q + 1) * (q + 2)) / 2) - 3;
+		for (int l = 0; l < nho; l++) nd[3 + l] = Tri3[(t * TRI_HO_MAX) + l];
+	}
+	return q;
+}
+
+// 三角形 (q 次、節点 nd) を P 次に上げた節点 out[] (gmsh の並び)。reg = 1 なら登録するだけ。
+// 断面 2 次元では三角形が要素 (内部の節点は自分だけのもの)、3 次元では要素の面 (内部も面の鍵で引く)
+static void ho_tri(int q, const int32_t *nd, int P, int32_t *out, int reg, int dim2)
+{
+	int aq[TRI_NMAX][3], ap[TRI_NMAX][3];
+	const int nq = tri_rule(q, aq), np = tri_rule(P, ap);
+	for (int i = 0; i < np; i++) {
+		int32_t k[9];
+		const int cnt = ho_key(nd, ap[i], 3, k);
+		if (cnt == 1) {
+			if (!reg) {
+				for (int v = 0; v < 3; v++) {
+					if (ap[i][v] > 0) out[i] = nd[v];
+				}
+			}
+			continue;
+		}
+		const int own = (dim2 && (cnt == 3));		// 断面 2 次元の三角形の内部
+		if (reg) {
+			if (!own) (void)ho_find(k, nd[i]);
+			continue;
+		}
+		int32_t id = (own ? -1 : ho_find(k, -1));
+		if ((id < 0) && !dim2) { HoMiss = 1; out[i] = -1; continue; }
+		for (int j = 0; (j < nq) && (id < 0); j++) {
+			if (((aq[j][0] * P) == (ap[i][0] * q)) && ((aq[j][1] * P) == (ap[i][1] * q)) && ((aq[j][2] * P) == (ap[i][2] * q))) id = nd[j];
+		}
+		if (id < 0) {
+			double lam[4] = {(double)ap[i][0] / P, (double)ap[i][1] / P, (double)ap[i][2] / P, 0}, x[3] = {0, 0, 0};
+			for (int b = 0; b < nq; b++) {
+				double dn[4];
+				const int a4[4] = {aq[b][0], aq[b][1], aq[b][2], 0};
+				const double w = ((q == 1) ? lam[b] : lagr_tet(q, a4, lam, dn));
+				x[0] += w * Xp[nd[b]]; x[1] += w * Yp[nd[b]]; x[2] += w * Zp[nd[b]];
+			}
+			id = ho_new_node(x);
+		}
+		if (!own) (void)ho_find(k, id);
+		out[i] = id;
+	}
+}
+
+// 三角形 t を P 次の節点 nd で書き直す
+static void ho_tri_store(int t, int P, const int32_t *nd)
+{
+	const int nho = (P >= 3) ? ((((P + 1) * (P + 2)) / 2) - 3) : 0;
+	for (int l = 0; l < 3; l++) Tri2[(t * 3) + l] = ((P == 2) ? nd[3 + l] : nd[l]);
+	for (int l = 0; l < TRI_HO_MAX; l++) Tri3[(t * TRI_HO_MAX) + l] = ((l < nho) ? nd[3 + l] : -1);
+}
+
+// 格納済みの 3 次元要素 (種別 kind の e 番目) の節点数と節点
+static int ho_stored(int kind, int e, int32_t *nd)
+{
+	if (kind == MESHELEM_HEX) {
+		for (int l = 0; l < 8; l++) nd[l] = Hex[(e * 8) + l];
+		for (int l = 8; l < HexNen; l++) nd[l] = Hex2[((size_t)e * HEX2_W) + (l - 8)];
+		return HexNen;
+	}
+	if (kind == MESHELEM_PRISM) {
+		for (int l = 0; l < 6; l++) nd[l] = Prism[(e * 6) + l];
+		for (int l = 6; l < PrismNen; l++) nd[l] = Prism2[((size_t)e * PRISM2_W) + (l - 6)];
+		return PrismNen;
+	}
+	const int nen = (((TetOrder + 1) * (TetOrder + 2) * (TetOrder + 3)) / 6);
+	for (int l = 0; l < 4; l++) nd[l] = Tet[(e * 4) + l];
+	if (TetOrder == 2) { for (int l = 0; l < 6; l++) nd[4 + l] = Tet2[(e * 6) + l]; }
+	if (TetOrder >= 3) { for (int l = 0; l < (nen - 4); l++) nd[4 + l] = Tet3[((size_t)e * TET_HO_MAX) + l]; }
+	return ((TetOrder >= 1) ? nen : 4);
+}
+
+static int ho_raise(void)
+{
+	static const int KINDS[3] = {MESHELEM_TET, MESHELEM_HEX, MESHELEM_PRISM};
+	const int nst[3] = {NTet, NHex, NPrism};
+	const int dim3 = ((NTet + NHex + NPrism + PendN) > 0);
+	int32_t nd[ELEM_NMAX], out[ELEM_NMAX];
+	int P = 0, qmin = 99, ser = 0, cpl = 0, onlytet = 1;
+	int nall[3] = {0, 0, 0};
+	for (int s = 0; s < 3; s++) {
+		const int nen0 = ((s == 0) ? (((TetOrder + 1) * (TetOrder + 2) * (TetOrder + 3)) / 6) : (s == 1) ? HexNen : PrismNen);
+		nall[s] = nst[s];
+		if (nst[s] > 0) {
+			const int q = ho_kind_order(KINDS[s], nen0);
+			if (q > P) P = q;
+			if (q < qmin) qmin = q;
+			if ((s > 0) && (nen0 == ((s == 1) ? 20 : 15))) ser = 1;
+			if ((s > 0) && (nen0 == ((s == 1) ? 27 : 18))) cpl = 1;
+			if (s > 0) onlytet = 0;
+		}
+	}
+	for (int i = 0; i < PendN; i++) {
+		const int q = ho_kind_order(PendKind[i], PendNen[i]);
+		const int s = ((PendKind[i] == MESHELEM_HEX) ? 1 : (PendKind[i] == MESHELEM_PRISM) ? 2 : 0);
+		nall[s]++;
+		if (q > P) P = q;
+		if (q < qmin) qmin = q;
+		if ((s > 0) && (PendNen[i] == ((s == 1) ? 20 : 15))) ser = 1;
+		if ((s > 0) && (PendNen[i] == ((s == 1) ? 27 : 18))) cpl = 1;
+		if (s > 0) onlytet = 0;
+	}
+	int trimix = 0;
+	if (!dim3) {
+		// 断面 2 次元 : 三角形が要素
+		if (NTri < 1) return 0;
+		P = qmin = ho_tri_order(0);
+		for (int t = 1; t < NTri; t++) {
+			const int q = ho_tri_order(t);
+			if (q > P) P = q;
+			if (q < qmin) qmin = q;
+		}
+		if (P == qmin) return 0;
+		trimix = 1;
+	}
+	else if ((PendN == 0) && (P == qmin) && !(ser && cpl)) return 0;
+	if (dim3 && (NPyr > 0)) {
+		printf("%s\n", "*** mesh : elements of different orders cannot be raised in a mesh with pyramids "
+			"(pyramids are first order only)");
+		return 1;
+	}
+	if (dim3) {
+		for (int t = 0; t < NTri; t++) {
+			if (ho_tri_order(t) > P) {
+				printf("*** mesh : a triangle is order %d but the highest %s order is %d\n", ho_tri_order(t),
+					(onlytet ? "tetrahedron" : "element"), P);
+				return 1;
+			}
+		}
+	}
+	size_t want = (size_t)NTri * TRI_NMAX * 2 + 64;
+	for (int s = 0; s < 3; s++) want += (size_t)nall[s] * (size_t)ho_target_nen(KINDS[s], P) * 2;
+	HoCap = 64;
+	while (HoCap < want) HoCap *= 2;
+	HoTab = (hokey_t *)malloc(HoCap * sizeof(hokey_t));
+	if (HoTab == NULL) { printf("%s\n", "*** mesh : out of memory raising the element orders"); return 1; }
+	for (size_t h = 0; h < HoCap; h++) HoTab[h].id = -1;
+	HoNodeCap = NNode;
+
+	// (1) 元から目標の形 (P 次、六面体・角柱は 2 次なら完全) の要素と三角形の節点を登録する
+	if (dim3) {
+		for (int s = 0; s < 3; s++) {
+			const int kind = KINDS[s], nt = ho_target_nen(kind, P);
+			for (int e = 0; e < nst[s]; e++) {
+				if (ho_stored(kind, e, nd) == nt) ho_elem3(kind, nt, nd, P, NULL, 1);
+			}
+		}
+		for (int i = 0; i < PendN; i++) {
+			if (PendNen[i] == ho_target_nen(PendKind[i], P)) ho_elem3(PendKind[i], PendNen[i], &PendNd[(size_t)i * ELEM_NMAX], P, NULL, 1);
+		}
+	}
+	// 断面 2 次元の三角形は要素なので、元から P 次のものを登録する。3 次元の三角形・四角形は電極の面で、(3) (4) で要素の
+	// 面の節点に置き換える (**次数が目標と同じ面も**。面の下の要素が上げられたとき、元の面の節点は要素のものでない。
+	// 実測 : 曲がった同軸の 9 節点四角形の電極を残したら内側の電極が「穴だらけ」になり C' −16%)
+	if (!dim3) {
+		for (int t = 0; t < NTri; t++) {
+			if (ho_tri_nodes(t, nd) == P) ho_tri(P, nd, P, NULL, 1, 1);
+		}
+	}
+
+	// (2) 3 次元の要素を目標の形に上げて格納し直す (種別ごとに、格納済み -> 取っておいたもの の順)
+	int nraise = 0;
+	if (dim3) {
+		for (int s = 0; s < 3; s++) {
+			const int kind = KINDS[s], nt = ho_target_nen(kind, P);
+			if (nall[s] == 0) continue;
+			const int nv = ((kind == MESHELEM_HEX) ? 8 : (kind == MESHELEM_PRISM) ? 6 : 4);
+			const int w = ((kind == MESHELEM_HEX) ? HEX2_W : (kind == MESHELEM_PRISM) ? PRISM2_W : ((P == 2) ? 6 : TET_HO_MAX));
+			int32_t *nvx = (int32_t *)malloc((size_t)nall[s] * nv * sizeof(int32_t));
+			int *ntag = (int *)malloc((size_t)nall[s] * sizeof(int));
+			int32_t *nh = (int32_t *)malloc((size_t)nall[s] * w * sizeof(int32_t));
+			int m = 0;
+			for (int pass = 0; pass < 2; pass++) {
+				const int cnt = ((pass == 0) ? nst[s] : PendN);
+				for (int e = 0; e < cnt; e++) {
+					int nen, tag;
+					const int32_t *src;
+					if (pass == 0) {
+						nen = ho_stored(kind, e, nd);
+						src = nd;
+						tag = ((kind == MESHELEM_HEX) ? HexTag[e] : (kind == MESHELEM_PRISM) ? PrismTag[e] : TetTag[e]);
+					}
+					else {
+						if (PendKind[e] != kind) continue;
+						nen = PendNen[e];
+						src = &PendNd[(size_t)e * ELEM_NMAX];
+						tag = PendTag[e];
+					}
+					if (nen == nt) { for (int l = 0; l < nt; l++) out[l] = src[l]; }
+					else { ho_elem3(kind, nen, src, P, out, 0); nraise++; }
+					for (int l = 0; l < nv; l++) nvx[(m * nv) + l] = out[l];
+					for (int l = 0; l < w; l++) nh[((size_t)m * w) + l] = (((nv + l) < nt) ? out[nv + l] : -1);
+					ntag[m] = tag;
+					m++;
+				}
+			}
+			if (kind == MESHELEM_HEX) {
+				free(Hex); free(HexTag); free(Hex2);
+				Hex = nvx; HexTag = ntag; Hex2 = nh; NHex = m; HexNen = nt;
+			}
+			else if (kind == MESHELEM_PRISM) {
+				free(Prism); free(PrismTag); free(Prism2);
+				Prism = nvx; PrismTag = ntag; Prism2 = nh; NPrism = m; PrismNen = nt;
+			}
+			else {
+				free(Tet); free(TetTag); free(Tet2); free(Tet3);
+				Tet = nvx; TetTag = ntag; Tet2 = NULL; Tet3 = NULL;
+				if (P == 2) Tet2 = nh;
+				else Tet3 = nh;
+				NTet = m;
+			}
+		}
+		TetOrder = P;
+		free(PendKind); free(PendNen); free(PendTag); free(PendNd);
+		PendKind = PendNen = PendTag = NULL; PendNd = NULL; PendN = PendCap = 0;
+	}
+
+	// (3) 三角形を P 次に (断面 2 次元では低い次数の要素を上げる。3 次元では電極の面をすべて要素の面の節点にする)
+	HoMiss = 0;
+	for (int t = 0; t < NTri; t++) {
+		const int q = ho_tri_nodes(t, nd);
+		if ((q == P) && !dim3) continue;
+		ho_tri(q, nd, P, out, 0, !dim3);
+		if (HoMiss) {
+			printf("*** mesh : triangle %d is not a face of any element (cannot raise it to order %d)\n", t + 1, P);
+			free(HoTab); HoTab = NULL; HoCap = 0;
+			return 1;
+		}
+		ho_tri_store(t, P, out);
+		if (trimix) nraise++;
+	}
+	if (trimix) TetOrder = P;
+
+	// (4) 四角形 (電極の面) の節点をすべて要素の面の節点で埋め直す (固定する節点の集合なので並びは問わない)
+	if (dim3 && (NQuad > 0)) {
+		for (int t = 0; t < NQuad; t++) {
+			const int32_t c[4] = {Quad[t * 4], Quad[(t * 4) + 1], Quad[(t * 4) + 2], Quad[(t * 4) + 3]};
+			int l = 0;
+			for (int u = 0; u <= P; u++) {
+				for (int v = 0; v <= P; v++) {
+					const int bu = ((u == 0) || (u == P)), bv = ((v == 0) || (v == P));
+					if (bu && bv) continue;
+					int32_t k[9];
+					if (bu || bv) {
+						// 辺 : (u, v) の辺の両端
+						int32_t g[2];
+						int wv[2];
+						if (bv) { g[0] = c[(v == 0) ? 0 : 3]; g[1] = c[(v == 0) ? 1 : 2]; wv[0] = P - u; wv[1] = u; }
+						else { g[0] = c[(u == 0) ? 0 : 1]; g[1] = c[(u == 0) ? 3 : 2]; wv[0] = P - v; wv[1] = v; }
+						ho_key(g, wv, 2, k);
+					}
+					else ho_qkey(c, u, v, P, k);
+					const int32_t id = ho_find(k, -1);
+					if (id < 0) {
+						printf("*** mesh : quadrilateral %d is not a face of any element (cannot raise it to order %d)\n", t + 1, P);
+						free(HoTab); HoTab = NULL; HoCap = 0;
+						return 1;
+					}
+					Quad2[(t * QUAD2_W) + (l++)] = id;
+				}
+			}
+			while (l < QUAD2_W) Quad2[(t * QUAD2_W) + (l++)] = -1;
+		}
+	}
+	free(HoTab); HoTab = NULL; HoCap = 0;
+	MeshRaisedElem = nraise;
+	MeshRaisedFrom = qmin;
+	MeshRaisedKinds = !onlytet;
+	return 0;
 }
 
 

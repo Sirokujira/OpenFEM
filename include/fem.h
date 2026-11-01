@@ -215,7 +215,7 @@ EXTERN unsigned char *TetMat;	// [NTet] 材料番号
 //   Tet2 : (0,1) (1,2) (2,0) (3,0) (3,2) (3,1)
 //   Tri2 : (0,1) (1,2) (2,0)
 EXTERN int TetOrder;
-EXTERN int MeshRaisedElem, MeshRaisedNode, MeshRaisedFrom;	// 次数の違う要素を最高次数に上げた数 / 足した節点 / 元の最低次数
+EXTERN int MeshRaisedElem, MeshRaisedNode, MeshRaisedFrom, MeshRaisedKinds;	// 次数の違う要素を最高次数に上げた数 / 足した節点 / 元の最低次数
 EXTERN int32_t *Tet2;			// [6*NTet] 2 次のときのみ (1 次では NULL)
 EXTERN int32_t *Tri2;			// [3*NTri] 2 次のときのみ (1 次では NULL)
 // 四面体が 3 次 (20 節点) のとき Tet3 に頂点以外の 16 節点 (局所 4..19)、Tri3 に三角形の

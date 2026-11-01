@@ -517,7 +517,20 @@ fi
 awk '/^[0-9]+ 11 2 / && !done { print $1, 4, 2, $4, $5, $6, $7, $8, $9; done = 1; next } { print }' \
     "$SRC/box_p2.msh" > "$WORK/mixed.msh"
 sed 's/^mesh = .*/mesh = mixed.msh/' "$SRC/box_p2.ofe" > "$WORK/p2_mixed.ofe"
-mesh_reject "mixed element orders" p2_mixed.ofe
+#   次数の違う要素は最高次数に上げて解く ([mixed orders])。直線の要素なので上げると一様な 2 次と同じ離散問題になる
+mx_same() {	# mx_same <ラベル> <元の入力> <次数を混ぜた入力> : rlc.csv が一致し、ログに Mixed orders の行がある
+	rm -f "$WORK/rlc.csv"
+	(cd "$WORK" && "$OFE" -n 2 "$2" > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1)
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/mxs_a.csv" 2> /dev/null
+	rm -f "$WORK/rlc.csv"
+	(cd "$WORK" && "$OFE" -n 2 "$3" > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1)
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/mxs_b.csv" 2> /dev/null
+	if [ -s "$WORK/mxs_a.csv" ] && cmp -s "$WORK/mxs_a.csv" "$WORK/mxs_b.csv" && grep -q "^Mixed orders : " "$WORK/ofe.log"; then
+		echo "  $1 : raised to the highest order, rlc.csv identical to the uniform mesh -> OK"
+	else echo "  $1 : not raised, or differs from the uniform mesh -> NG" >&2; status=1; fi
+}
+cp "$SRC/box_p2.ofe" "$WORK/"
+mx_same "mixed element orders (one 4-node tetrahedron among 10-node ones)" box_p2.ofe p2_mixed.ofe
 # 四面体だけ 2 次で三角形が 1 次 (電極面の中間節点が固定されない)
 awk '/^[0-9]+ 9 2 / { print $1, 2, 2, $4, $5, $6, $7, $8; next } { print }' \
     "$SRC/box_p2.msh" > "$WORK/tri1.msh"
@@ -1636,7 +1649,8 @@ case "$res" in NG*) status=1 ;; esac
 awk '/^[0-9]+ 9 2 / && !done { print $1, 2, 2, $4, $5, $6, $7, $8; done = 1; next } { print }' \
     "$SRC/plate2d_p2.msh" > "$WORK/mix2d.msh"
 sed 's/^mesh = .*/mesh = mix2d.msh/' "$SRC/plate2d_p2.ofe" > "$WORK/p2mix.ofe"
-mesh_reject "mixed triangle orders in a 2-D mesh" p2mix.ofe
+cp "$SRC/plate2d_p2.ofe" "$WORK/"
+mx_same "mixed triangle orders in a 2-D mesh (one 3-node triangle among 6-node ones)" plate2d_p2.ofe p2mix.ofe
 
 # ---- 断面 2 次元の 3 次三角形 (10 節点、gmsh の tri10) ----
 #
@@ -1714,16 +1728,14 @@ res=$(awk '
 	      else { printf "OK" } }' "$WORK/ofe_field.vtk")
 echo "  VTK cells are vertex triangles (type 5, 3 nodes) : $res"
 case "$res" in NG*) status=1 ;; esac
-# (e) 次数の混在 (tri10 を 1 つだけ tri6 にする) は弾く
+# (e) 次数の混在 (tri10 を 1 つだけ頂点の tri3 にする) は 3 次に上げて解く。直線の三角形なので一様な 3 次と同じ離散問題
+#     (tri10 の先頭 6 節点を tri6 にすると辺の節点が 1/3 の位置の歪んだ要素になり、上げてもその形のままなので一致しない)
 awk '/^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 }
-	e && ($2 == 21) && !done { s = $1 " 9"; for (i = 3; i <= 3 + $3 + 6; i++) s = s " " $i; print s; done = 1; next } { print }' \
+	e && ($2 == 21) && !done { s = $1 " 2"; for (i = 3; i <= 3 + $3 + 3; i++) s = s " " $i; print s; done = 1; next } { print }' \
 	"$SRC/plate2d_p3.msh" > "$WORK/mix3d2.msh"
 sed 's/^mesh = .*/mesh = mix3d2.msh/' "$SRC/plate2d_p3.ofe" > "$WORK/p3mix.ofe"
-mesh_reject "mixed triangle orders (10-node + 6-node) in a 2-D mesh" p3mix.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 p3mix.ofe 2>&1 | grep -q "mixed triangle orders"); then
-	echo "  *** it was rejected for a different reason than the mixed orders" >&2
-	status=1
-fi
+cp "$SRC/plate2d_p3.ofe" "$WORK/"
+mx_same "mixed triangle orders in a 2-D mesh (one 3-node triangle among 10-node ones)" plate2d_p3.ofe p3mix.ofe
 
 # 異方性の μ。**B は ∇Az を 90 度回したものなので、ν を ∇Az にそのまま掛けると
 # 面内 2 成分を取り違える。** 等方性では一致するので等方性ケースでは検出できない。
@@ -3745,8 +3757,12 @@ th_reject "analysis E on an 84-node tetrahedral mesh" p6x_e.ofe "need a first-or
 #       一様な 2 次 +1.4e-4、1 次 −4.1e-3)。許容 5e-4。頂点だけから置く誤りは格子が裏返って弾かれる (実測)
 #   (c) 断面 2 次元 (plate2d_p3 の y < 0 を 1 次に落とす) : 直線の三角形なので上げた格子は一様な 3 次と同じ離散問題に
 #       なり、400 MHz の rlc.csv が一様な 3 次とバイト一致
-#   (d) 三角形が四面体の最高次数より高い、六面体と一緒に使う、は弾く
-echo "[mixed orders] tetrahedra / triangles of different orders sharing faces (raised to the highest order)"
+#   (d) 三角形が四面体の最高次数より高い、ピラミッドのある格子、は弾く
+#   (e) 六面体・角柱 (z の下半分を 1 次に落とす) : 六面体 1 -> 2 (27 節点)・1 -> 3・1 -> 4、角柱 1 -> 3 で C が全桁、P 次の場の
+#       恒等式。電極の四角形・三角形は要素の面の節点に置き直す (**目標と同じ次数の面も**。面の下の要素が上げられると元の面の
+#       節点は要素のものでない。実測 : 曲がった同軸の 9 節点の電極を残したら C' −16%)。種別の違う要素の次数の混在は [thermal
+#       mixed] の同軸 (角柱 + 六面体) でも見る
+echo "[mixed orders] elements of different orders sharing faces (raised to the highest order)"
 cp "$SRC/mesh_downgrade.awk" "$SRC/box_p2.msh" "$SRC/box_p3.msh" "$SRC/box_p4.msh" "$SRC/coax_p4.msh" "$SRC/plate2d_p3.msh" "$WORK/"
 mx_down() {	# mx_down <入力> <出力> <列> <しきい値> <四面体の型> <三角形の型> <1|2>
 	awk -v col="$3" -v xc="$4" -v tf="$5" -v ff="$6" -v to="$7" -f "$WORK/mesh_downgrade.awk" "$WORK/$1" > "$WORK/$2"
@@ -3787,14 +3803,31 @@ mx_down box_p4.msh mx_t1.msh 4 1e-4 30 -1 2
 mx_down mx_t1.msh mx_tri.msh 4 1 30 -1 1
 sed "s/^mesh = .*/mesh = mx_tri.msh/" "$SRC/box_p3.ofe" > "$WORK/mxr1.ofe"
 th_reject "mixed-order tetrahedra (1 and 2) with 15-node electrode triangles" mxr1.ofe "a triangle is order 4 but the highest tetrahedron order is 2"
-mx_down box_p2.msh mx_h0.msh 4 1e-4 11 9 1
-awk '/^\$Nodes/ { print; getline; n = $1; print n + 8; next }
-	/^\$EndNodes/ { for (i = 0; i < 8; i++) printf "%d %.6g %.6g %.6g\n", n + 1 + i, 5e-3 + (i % 2) * 1e-4, 5e-3 + (int(i / 2) % 2) * 1e-4, int(i / 4) * 1e-4; print; next }
+cp "$SRC/box_hexpyrtet.msh" "$SRC/box_hexpyrtet.ofe" "$WORK/"
+awk '/^\$Nodes/ { print; getline; n = $1; print n + 10; next }
+	/^\$EndNodes/ { for (i = 0; i < 10; i++) printf "%d %.6g %.6g %.6g\n", n + 1 + i, 5e-3 + (i == 1) * 1e-4, 5e-3 + (i == 2) * 1e-4, (i == 3) * 1e-4; print; next }
 	/^\$Elements/ { print; getline; m = $1; print m + 1; next }
-	/^\$EndElements/ { printf "%d 5 2 1 1 %d %d %d %d %d %d %d %d\n", m + 1, n + 1, n + 2, n + 4, n + 3, n + 5, n + 6, n + 8, n + 7; print; next }
-	{ print }' "$WORK/mx_h0.msh" > "$WORK/mx_hex.msh"
-sed "s/^mesh = .*/mesh = mx_hex.msh/" "$SRC/box_p3.ofe" > "$WORK/mxr2.ofe"
-th_reject "mixed-order tetrahedra with a hexahedron" mxr2.ofe "tetrahedra of different orders are supported only in a tetrahedral mesh"
+	/^\$EndElements/ { s = (m + 1) " 11 2 1 1"; for (i = 1; i <= 10; i++) s = s " " (n + i); print s; print; next }
+	{ print }' "$WORK/box_hexpyrtet.msh" > "$WORK/mx_pyr.msh"
+sed "s/^mesh = .*/mesh = mx_pyr.msh/" "$WORK/box_hexpyrtet.ofe" > "$WORK/mxr2.ofe"
+th_reject "elements of different orders with pyramids" mxr2.ofe "pyramids are first order only"
+for c in box_hex2:12:-1:10:hex:2:quadratic box_hex3:92:-1:36:hex:3:cubic box_hex4:93:-1:37:hex:4:quartic box_prism3:90:21:36:prism:3:cubic; do
+	IFS=: read -r m tf ff qf kd p fw <<EOF2
+$c
+EOF2
+	cp "$SRC/$m.msh" "$WORK/"
+	awk -v col=4 -v xc=1e-4 -v tf="$tf" -v ff="$ff" -v qf="$qf" -v kind="$kd" -v to=1 -f "$WORK/mesh_downgrade.awk" "$WORK/$m.msh" > "$WORK/mx_$m.msh"
+	sed -e "s/box_hex2.msh/mx_$m.msh/" -e "s/^analysis.*/analysis = C/" "$SRC/box_hex2.ofe" > "$WORK/mxh.ofe"
+	rm -f "$WORK/rlc.csv"
+	(cd "$WORK" && "$OFE" -n 2 mxh.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  mx_$m : the run failed -> NG" >&2; status=1; }
+	grep -q "^Mixed orders : [0-9]* elements of order 1 and up raised to order $p" "$WORK/ofe.log" || { echo "  mx_$m : not raised to order $p -> NG" >&2; status=1; }
+	compare "mx_$m ($kd, orders 1 and $p, interface across the field) : C (parallel plate) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+	sed -e "s/^analysis.*/analysis = P/" "$WORK/mxh.ofe" > "$WORK/mxhp.ofe"
+	(cd "$WORK" && "$OFE" -n 2 mxhp.ofe > /dev/null 2>&1)
+	if grep -q '^\*\*\*' "$WORK/ofe.log" || ! grep -q "$fw field : phi" "$WORK/ofe.log"; then
+		echo "  mx_$m (analysis P) : the order-$p field identity failed or did not run -> NG" >&2; status=1
+	else echo "  mx_$m (analysis P) : order-$p field identity on the raised mesh ($(awk -v w="$fw" '$1 == w && $2 == "field" { print $NF; exit }' "$WORK/ofe.log")) -> OK"; fi
+done
 
 # ---- 熱連成の六面体・角柱・ピラミッド (1 次、混在可) ----
 #
@@ -4389,14 +4422,19 @@ done
 # (d)
 awk '/^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 }
 	e && ($2 == 13) { s = $1 " 6"; for (i = 3; i <= 3 + $3 + 6; i++) s = s " " $i; print s; next } { print }' "$SRC/coaxmix2a.msh" > "$WORK/mxx_ord.msh"
-sed -e "s/coax_hex2.msh/mxx_ord.msh/" "$SRC/coax_hex2.ofe" > "$WORK/mxx_ord.ofe"
-mesh_reject "hex27 + prism6 (different orders)" mxx_ord.ofe
-(cd "$WORK" && "$OFE" -n 2 mxx_ord.ofe 2>&1 | grep -q "must have the same order") || { echo "  *** rejected for a different reason" >&2; status=1; }
+#     次数の違う種別は最高次数に上げる ([mixed orders])。角柱を 1 次に落とした同軸 : 角柱は 1 次の形のまま (内側の円が
+#     8 角形、面積の等しい半径 0.949 a で C' −4.6% の見積もり) なので許容 5% (実測 −3.6%)
+sed -e "s/coax_hex2.msh/mxx_ord.msh/" "$SRC/coax_hex2.ofe" | awk '/^analysis/{print "analysis = C"; next} {print}' > "$WORK/mxx_ord.ofe"
+rm -f "$WORK/rlc.csv"
+(cd "$WORK" && "$OFE" -n 2 mxx_ord.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  mxx_ord : the run failed -> NG" >&2; status=1; }
+grep -q "^Mixed orders : 16 elements of order 1 and up raised to order 2" "$WORK/ofe.log" || { echo "  hex27 + prism6 : the prisms were not raised -> NG" >&2; status=1; }
+compare "hex27 + prism6 raised to order 2 (prisms keep their first-order shape) : C' [F/m]" "$(value_of C)" "$cex" 5e-2
 awk '/^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 }
 	e && ($2 == 12) { s = $1 " 17"; for (i = 3; i <= 3 + $3 + 20; i++) s = s " " $i; print s; next } { print }' "$SRC/coaxmix2a.msh" > "$WORK/mxx_fam.msh"
-sed -e "s/coax_hex2.msh/mxx_fam.msh/" "$SRC/coax_hex2.ofe" > "$WORK/mxx_fam.ofe"
-mesh_reject "hex20 + prism18 (serendipity and complete)" mxx_fam.ofe
-(cd "$WORK" && "$OFE" -n 2 mxx_fam.ofe 2>&1 | grep -q "do not share conforming quadrilateral faces") || { echo "  *** rejected for a different reason" >&2; status=1; }
+#     serendipity と完全の混在も 27 節点に上げる : 27 節点の六面体から面心・体心を落とした格子を上げると元の格子に戻る
+sed -e "s/coax_hex2.msh/mxx_fam.msh/" "$SRC/coax_hex2.ofe" | awk '/^analysis/{print "analysis = C"; next} {print}' > "$WORK/mxx_fam.ofe"
+sed -e "s/coax_hex2.msh/coaxmix2a.msh/" "$SRC/coax_hex2.ofe" | awk '/^analysis/{print "analysis = C"; next} {print}' > "$WORK/mxx_fam0.ofe"
+mx_same "hex20 + prism18 (serendipity and complete) raised to hex27" mxx_fam0.ofe mxx_fam.ofe
 sed -e "s/coax_hex2.msh/coaxmixt2a.msh/" "$SRC/coax_hex2.ofe" > "$WORK/mxx_nc.ofe"
 mesh_reject "prism quadrilaterals covered by tetrahedron triangles (order 2)" mxx_nc.ofe
 (cd "$WORK" && "$OFE" -n 2 mxx_nc.ofe 2>&1 | grep -q "covered by triangular faces") || { echo "  *** rejected for a different reason" >&2; status=1; }
