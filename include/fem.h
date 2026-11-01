@@ -202,6 +202,11 @@ EXTERN unsigned char *TetMat;	// [NTet] 材料番号
 EXTERN int TetOrder;
 EXTERN int32_t *Tet2;			// [6*NTet] 2 次のときのみ (1 次では NULL)
 EXTERN int32_t *Tri2;			// [3*NTri] 2 次のときのみ (1 次では NULL)
+// 四面体が 3 次 (20 節点) のとき Tet3 に頂点以外の 16 節点 (局所 4..19)、Tri3 に三角形の
+// 頂点以外の 7 節点 (局所 3..9) が入る。並びは Gmsh の tet20 / tri10 (unstruct.c の
+// TET3_A / TRI3_A、gmsh の出力を分類した実測の表)。3 次でない三角形の Tri3 は -1
+EXTERN int32_t *Tet3;			// [16*NTet] 3 次のときのみ
+EXTERN int32_t *Tri3;			// [7*NTri] 常に確保 (3 次でない三角形は -1)
 // 辺 (3 次元渦電流の辺要素で使う)。辺は節点番号の小さい方から大きい方へ向ける
 EXTERN int NEdge;
 EXTERN int64_t *EdgePtr;		// [NNode+1] 節点 i を始点とする辺の範囲

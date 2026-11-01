@@ -184,10 +184,10 @@ void field_cell_grad(const double *u, int kind, double *v)
 				}
 			}
 			else {
-				double gn[10][3];
+				double gn[20][3];
 				int nen = 0;
 				if (!tet_grad_center(e, gn, &nen)) {
-					int32_t nd[10];
+					int32_t nd[20];
 					tet_nodes(e, nd);
 					for (int a = 0; a < nen; a++) {
 						const double ua = u[nd[a]];
@@ -286,7 +286,7 @@ static void write_grid(FILE *fp)
 		  / VTK_PYRAMID 14
 		*/
 		static const int g2v[6] = {0, 1, 2, 3, 5, 4};
-		const int p2 = (TetOrder >= 2);
+		const int p2 = (TetOrder == 2);
 		const int ne = elem3d_count();
 		fprintf(fp, "DATASET UNSTRUCTURED_GRID\n");
 		fprintf(fp, "POINTS %d double\n", NNode);
@@ -309,6 +309,7 @@ static void write_grid(FILE *fp)
 			const int kind = elem3d_kind(e);
 			if ((kind == MESHELEM_HEX) && (nen > 8)) nen = 8;
 			if ((kind == MESHELEM_PRISM) && (nen > 6)) nen = 6;
+			if ((kind == MESHELEM_TET) && (nen > 10)) nen = 4;	// 3 次は頂点セル
 			total += nen + 1;
 		}
 		fprintf(fp, "\nCELLS %d %lld\n", ne, (long long)total);
@@ -318,6 +319,9 @@ static void write_grid(FILE *fp)
 			const int kind = elem3d_kind(e);
 			if ((kind == MESHELEM_HEX) && (nen > 8)) nen = 8;
 			if ((kind == MESHELEM_PRISM) && (nen > 6)) nen = 6;
+			// 3 次 (20 節点) の四面体も頂点だけの 1 次セルにする (2 次の六面体と同じ理由 :
+			// VTK_LAGRANGE_TETRAHEDRON の節点の並びを手元のツールで検証できない)
+			if ((kind == MESHELEM_TET) && (nen > 10)) nen = 4;
 			fprintf(fp, "%d", nen);
 			if ((kind == MESHELEM_TET) && (nen == 10)) {
 				// VTK_QUADRATIC_TETRA は中間節点の最後の 2 つが Gmsh と逆

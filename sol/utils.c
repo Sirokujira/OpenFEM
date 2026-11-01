@@ -71,7 +71,7 @@ void monitor2(FILE *fp, int nthread)
 	}
 	else if (MeshMode) {
 		fprintf(fp, "Mesh = %s (unstructured, %s tetrahedra)\n", MeshFile,
-			((TetOrder >= 2) ? "10-node quadratic" : "4-node linear"));
+			((TetOrder == 3) ? "20-node cubic" : (TetOrder >= 2) ? "10-node quadratic" : "4-node linear"));
 		fprintf(fp, "Nodes = %lld, Tetrahedra = %d, Triangles = %d\n",
 			(long long)nnode, NTet, NTri);
 	}

@@ -209,6 +209,19 @@ static int setup_unstruct(void)
 		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh");
 		return 1;
 	}
+	// 20 節点の四面体は、組み立てで積分点の det J の符号が揃わない要素を飛ばすので
+	// (2 次と同じ経路)、黙って誤答にしないよう先に全要素を見て弾く
+	if ((MeshDim == 3) && (TetOrder == 3)) {
+		const double c1[6] = {1, 1, 1, 0, 0, 0};
+		for (int e = 0; e < NTet; e++) {
+			double ke[20][20], vol;
+			if (tet20_element(e, c1, ke, &vol)) {
+				printf("*** tetrahedron %d (20-node) is degenerate or inverted (det J changes "
+					"sign inside the element)\n", e + 1);
+				return 1;
+			}
+		}
+	}
 
 	if (MeshDim == 2) return setup_tri2d();
 
@@ -281,6 +294,11 @@ static int setup_unstruct(void)
 			for (int l = 0; l < 3; l++) {
 				NodeConductor[Tri[(t * 3) + l]] = (signed char)ElecCond[q];
 				NodeConductor[Tri2[(t * 3) + l]] = (signed char)ElecCond[q];
+			}
+			// 3 次 (10 節点) の三角形は辺の 6 節点と面心も固定する (-1 は「無い」)
+			for (int l = 0; l < 7; l++) {
+				const int32_t n3 = Tri3[(t * 7) + l];
+				if (n3 >= 0) NodeConductor[n3] = (signed char)ElecCond[q];
 			}
 		}
 	}
@@ -523,8 +541,8 @@ void memfree(void)
 	free(Geometry);
 	free(Conductor);
 	free(Xp); free(Yp); free(Zp);
-	free(Tet); free(TetTag); free(TetMat); free(Tet2);
-	free(Tri); free(TriTag); free(Tri2); free(TriMat); free(TriCond); free(TriArea);
+	free(Tet); free(TetTag); free(TetMat); free(Tet2); free(Tet3);
+	free(Tri); free(TriTag); free(Tri2); free(Tri3); free(TriMat); free(TriCond); free(TriArea);
 	free(Hex); free(HexTag); free(HexMat); free(Hex2);
 	free(Quad); free(QuadTag); free(Quad2);
 	free(Prism); free(PrismTag); free(PrismMat); free(Prism2);

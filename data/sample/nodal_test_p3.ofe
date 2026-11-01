@@ -1,0 +1,19 @@
+OpenFEM 1 0
+title = nodal element (P3) self test, anisotropic epsilon
+#
+# 3 次四面体の自己検証 (analysis = P)。直線要素の箱 (box_p3.msh、gmsh 製) で
+#   (a) K 1 = 0、(b) 1 次・(c) 2 次・(f) 3 次の φ で φᵀKφ = ∫(∇φ)ᵀε(∇φ) dV、
+#   (e) 重心の勾配、(d) 対称性
+# を機械精度で見る。**3 次特有の基底 (辺の 2 節点・面心) を検査できるのは (f) だけ**
+# (1 次・2 次の場は 2 次の基底でも厳密に表せる)。(f) の厳密値は解析的な ∇φ を
+# 別の積分則 (Duffy + 5 点) で積分したもので、要素行列 (4 点) と独立。
+#
+mesh = box_p3.msh
+material = 1.0 0.0
+anisoepsr = 2 5.0 3.5 2.5 0.8 0.6 1.3
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = P
+end

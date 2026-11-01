@@ -1,0 +1,17 @@
+OpenFEM 1 0
+title = parallel plate capacitor on a third-order (20-node) tetrahedral mesh
+#
+# 3 次四面体 (gmsh の tet20 / tri10) の求解の一式。格子は gmsh 4.15.2 が box_p3.geo
+# から作ったもの (-order 3)。平行平板の φ は 1 次なので C は閉形式
+# C = ε0 εr A / d = 1.77083756e-13 [F] に全桁一致する (電極の三角形の辺の 6 節点と
+# 面心まで固定できていること、20 節点の要素行列・行列のパターンの検査)。
+#
+mesh = box_p3.msh
+material = 4.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = C
+solver = 50000 2000 1e-13
+end

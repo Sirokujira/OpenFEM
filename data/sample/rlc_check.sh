@@ -3575,6 +3575,82 @@ awk '/^convectiontemptable/{print "convectiontemptable = 30 -1 100 1"; next} {pr
 	"$SRC/thermal_natconv.ofe" > "$WORK/thctx_neg.ofe"
 th_reject "convectiontemptable with a negative factor" thctx_neg.ofe "invalid convectiontemptable data"
 
+# ---- 3 次四面体 (20 節点、gmsh の tet20 / tri10) ----
+#
+# 局所節点の並びは gmsh 4.15.2 の出力を重心座標で分類した実測の表 (unstruct.c の
+# TET3_A)。形状関数はその多重指数から次数によらない Lagrange の式で作る。
+#   (a) 箱 (box_p3.msh) の平行平板 : C が閉形式に全桁一致 (φ が 1 次なので厳密)
+#   (b) 2.2 / 4.1 の ASCII とバイナリ : rlc.csv が完全一致 (型 29 / 21 の節点数表)
+#   (c) analysis = P : 3 次の φ の恒等式 (機械精度)。**3 次特有の基底を検査できるのは
+#       これだけ** (1 次・2 次の場は 2 次の基底でも厳密に表せる)
+#   (d) 曲がった同軸 : 3 次が h⁴ で収束すること (体積と C')。2 次に勝つことは
+#       assert しない (円の等間隔補間の面積誤差は 2 次も 3 次も h⁴、実測で 2 次の方が
+#       小さい。ここを取り違えると正しい実装が落ちる偽陽性になる)
+#   (e) 弾くべき入力 (理由の文字列まで)
+echo "[order-3 tet] 20-node tetrahedra (gmsh tet20 / tri10)"
+for m in "$SRC"/box_p3*.msh "$SRC"/coax_p3*.msh "$SRC"/tri10_2d.msh; do cp "$m" "$WORK/"; done
+run_case box_p3
+compare "C (tet20 box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+bin_same "order-3 tetrahedra, binary 2.2" box_p3.ofe box_p3_bin.msh box_p3_bin_22.msh
+bin_same "order-3 tetrahedra, binary 4.1" box_p3.ofe box_p3_bin.msh box_p3_bin_41.msh
+sed 's/^mesh = .*/mesh = box_p3_41.msh/' "$SRC/box_p3.ofe" > "$WORK/p3_41.ofe"
+(cd "$WORK" && "$OFE" -n 2 p3_41.ofe > /dev/null && "$OFE_POST" > /dev/null)
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/p3_41.csv"
+if cmp -s "$WORK/bm_a.csv" "$WORK/p3_41.csv"; then echo "  order-3 tetrahedra, ASCII 4.1 : identical -> OK"
+else echo "  order-3 tetrahedra, ASCII 4.1 : differ -> NG" >&2; status=1; fi
+run_case nodal_test_p3
+if grep -q "(f) cubic" "$WORK/ofe.log" && grep -q "result : passed" "$WORK/ofe.log"; then
+	echo "  P3 self test (cubic field identity, machine precision) : $(awk '/\(f\) cubic/ { print $NF; exit }' "$WORK/ofe.log") -> OK"
+else
+	echo "  P3 self test : the cubic-field identity was not run or failed -> NG" >&2
+	status=1
+fi
+# (d) 同軸 : 閉形式と比べ (h = 0.4mm で 0.032%、0.2mm で 0.0017%)、誤差比と体積の比が h⁴
+run_case coax_p3
+cp3=$(value_of C)
+compare "C (tet20 coax, h = 0.4 mm) [F/m]" "$cp3" 1.063417e-10 0.0005
+compare "L (tet20 coax, h = 0.4 mm) [H/m]" "$(value_of L)" 2.1972246e-07 0.0005
+sed 's/^mesh = .*/mesh = coax_p3f.msh/' "$SRC/coax_p3.ofe" > "$WORK/coax_p3f.ofe"
+(cd "$WORK" && "$OFE" -n 2 coax_p3f.ofe > /dev/null && "$OFE_POST" > /dev/null)
+cp3f=$(value_of C)
+compare "C (tet20 coax, h = 0.2 mm) [F/m]" "$cp3f" 1.063417e-10 0.0001
+res=$(awk -v a="$cp3" -v b="$cp3f" 'BEGIN { ce = 2 * atan2(0, -1) * 8.8541878128e-12 * 2.1 / log(3)
+	e1 = (a - ce) / ce; if (e1 < 0) e1 = -e1
+	e2 = (b - ce) / ce; if (e2 < 0) e2 = -e2
+	q = (e2 > 0) ? e1 / e2 : 0
+	printf "%s (err %.2e -> %.2e, ratio %.1f, h^4 = 16)", ((q > 12) && (q < 28)) ? "OK" : "NG", e1, e2, q }')
+echo "  tet20 coax, C' converges as h^4 (0.4 -> 0.2 mm) : $res"
+case "$res" in NG*) status=1 ;; esac
+for h in coax_p3 coax_p3f; do
+	sed -e "s/^mesh = .*/mesh = $h.msh/" -e 's/^analysis = .*/analysis = P/' -e '/^tline/d' \
+		"$SRC/coax_p3.ofe" > "$WORK/${h}_vol.ofe"
+	(cd "$WORK" && "$OFE" -n 2 "${h}_vol.ofe" > /dev/null 2>&1)
+	eval "v_$h=\$(awk '/integrated volume/ { print \$4; exit }' \"\$WORK/ofe.log\")"
+done
+res=$(awk -v a="$v_coax_p3" -v b="$v_coax_p3f" 'BEGIN { ve = atan2(0, -1) * (1.5e-3 ^ 2 - 0.5e-3 ^ 2) * 0.1e-3
+	e1 = (a - ve) / ve; if (e1 < 0) e1 = -e1
+	e2 = (b - ve) / ve; if (e2 < 0) e2 = -e2
+	q = (e2 > 0) ? e1 / e2 : 0
+	printf "%s (err %.2e -> %.2e, ratio %.1f)", ((e1 < 1e-4) && (q > 13) && (q < 19)) ? "OK" : "NG", e1, e2, q }')
+echo "  tet20 coax, isoparametric volume vs pi (b^2 - a^2) lz, h^4 : $res"
+case "$res" in NG*) status=1 ;; esac
+# (e) 弾くべき入力
+printf 'OpenFEM 1 0\ntitle = tri10 2-D\nmesh = tri10_2d.msh\nmaterial = 1.0 0\nregion = 1 2\nelectrode = 1 0\nelectrode = 1 1\nanalysis = M\ntline = X\nend\n' > "$WORK/p3x_2d.ofe"
+th_reject "10-node triangles in a 2-D (M / F) mesh" p3x_2d.ofe "10-node (third-order) triangles are supported only"
+sed 's/^analysis = .*/analysis = E/' "$SRC/box_p3.ofe" > "$WORK/p3x_e.ofe"
+th_reject "analysis E on a 20-node tetrahedral mesh" p3x_e.ofe "need a first-order mesh"
+awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 21) { s = $1 " 2"; for (i = 3; i <= 3 + $3 + 3; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p3.msh" > "$WORK/box_p3_tri3.msh"
+sed 's/^mesh = .*/mesh = box_p3_tri3.msh/' "$SRC/box_p3.ofe" > "$WORK/p3x_tri.ofe"
+th_reject "20-node tetrahedra with 3-node electrode triangles" p3x_tri.ofe "triangle is not"
+awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
+	/^analysis/{print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next} {print}' \
+	"$SRC/box_p3.ofe" > "$WORK/p3x_th.ofe"
+mesh_reject "thermal on a 20-node tetrahedral mesh" p3x_th.ofe
+if ! grep -q "linear tetrahedra only" "$WORK/ofe.log"; then
+	echo "  *** it was rejected for a different reason than the element order" >&2
+	status=1
+fi
+
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。
 # 警告が (a) 罠のケースで必ず出て (b) 正しいケースでは 1 件も出ないことを両方見る
@@ -3642,7 +3718,8 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
          thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
-         plate_line_bh_ac bar_air_bh thermal_tet thermal_ac thermal_natconv; do
+         plate_line_bh_ac bar_air_bh thermal_tet thermal_ac thermal_natconv \
+         box_p3 nodal_test_p3 coax_p3; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

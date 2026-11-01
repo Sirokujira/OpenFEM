@@ -27,7 +27,9 @@ int ingeometry(double, double, double, int, const double *, double);
 
 // unstruct.c
 int mesh_read(const char *);
-int tet_nodes(int, int32_t [10]);
+int tet_nodes(int, int32_t [20]);
+int tet_nen(void);
+int tet20_element(int, const double [6], double [20][20], double *);
 int hex_nodes(int, int32_t [27]);
 int prism_nodes(int, int32_t [18]);
 void crs_alloc_tet(crs_t *);
@@ -49,7 +51,7 @@ int prism2_grad_center(int, double [18][3], int *);
 int pyr_grad_center(int, double [5][3]);
 void assemble_tet(crs_t *, int);
 int tet10_element(int, const double [6], double [10][10], double *);
-int tet_grad_center(int, double [10][3], int *);
+int tet_grad_center(int, double [20][3], int *);
 int solve_nodal_test(FILE *);
 int tri_nodes(int, int32_t [6]);
 void tri_axes(int *, int *);

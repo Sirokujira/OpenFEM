@@ -83,6 +83,8 @@ static void elem_reset(void)
 	TriTag = NULL;
 	Tet2 = NULL;
 	Tri2 = NULL;
+	Tet3 = NULL;
+	Tri3 = NULL;
 	TetOrder = 0;			// 最初に出た四面体で決まる
 	NHex = 0;
 	Hex = NULL;
@@ -106,10 +108,11 @@ static void elem_reset(void)
 
 
 // 要素 1 個を格納する。type は Gmsh の要素型
-// (4/11 = 四面体、2/9 = 三角形、5 = 六面体、6 = 角柱、7 = ピラミッド、3 = 四角形)
+// (4/11/29 = 四面体、2/9/21 = 三角形、5 = 六面体、6 = 角柱、7 = ピラミッド、3 = 四角形)
 static int elem_store(int type, int tag, const int32_t *nd)
 {
-	const int order = ((type == 11) || (type == 9)) ? 2 : 1;
+	const int order = (((type == 11) || (type == 9)) ? 2
+	                 : ((type == 29) || (type == 21)) ? 3 : 1);
 
 	if ((type == 5) || (type == 12) || (type == 17)) {
 		// 六面体 (8 / 27 / 20 節点)。局所の並びは Gmsh のまま使う。
@@ -192,7 +195,7 @@ static int elem_store(int type, int tag, const int32_t *nd)
 		return 0;
 	}
 
-	if ((type == 4) || (type == 11)) {
+	if ((type == 4) || (type == 11) || (type == 29)) {
 		// 四面体。次数は最初の 1 個で決め、以後は混在を許さない
 		if (TetOrder == 0) TetOrder = order;
 		if (TetOrder != order) {
@@ -206,10 +209,16 @@ static int elem_store(int type, int tag, const int32_t *nd)
 			if (order == 2) {
 				Tet2 = (int32_t *)realloc(Tet2, (size_t)(NTet + ARRAY_INC) * 6 * sizeof(int32_t));
 			}
+			if (order == 3) {
+				Tet3 = (int32_t *)realloc(Tet3, (size_t)(NTet + ARRAY_INC) * 16 * sizeof(int32_t));
+			}
 		}
 		for (int l = 0; l < 4; l++) Tet[(NTet * 4) + l] = nd[l];
 		if (order == 2) {
 			for (int l = 0; l < 6; l++) Tet2[(NTet * 6) + l] = nd[4 + l];
+		}
+		if (order == 3) {
+			for (int l = 0; l < 16; l++) Tet3[(NTet * 16) + l] = nd[4 + l];
 		}
 		TetTag[NTet] = tag;
 		NTet++;
@@ -219,8 +228,14 @@ static int elem_store(int type, int tag, const int32_t *nd)
 			Tri = (int32_t *)realloc(Tri, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
 			TriTag = (int *)realloc(TriTag, (size_t)(NTri + ARRAY_INC) * sizeof(int));
 			Tri2 = (int32_t *)realloc(Tri2, (size_t)(NTri + ARRAY_INC) * 3 * sizeof(int32_t));
+			Tri3 = (int32_t *)realloc(Tri3, (size_t)(NTri + ARRAY_INC) * 7 * sizeof(int32_t));
 		}
 		for (int l = 0; l < 3; l++) Tri[(NTri * 3) + l] = nd[l];
+		// 3 次 (10 節点) の頂点以外の 7 節点。3 次でなければ -1 で埋める
+		// (realloc した領域は未初期化なので必ず 7 要素とも書くこと)
+		for (int l = 0; l < 7; l++) {
+			Tri3[(NTri * 7) + l] = ((order == 3) ? nd[3 + l] : -1);
+		}
 		// 1 次の三角形では中間節点が無いので頂点で埋める (Dirichlet の
 		// 塗り分けは重複しても同じ値になるので無害)
 		for (int l = 0; l < 3; l++) {
@@ -508,6 +523,24 @@ static int elem_finish(void)
 {
 	if (node_merge_check()) return 1;
 
+	// 3 次 (10 節点) の三角形は 20 節点の四面体の面としてだけ使う。四面体が 3 次でないのに
+	// 10 節点の三角形があると、その面内の 7 節点がどの要素にも属さず行列が特異になる。
+	// 断面 2 次元 (M / F) の 3 次三角形も未対応 (面内の基底と積分を組んでいない)
+	for (int t = 0; t < NTri; t++) {
+		if ((Tri3[t * 7] >= 0) && (TetOrder != 3)) {
+			printf("%s\n", "*** mesh : 10-node (third-order) triangles are supported only "
+				"as the faces of 20-node tetrahedra (no 2-D M / F, no mixing with other "
+				"orders)");
+			return 1;
+		}
+		if ((TetOrder == 3) && (Tri3[t * 7] < 0)) {
+			printf("%s\n", "*** mesh : the tetrahedra are order 3 but a triangle is not "
+				"(the electrode faces must be 10-node triangles; regenerate the mesh with "
+				"-order 3)");
+			return 1;
+		}
+	}
+
 	/*
 	3 次元の要素種別を決める。**混在 (四面体 + 六面体 + 角柱 + ピラミッド) を
 	許す。**
@@ -710,8 +743,8 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		const int off = 3 + ntag;
 
 		// 節点数 : 四面体 (型 4 / 11) と三角形 (型 2 / 9)
-		const int nn = ((type == 4) ? 4 : (type == 11) ? 10
-		              : (type == 2) ? 3 : (type == 9) ? 6
+		const int nn = ((type == 4) ? 4 : (type == 11) ? 10 : (type == 29) ? 20
+		              : (type == 2) ? 3 : (type == 9) ? 6 : (type == 21) ? 10
 		              : (type == 5) ? 8 : (type == 3) ? 4 : (type == 6) ? 6
 		              : (type == 7) ? 5
 		              : (type == 12) ? 27 : (type == 17) ? 20
@@ -882,8 +915,8 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		long dim = 0, tag = 0, type = 0, cnt = 0;
 		if (fscanf(fp, "%ld %ld %ld %ld", &dim, &tag, &type, &cnt) != 4) return 1;
 
-		const int nn = ((type == 4) ? 4 : (type == 11) ? 10
-		              : (type == 2) ? 3 : (type == 9) ? 6
+		const int nn = ((type == 4) ? 4 : (type == 11) ? 10 : (type == 29) ? 20
+		              : (type == 2) ? 3 : (type == 9) ? 6 : (type == 21) ? 10
 		              : (type == 5) ? 8 : (type == 3) ? 4 : (type == 6) ? 6
 		              : (type == 7) ? 5
 		              : (type == 12) ? 27 : (type == 17) ? 20
@@ -1058,6 +1091,7 @@ static int read_elements_bin22(FILE *fp, const int32_t *idmap, int32_t maxid)
 			return 1;
 		}
 		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9)
+		              || (type == 29) || (type == 21)
 		              || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 		              || (type == 12) || (type == 17) || (type == 13) || (type == 18)
 		              || (type == 10) || (type == 16));
@@ -1224,6 +1258,7 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		// 物理タグはエンティティ側にある (2.2 と違い要素には無い)
 		const int phys = ent_phys((int)dim, tag);
 		const int use = ((type == 4) || (type == 11) || (type == 2) || (type == 9)
+		              || (type == 29) || (type == 21)
 		              || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 		              || (type == 12) || (type == 17) || (type == 13) || (type == 18)
 		              || (type == 10) || (type == 16));
@@ -1452,15 +1487,26 @@ static int cmp_int32(const void *a, const void *b)
 }
 
 
-// 要素 e の局所節点をまとめて取り出す。戻り値は節点数 (1 次 4、2 次 10)。
-// 並びは Gmsh の tet10 と同じ (頂点 4 個のあと辺上の中間節点 6 個)
-int tet_nodes(int e, int32_t nd[10])
+// 要素 e の局所節点をまとめて取り出す。戻り値は節点数 (1 次 4、2 次 10、3 次 20)。
+// 並びは Gmsh の tet10 / tet20 と同じ (頂点 4 個のあと辺・面の節点)
+int tet_nodes(int e, int32_t nd[20])
 {
 	for (int l = 0; l < 4; l++) nd[l] = Tet[(e * 4) + l];
 	if (TetOrder < 2) return 4;
+	if (TetOrder == 3) {
+		for (int l = 0; l < 16; l++) nd[4 + l] = Tet3[(e * 16) + l];
+		return 20;
+	}
 	for (int l = 0; l < 6; l++) nd[4 + l] = Tet2[(e * 6) + l];
 
 	return 10;
+}
+
+
+// 四面体あたりの節点数 (行列のパターンの見積りに使う)
+int tet_nen(void)
+{
+	return ((TetOrder == 3) ? 20 : (TetOrder >= 2) ? 10 : 4);
 }
 
 
@@ -1649,7 +1695,7 @@ static int get_tet(int e, int32_t *nd)
 
 void crs_alloc_tet(crs_t *A)
 {
-	crs_alloc_conn(A, NTet, ((TetOrder >= 2) ? 10 : 4), get_tet);
+	crs_alloc_conn(A, NTet, tet_nen(), get_tet);
 }
 
 
@@ -1657,7 +1703,7 @@ void crs_alloc_tet(crs_t *A)
 void crs_alloc_elem3d(crs_t *A)
 {
 	// work バッファの見積りに使う要素あたりの最大節点数 (大きい分には無害)
-	int nenmax = ((TetOrder >= 2) ? 10 : 8);
+	int nenmax = ((TetOrder >= 2) ? tet_nen() : 8);
 	if (HexNen > nenmax) nenmax = HexNen;
 	if (PrismNen > nenmax) nenmax = PrismNen;
 	crs_alloc_conn(A, elem3d_count(), nenmax, elem3d_nodes);
@@ -1840,7 +1886,7 @@ static int tet10_grad(const int32_t nd[10], const double lam[4],
 // 要素 e の 10 節点要素行列 ke[10][10] と体積。戻り値 : 0 = 正常、1 = 退化
 int tet10_element(int e, const double c[6], double ke[10][10], double *vol)
 {
-	int32_t nd[10];
+	int32_t nd[20];
 	if (tet_nodes(e, nd) != 10) return 1;
 
 	double lam[NQTET][4], wq[NQTET];
@@ -1873,10 +1919,197 @@ int tet10_element(int e, const double c[6], double ke[10][10], double *vol)
 }
 
 
-// 要素の重心での ∇N_i (場の出力に使う。1 次では要素内一定なので同じ値)
-int tet_grad_center(int e, double gn[10][3], int *nen)
+// ---- 3 次四面体 (20 節点、等パラメトリック) ----
+//
+// 局所節点の並びは **gmsh 4.15.2 の出力を分類した実測の表** (多重指数 3λ)。
+// 暗記や文献の表は書き手と読み手が同じ誤解を共有し得るので使わない
+// (2 次の六面体・角柱と同じ方針)。表があれば形状関数は次数によらない式
+//   N_a(λ) = Π_v Π_{m=0}^{a_v - 1} (p λ_v - m) / (m + 1)       (Σ a_v = p)
+// で書ける (頂点 ½λ(3λ-1)(3λ-2)、辺 (9/2)λ_iλ_j(3λ_i-1)、面 27λ_iλ_jλ_k に一致)。
+// 積分は Duffy 変換 + 各方向 4 点 Gauss-Legendre (64 点)。∇N・∇N は λ の 4 次で、
+// (1-u)^2 の因子を含めて u の 6 次 -> 4 点則 (7 次まで厳密) で直線要素なら厳密。
+static const int TET3_A[20][4] = {
+	{3, 0, 0, 0}, {0, 3, 0, 0}, {0, 0, 3, 0}, {0, 0, 0, 3},
+	{2, 1, 0, 0}, {1, 2, 0, 0},		// 辺 (0,1)
+	{0, 2, 1, 0}, {0, 1, 2, 0},		// 辺 (1,2)
+	{1, 0, 2, 0}, {2, 0, 1, 0},		// 辺 (2,0)
+	{1, 0, 0, 2}, {2, 0, 0, 1},		// 辺 (3,0)
+	{0, 0, 1, 2}, {0, 0, 2, 1},		// 辺 (3,2)
+	{0, 1, 0, 2}, {0, 2, 0, 1},		// 辺 (3,1)
+	{1, 1, 1, 0}, {1, 1, 0, 1}, {1, 0, 1, 1}, {0, 1, 1, 1}	// 面
+};
+#define NQTET4 (64)
+
+
+// [0,1] の n 点 Gauss-Legendre (n = 3, 4, 5。3 点は 3 次の剛性には足りない : 変異解析用)
+static void gauss01(int n, double *x, double *w)
 {
-	int32_t nd[10];
+	if (n == 3) {
+		x[0] = 0.5 - (0.5 * 0.77459666924148337704);
+		x[1] = 0.5;
+		x[2] = 0.5 + (0.5 * 0.77459666924148337704);
+		w[0] = w[2] = 5.0 / 18;
+		w[1] = 8.0 / 18;
+		return;
+	}
+	if (n == 4) {
+		const double t[2] = {0.33998104358485626480, 0.86113631159405257522};
+		const double a[2] = {0.65214515486254614263, 0.34785484513745385737};
+		for (int k = 0; k < 2; k++) {
+			x[k] = 0.5 - (0.5 * t[1 - k]);
+			w[k] = 0.5 * a[1 - k];
+			x[3 - k] = 0.5 + (0.5 * t[1 - k]);
+			w[3 - k] = 0.5 * a[1 - k];
+		}
+		return;
+	}
+	{
+		const double t[3] = {0, 0.53846931010568309104, 0.90617984593866399280};
+		const double a[3] = {0.56888888888888888889, 0.47862867049936646804,
+		                     0.23692688505618908751};
+		x[2] = 0.5;
+		w[2] = 0.5 * a[0];
+		for (int k = 1; k < 3; k++) {
+			x[2 - k] = 0.5 - (0.5 * t[k]);
+			x[2 + k] = 0.5 + (0.5 * t[k]);
+			w[2 - k] = w[2 + k] = 0.5 * a[k];
+		}
+	}
+}
+
+
+// Duffy 変換 + 各方向 n 点 (n = 4 : 64 点、n = 5 : 125 点)。重みの合計は 1/6
+static int tet_quad_n(int n, double lam[][4], double *wq)
+{
+	double gp[5], gw[5];
+	gauss01(n, gp, gw);
+	int q = 0;
+	for (int a = 0; a < n; a++) {
+	for (int b = 0; b < n; b++) {
+	for (int c = 0; c < n; c++) {
+		const double u = gp[a], v = gp[b], w = gp[c];
+		lam[q][1] = u;
+		lam[q][2] = v * (1 - u);
+		lam[q][3] = w * (1 - u) * (1 - v);
+		lam[q][0] = 1 - lam[q][1] - lam[q][2] - lam[q][3];
+		wq[q] = gw[a] * gw[b] * gw[c] * (1 - u) * (1 - u) * (1 - v);
+		q++;
+	}
+	}
+	}
+	return q;
+}
+
+
+// 次数 p の Lagrange 基底 (多重指数 a) の値と ∂N/∂λ_v
+static double lagr_tet(int p, const int a[4], const double lam[4], double dn[4])
+{
+	double f[4], df[4];
+	for (int v = 0; v < 4; v++) {
+		double val = 1, der = 0;
+		for (int m = 0; m < a[v]; m++) {
+			const double t = ((p * lam[v]) - m) / (m + 1);
+			der = (der * t) + (val * p / (m + 1));
+			val *= t;
+		}
+		f[v] = val;
+		df[v] = der;
+	}
+	for (int v = 0; v < 4; v++) {
+		double d = df[v];
+		for (int w = 0; w < 4; w++) {
+			if (w != v) d *= f[w];
+		}
+		dn[v] = d;
+	}
+	return f[0] * f[1] * f[2] * f[3];
+}
+
+
+// 20 節点四面体の積分点 1 点での ∇N_i と det J (tet10_grad の 3 次版)。
+// ヤコビアンは 20 節点すべてから作る (等パラメトリック)
+static int tet20_grad(const int32_t nd[20], const double lam[4], double gn[20][3], double *det)
+{
+	double dx[20][3];
+	for (int i = 0; i < 20; i++) {
+		double dl[4];
+		lagr_tet(3, TET3_A[i], lam, dl);
+		for (int k = 0; k < 3; k++) dx[i][k] = dl[k + 1] - dl[0];
+	}
+	double j[3][3];
+	for (int r = 0; r < 3; r++) {
+		const double *p = ((r == 0) ? Xp : (r == 1) ? Yp : Zp);
+		for (int k = 0; k < 3; k++) {
+			double s = 0;
+			for (int i = 0; i < 20; i++) s += p[nd[i]] * dx[i][k];
+			j[r][k] = s;
+		}
+	}
+	const double d = (j[0][0] * ((j[1][1] * j[2][2]) - (j[1][2] * j[2][1])))
+	               - (j[0][1] * ((j[1][0] * j[2][2]) - (j[1][2] * j[2][0])))
+	               + (j[0][2] * ((j[1][0] * j[2][1]) - (j[1][1] * j[2][0])));
+	if (d == 0) return 1;
+	const double ji[3][3] = {
+		{ ((j[1][1] * j[2][2]) - (j[1][2] * j[2][1])) / d,
+		 -((j[0][1] * j[2][2]) - (j[0][2] * j[2][1])) / d,
+		  ((j[0][1] * j[1][2]) - (j[0][2] * j[1][1])) / d},
+		{-((j[1][0] * j[2][2]) - (j[1][2] * j[2][0])) / d,
+		  ((j[0][0] * j[2][2]) - (j[0][2] * j[2][0])) / d,
+		 -((j[0][0] * j[1][2]) - (j[0][2] * j[1][0])) / d},
+		{ ((j[1][0] * j[2][1]) - (j[1][1] * j[2][0])) / d,
+		 -((j[0][0] * j[2][1]) - (j[0][1] * j[2][0])) / d,
+		  ((j[0][0] * j[1][1]) - (j[0][1] * j[1][0])) / d}
+	};
+	for (int i = 0; i < 20; i++) {
+		for (int r = 0; r < 3; r++) {
+			gn[i][r] = (dx[i][0] * ji[0][r]) + (dx[i][1] * ji[1][r]) + (dx[i][2] * ji[2][r]);
+		}
+	}
+	*det = d;
+
+	return 0;
+}
+
+
+// 要素 e の 20 節点要素行列 ke[20][20] と体積。戻り値 : 0 = 正常、1 = 退化・裏返り
+int tet20_element(int e, const double c[6], double ke[20][20], double *vol)
+{
+	int32_t nd[20];
+	if (tet_nodes(e, nd) != 20) return 1;
+
+	double lam[NQTET4][4], wq[NQTET4];
+	const int nq = tet_quad_n(4, lam, wq);
+
+	memset(ke, 0, sizeof(double) * 20 * 20);
+	double v = 0, sgn = 0;
+	for (int q = 0; q < nq; q++) {
+		double gn[20][3], det;
+		if (tet20_grad(nd, lam[q], gn, &det)) return 1;
+		if (sgn == 0) sgn = ((det > 0) ? 1 : -1);
+		else if (det * sgn <= 0) return 1;
+		const double dw = wq[q] * fabs(det);
+		v += dw;
+		for (int l = 0; l < 20; l++) {
+			for (int m = 0; m < 20; m++) {
+				ke[l][m] += dw * ((c[0] * gn[l][0] * gn[m][0])
+				                + (c[1] * gn[l][1] * gn[m][1])
+				                + (c[2] * gn[l][2] * gn[m][2])
+				                + (c[3] * ((gn[l][0] * gn[m][1]) + (gn[l][1] * gn[m][0])))
+				                + (c[4] * ((gn[l][1] * gn[m][2]) + (gn[l][2] * gn[m][1])))
+				                + (c[5] * ((gn[l][2] * gn[m][0]) + (gn[l][0] * gn[m][2]))));
+			}
+		}
+	}
+	*vol = v;
+
+	return 0;
+}
+
+
+// 要素の重心での ∇N_i (場の出力に使う。1 次では要素内一定なので同じ値)
+int tet_grad_center(int e, double gn[20][3], int *nen)
+{
+	int32_t nd[20];
 	const int n = tet_nodes(e, nd);
 
 	*nen = n;
@@ -1892,7 +2125,13 @@ int tet_grad_center(int e, double gn[10][3], int *nen)
 	const double lam[4] = {0.25, 0.25, 0.25, 0.25};
 	double det;
 
-	return tet10_grad(nd, lam, gn, &det);
+	if (n == 20) return tet20_grad(nd, lam, gn, &det);
+	double g10[10][3];
+	const int r = tet10_grad(nd, lam, g10, &det);
+	for (int i = 0; i < 10; i++) {
+		for (int k = 0; k < 3; k++) gn[i][k] = g10[i][k];
+	}
+	return r;
 }
 
 
@@ -2899,7 +3138,7 @@ static int nodal_test_mixed(FILE *fp_log)
 	fprintf(fp_log, "  volume = %.10e\n", vol);
 	fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, "
 		"rel. error = %.2e\n", quad, want, err);
-	if (err > 1e-12) {
+	if (!(err <= 1e-12)) {		// NaN も不合格にする
 		fprintf(fp_log, "*** the linear-field identity failed\n");
 		ierr = 1;
 	}
@@ -3007,7 +3246,7 @@ static int nodal_test_prism(FILE *fp_log)
 	const double err = ((want != 0) ? (fabs(quad - want) / fabs(want)) : 0);
 	fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, "
 		"rel. error = %.2e\n", quad, want, err);
-	if (err > 1e-12) {
+	if (!(err <= 1e-12)) {		// NaN も不合格にする
 		fprintf(fp_log, "*** the linear-field identity failed\n");
 		ierr = 1;
 	}
@@ -3116,7 +3355,7 @@ static int nodal_test_pyr(FILE *fp_log)
 	const double err = ((want != 0) ? (fabs(quad - want) / fabs(want)) : 0);
 	fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, "
 		"rel. error = %.2e\n", quad, want, err);
-	if (err > 1e-12) {
+	if (!(err <= 1e-12)) {		// NaN も不合格にする
 		fprintf(fp_log, "*** the linear-field identity failed\n");
 		ierr = 1;
 	}
@@ -3329,7 +3568,7 @@ static int nodal_test_hex2(FILE *fp_log)
 		const double err = ((want != 0) ? (fabs(quad - want) / fabs(want)) : 0);
 		fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, "
 			"rel. error = %.2e\n", quad, want, err);
-		if (err > 1e-12) {
+		if (!(err <= 1e-12)) {		// NaN も不合格にする
 			fprintf(fp_log, "*** the linear-field identity failed\n");
 			ierr = 1;
 		}
@@ -3397,7 +3636,7 @@ static int nodal_test_hex2(FILE *fp_log)
 			const double err = fabs(q2 - exact) / ((exact != 0) ? fabs(exact) : 1);
 			fprintf(fp_log, "  quadratic field : phi^T K phi = %.10e, exact = %.10e, "
 				"rel. error = %.2e\n", q2, exact, err);
-			if (err > 1e-10) {
+			if (!(err <= 1e-10)) {		// NaN も不合格にする
 				fprintf(fp_log, "*** the quadratic-field identity failed "
 					"(this is the only test that exercises the order-2 basis)\n");
 				ierr = 1;
@@ -3503,7 +3742,7 @@ static int nodal_test_prism2(FILE *fp_log)
 		const double err = ((want != 0) ? (fabs(quad - want) / fabs(want)) : 0);
 		fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, "
 			"rel. error = %.2e\n", quad, want, err);
-		if (err > 1e-12) {
+		if (!(err <= 1e-12)) {		// NaN も不合格にする
 			fprintf(fp_log, "*** the linear-field identity failed\n");
 			ierr = 1;
 		}
@@ -3608,7 +3847,7 @@ static int nodal_test_prism2(FILE *fp_log)
 			const double err = fabs(q2 - exact) / ((exact != 0) ? fabs(exact) : 1);
 			fprintf(fp_log, "  quadratic field : phi^T K phi = %.10e, exact = %.10e, "
 				"rel. error = %.2e\n", q2, exact, err);
-			if (err > 1e-10) {
+			if (!(err <= 1e-10)) {		// NaN も不合格にする
 				fprintf(fp_log, "*** the quadratic-field identity failed "
 					"(this is the only test that exercises the order-2 basis)\n");
 				ierr = 1;
@@ -3650,8 +3889,21 @@ void assemble_elem3d(crs_t *A, int mode)
 		const int kind = elem3d_kind(e);
 
 		if (kind == MESHELEM_TET) {
+			if (TetOrder == 3) {
+				int32_t nd[20];
+				double ke[20][20], vol;
+				tet_nodes(e, nd);
+				if (tet20_element(e, c, ke, &vol)) continue;
+				for (int l = 0; l < 20; l++) {
+					for (int m = 0; m < 20; m++) {
+						const int64_t p = crs_find(A, nd[l], nd[m]);
+						if (p >= 0) A->val[p] += ke[l][m];
+					}
+				}
+				continue;
+			}
 			if (p2) {
-				int32_t nd[10];
+				int32_t nd[20];
 				double ke[10][10], vol;
 				tet_nodes(e, nd);
 				if (tet10_element(e, c, ke, &vol)) continue;
@@ -3782,8 +4034,21 @@ void assemble_tet(crs_t *A, int mode)
 		material_coef_pub(TetMat[e], mode, c);
 		if ((c[0] <= 0) && (c[1] <= 0) && (c[2] <= 0)) continue;
 
+		if (TetOrder == 3) {
+			int32_t nd[20];
+			double ke[20][20], vol;
+			tet_nodes(e, nd);
+			if (tet20_element(e, c, ke, &vol)) continue;
+			for (int l = 0; l < 20; l++) {
+				for (int m = 0; m < 20; m++) {
+					const int64_t p = crs_find(A, nd[l], nd[m]);
+					if (p >= 0) A->val[p] += ke[l][m];
+				}
+			}
+			continue;
+		}
 		if (p2) {
-			int32_t nd[10];
+			int32_t nd[20];
 			double ke[10][10], vol;
 			tet_nodes(e, nd);
 			if (tet10_element(e, c, ke, &vol)) continue;
@@ -3965,7 +4230,7 @@ static int nodal_test_hex(FILE *fp_log)
 	const double err = ((want != 0) ? (fabs(quad - want) / fabs(want)) : 0);
 	fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, "
 		"rel. error = %.2e\n", quad, want, err);
-	if (err > 1e-12) {
+	if (!(err <= 1e-12)) {		// NaN も不合格にする
 		fprintf(fp_log, "*** the linear-field identity failed\n");
 		ierr = 1;
 	}
@@ -3992,14 +4257,43 @@ int solve_nodal_test(FILE *fp_log)
 
 	fprintf(fp_log, "\n=== nodal element (P%d) self test ===\n", TetOrder);
 	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, nodes per element = %d\n",
-		NNode, NTet, ((TetOrder >= 2) ? 10 : 4));
+		NNode, NTet, tet_nen());
 
 	// 中間節点が辺の中点からどれだけずれているか (曲がった格子の判定)
 	double curve = 0;
-	if (TetOrder >= 2) {
+	if (TetOrder == 3) {
+		// 3 次 : 頂点以外の 16 節点の、直線要素での位置 Σ (a_v/3) x_v からのずれ
+		for (int e = 0; e < NTet; e++) {
+			int32_t nd[20];
+			tet_nodes(e, nd);
+			double h = 0;
+			for (int a = 0; a < 4; a++) {
+				for (int b = a + 1; b < 4; b++) {
+					const double dx = Xp[nd[b]] - Xp[nd[a]], dy = Yp[nd[b]] - Yp[nd[a]];
+					const double dz = Zp[nd[b]] - Zp[nd[a]];
+					const double len = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+					if (len > h) h = len;
+				}
+			}
+			if (h <= 0) continue;
+			for (int l = 4; l < 20; l++) {
+				double r[3] = {0, 0, 0};
+				for (int v = 0; v < 4; v++) {
+					r[0] += TET3_A[l][v] * Xp[nd[v]] / 3;
+					r[1] += TET3_A[l][v] * Yp[nd[v]] / 3;
+					r[2] += TET3_A[l][v] * Zp[nd[v]] / 3;
+				}
+				const double dx = Xp[nd[l]] - r[0], dy = Yp[nd[l]] - r[1], dz = Zp[nd[l]] - r[2];
+				const double d = sqrt((dx * dx) + (dy * dy) + (dz * dz)) / h;
+				if (d > curve) curve = d;
+			}
+		}
+		fprintf(fp_log, "  mid-node offset = %.3e (relative to the edge length)\n", curve);
+	}
+	else if (TetOrder >= 2) {
 		static const int ed[6][2] = {{0, 1}, {1, 2}, {2, 0}, {3, 0}, {3, 2}, {3, 1}};
 		for (int e = 0; e < NTet; e++) {
-			int32_t nd[10];
+			int32_t nd[20];
 			tet_nodes(e, nd);
 			double h = 0;
 			for (int l = 0; l < 6; l++) {
@@ -4029,7 +4323,15 @@ int solve_nodal_test(FILE *fp_log)
 		const double c1[6] = {1, 1, 1, 0, 0, 0};
 		for (int e = 0; e < NTet; e++) {
 			double vol = 0;
-			if (TetOrder >= 2) {
+			if (TetOrder == 3) {
+				double ke[20][20];
+				if (tet20_element(e, c1, ke, &vol)) {
+					fprintf(fp_log, "*** tetrahedron %d is degenerate or inverted\n", e + 1);
+					free(vole);
+					return 1;
+				}
+			}
+			else if (TetOrder >= 2) {
 				double ke[10][10];
 				if (tet10_element(e, c1, ke, &vol)) {
 					fprintf(fp_log, "*** tetrahedron %d is degenerate or inverted\n", e + 1);
@@ -4075,7 +4377,7 @@ int solve_nodal_test(FILE *fp_log)
 		}
 		const double rel = amax / ((dmax > 0) ? dmax : 1);
 		fprintf(fp_log, "  (a) constant null space : max|K 1| / max|Kii| = %.3e\n", rel);
-		if (rel > 1e-10) {
+		if (!(rel <= 1e-10)) {		// NaN も不合格にする
 			fprintf(fp_log, "*** the stiffness matrix does not annihilate constants\n");
 			ierr = 1;
 		}
@@ -4089,9 +4391,20 @@ int solve_nodal_test(FILE *fp_log)
 	                         {-1.1,  2.2,  1.7},
 	                         { 0.6,  1.7, -0.9}};
 
-	for (int cs = 0; cs < 2; cs++) {
-		const int quad = cs;			// 0 : φ は 1 次、1 : φ は 2 次
+	// 3 次の項 κxyz + μx³ + ν y²z (係数は領域の大きさ L で O(1) の勾配になるよう 1/L² 倍)
+	double lref = 0;
+	for (int i = 0; i < n; i++) {
+		const double r = fabs(Xp[i]) + fabs(Yp[i]) + fabs(Zp[i]);
+		if (r > lref) lref = r;
+	}
+	if (lref <= 0) lref = 1;
+	const double ck = 2.3 / (lref * lref), cmu = 1.1 / (lref * lref), cnu = -1.7 / (lref * lref);
+
+	for (int cs = 0; cs < 3; cs++) {
+		const int quad = (cs >= 1);		// 0 : φ は 1 次、1 : 2 次、2 : 3 次
+		const int cubic = (cs == 2);
 		if (quad && ((TetOrder < 2) || !straight)) continue;
+		if (cubic && (TetOrder < 3)) continue;
 
 		// 節点値
 		for (int i = 0; i < n; i++) {
@@ -4101,6 +4414,10 @@ int solve_nodal_test(FILE *fp_log)
 				for (int k = 0; k < 3; k++) {
 					for (int l = 0; l < 3; l++) f += bm[k][l] * r[k] * r[l] / 2;
 				}
+			}
+			if (cubic) {
+				f += (ck * r[0] * r[1] * r[2]) + (cmu * r[0] * r[0] * r[0])
+				   + (cnu * r[1] * r[1] * r[2]);
 			}
 			phi[i] = f;
 		}
@@ -4158,15 +4475,56 @@ int solve_nodal_test(FILE *fp_log)
 			}
 		}
 
+		// 3 次の φ : ∫ (∇φ)^T C (∇φ) dV を直線要素の上で**別の積分則** (Duffy + 5 点、
+		// 125 点) で厳密に積分する (被積分関数は λ の 4 次)。要素行列 (4 点) とも
+		// 形状関数とも独立に、解析的な ∇φ だけを使う
+		if (cubic) {
+			double lq[125][4], wq5[125];
+			const int nq5 = tet_quad_n(5, lq, wq5);
+			exact = 0;
+			for (int e = 0; e < NTet; e++) {
+				const int32_t *nd = &Tet[e * 4];
+				double g[4][3], vol;
+				if (tet_grad_pub(nd, g, &vol)) continue;
+				double cf[6];
+				material_coef_pub(TetMat[e], 0, cf);
+				const double cm[3][3] = {{cf[0], cf[3], cf[5]},
+				                         {cf[3], cf[1], cf[4]},
+				                         {cf[5], cf[4], cf[2]}};
+				for (int qq = 0; qq < nq5; qq++) {
+					double r[3] = {0, 0, 0};
+					for (int v = 0; v < 4; v++) {
+						r[0] += lq[qq][v] * Xp[nd[v]];
+						r[1] += lq[qq][v] * Yp[nd[v]];
+						r[2] += lq[qq][v] * Zp[nd[v]];
+					}
+					double gr[3];
+					for (int k = 0; k < 3; k++) {
+						gr[k] = av[k];
+						for (int l = 0; l < 3; l++) gr[k] += bm[k][l] * r[l];
+					}
+					gr[0] += (ck * r[1] * r[2]) + (3 * cmu * r[0] * r[0]);
+					gr[1] += (ck * r[0] * r[2]) + (2 * cnu * r[1] * r[2]);
+					gr[2] += (ck * r[0] * r[1]) + (cnu * r[1] * r[1]);
+					double gg = 0;
+					for (int k = 0; k < 3; k++) {
+						for (int l = 0; l < 3; l++) gg += cm[k][l] * gr[k] * gr[l];
+					}
+					exact += 6 * vol * wq5[qq] * gg;
+				}
+			}
+		}
+
 		crs_spmv(&A, phi, y, NULL);
 		double q = 0;
 		for (int i = 0; i < n; i++) q += phi[i] * y[i];
 		const double rel = fabs(q - exact) / ((exact != 0) ? fabs(exact) : 1);
 		fprintf(fp_log, "  (%c) %s field : phi^T K phi = %.10e, exact = %.10e, err = %.3e\n",
-			(quad ? 'c' : 'b'), (quad ? "quadratic" : "linear   "), q, exact, rel);
-		if (rel > 1e-10) {
+			(cubic ? 'f' : quad ? 'c' : 'b'), (cubic ? "cubic    " : quad ? "quadratic" : "linear   "),
+			q, exact, rel);
+		if (!(rel <= 1e-10)) {		// NaN も不合格にする
 			fprintf(fp_log, "*** the %s stiffness matrix is wrong\n",
-				((TetOrder >= 2) ? "P2" : "P1"));
+				((TetOrder == 3) ? "P3" : (TetOrder >= 2) ? "P2" : "P1"));
 			ierr = 1;
 		}
 
@@ -4181,10 +4539,10 @@ int solve_nodal_test(FILE *fp_log)
 		{
 			double gmax = 0, amax2 = 0;
 			for (int e = 0; e < NTet; e++) {
-				double gn[10][3];
+				double gn[20][3];
 				int nen = 0;
 				if (tet_grad_center(e, gn, &nen)) continue;
-				int32_t nd[10];
+				int32_t nd[20];
 				tet_nodes(e, nd);
 
 				double rc[3] = {0, 0, 0};
@@ -4200,14 +4558,19 @@ int solve_nodal_test(FILE *fp_log)
 					if (quad) {
 						for (int l = 0; l < 3; l++) ge += bm[k][l] * rc[l];
 					}
+					if (cubic) {
+						ge += ((k == 0) ? ((ck * rc[1] * rc[2]) + (3 * cmu * rc[0] * rc[0]))
+						     : (k == 1) ? ((ck * rc[0] * rc[2]) + (2 * cnu * rc[1] * rc[2]))
+						     : ((ck * rc[0] * rc[1]) + (cnu * rc[1] * rc[1])));
+					}
 					if (fabs(gh - ge) > gmax) gmax = fabs(gh - ge);
 					if (fabs(ge) > amax2) amax2 = fabs(ge);
 				}
 			}
 			const double relg = gmax / ((amax2 > 0) ? amax2 : 1);
 			fprintf(fp_log, "  (e) centroid gradient (%s field) : max err = %.3e\n",
-				(quad ? "quadratic" : "linear"), relg);
-			if (relg > 1e-10) {
+				(cubic ? "cubic" : quad ? "quadratic" : "linear"), relg);
+			if (!(relg <= 1e-10)) {		// NaN も不合格にする
 				fprintf(fp_log, "*** the element-centre gradient is wrong "
 					"(this is what fieldout writes)\n");
 				ierr = 1;
@@ -4235,7 +4598,7 @@ int solve_nodal_test(FILE *fp_log)
 		}
 		const double rel = adif / ((amax > 0) ? amax : 1);
 		fprintf(fp_log, "  (d) symmetry : max|Kij - Kji| / max|Kij| = %.3e\n", rel);
-		if (rel > 1e-12) {
+		if (!(rel <= 1e-12)) {		// NaN も不合格にする
 			fprintf(fp_log, "*** the stiffness matrix is not symmetric\n");
 			ierr = 1;
 		}
