@@ -1437,6 +1437,39 @@ else
 				fi
 			done
 		done
+		# 行列の分散 (mpisolve = 2、構造格子の C / L / R)。各 rank は行ブロック (x 方向に切った板) の行だけを
+		# 組み立てて持ち、対角・反作用は持ち主から集める。行ごとの和の順は直列と同じなので出力はバイト一致。
+		# 「分散したこと」は rank 0 が持つ行の数 (= n / np) で見る (分散し忘れても答えは同じになるので)
+		cp "$SRC/resistor_bar.ofe" "$SRC/coupled_microstrip.ofe" "$WORK/"
+		for c in parallel_plate resistor_bar coupled_microstrip sweep_plate; do
+			awk '/^analysis/{print "mpisolve = 2"} {print}' "$WORK/$c.ofe" > "$WORK/md_$c.ofe"
+			rm -f "$WORK/ofe.out" "$WORK/ofe_sweep.csv"; rm -rf "$WORK/mdref"; mkdir -p "$WORK/mdref"
+			(cd "$WORK" && "$OFE" -n 2 "md_$c.ofe" > /dev/null 2>&1) || { echo "  mpisolve = 2 $c : the serial run failed -> NG" >&2; status=1; }
+			for o in ofe.out ofe_sweep.csv; do [ -f "$WORK/$o" ] && cp "$WORK/$o" "$WORK/mdref/"; done
+			for np in 2 3; do
+				rm -f "$WORK/ofe.out" "$WORK/ofe_sweep.csv"
+				(cd "$WORK" && mpirun -np $np "$OFE" -n 2 "md_$c.ofe" > /dev/null 2>&1) || true
+				r=OK; nf=0
+				for o in ofe.out ofe_sweep.csv; do
+					if [ -f "$WORK/mdref/$o" ]; then nf=$((nf + 1)); cmp -s "$WORK/mdref/$o" "$WORK/$o" || r=NG; fi
+				done
+				d=$(awk -v np=$np '/the matrix is distributed by rows/ { for (i = 1; i <= NF; i++) if ($i == "rows") { split($(i + 1), a, "\\.\\."); n = $(i + 3) }
+					ok = ((a[1] == 0) && (a[2] + 1 == int(n / np))) ? "split" : "bad"; print ok, a[2] + 1, "of", n; exit }' "$WORK/ofe.log")
+				case "$d" in split*) ;; *) r=NG ;; esac
+				if [ "$r" = OK ] && [ "$nf" -ge 1 ]; then
+					echo "  mpisolve = 2, np = $np : $c gives byte-identical output ($nf files), rank 0 holds ${d#split } rows : OK"
+				else
+					echo "  mpisolve = 2, np = $np : $c differs from the serial run (or not distributed: $d) -> NG" >&2
+					status=1
+				fi
+			done
+		done
+		awk '/^analysis/{print "mpisolve = 2"} {print}' "$WORK/bar_eddy.ofe" > "$WORK/mdx_a.ofe"
+		(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 mdx_a.ofe > /dev/null 2>&1) \
+			&& { echo "  mpisolve = 2 with analysis A : accepted -> NG" >&2; status=1; } \
+			|| echo "  mpisolve = 2 with analysis A : rejected -> OK"
+		grep -q "mpisolve = 2 (the matrix distributed over the ranks) supports the structured grid" "$WORK/ofe.log" \
+			|| { echo "  *** it was rejected for a different reason" >&2; status=1; }
 		;;
 	esac
 fi
@@ -1451,6 +1484,18 @@ case "$msmsg" in
 		echo "  [mpi] mpisolve = 1 without mpirun (MPI build) : runs serially -> OK"
 	else
 		echo "  [mpi] mpisolve = 1 : neither rejected nor run -> NG" >&2; status=1
+	fi ;;
+esac
+awk '/^analysis/{print "mpisolve = 2"} {print}' "$SRC/parallel_plate.ofe" > "$WORK/msx2.ofe"
+msmsg=$( (cd "$WORK" && "$OFE" -n 2 msx2.ofe 2>&1) || true)
+case "$msmsg" in
+*"needs a build with -DWITH_MPI=ON"*)
+	echo "  [mpi] mpisolve = 2 in a build without MPI : rejected -> OK" ;;
+*)
+	if grep -q "normal end" "$WORK/ofe.log"; then
+		echo "  [mpi] mpisolve = 2 without mpirun (MPI build) : runs serially -> OK"
+	else
+		echo "  [mpi] mpisolve = 2 : neither rejected nor run -> NG" >&2; status=1
 	fi ;;
 esac
 
