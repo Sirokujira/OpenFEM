@@ -206,6 +206,7 @@ EXTERN int32_t *Tri2;			// [3*NTri] 2 次のときのみ (1 次では NULL)
 // 頂点以外の 7 節点 (局所 3..9) が入る。並びは Gmsh の tet20 / tri10 (unstruct.c の
 // TET3_A / TRI3_A、gmsh の出力を分類した実測の表)。3 次でない三角形の Tri3 は -1
 EXTERN int32_t *Tet3;			// [16*NTet] 3 次のときのみ
+#define TRI_NMAX (10)		// 三角形 1 個の最大節点数 (3 次の tri10)
 EXTERN int32_t *Tri3;			// [7*NTri] 常に確保 (3 次でない三角形は -1)
 // 辺 (3 次元渦電流の辺要素で使う)。辺は節点番号の小さい方から大きい方へ向ける
 EXTERN int NEdge;

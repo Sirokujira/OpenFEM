@@ -24,17 +24,18 @@ solve.c
 // **「体積」は 2 次元格子では面積**。単位長あたりで扱う (TlineLength = 1) ので、
 // 出てくる R [Ω/m]・L [H/m] は構造格子と同じ意味になる。
 typedef struct {
-	int nen;					// 節点数 (構造格子 8、1 次三角形 3、2 次三角形 6)
-	int64_t nd[8];				// 節点番号
+	int nen;					// 節点数 (構造格子 8、1 次三角形 3、2 次三角形 6、3 次三角形 10)
+	int64_t nd[TRI_NMAX];		// 節点番号 (TRI_NMAX = 10 >= 8)
 	double vol;					// 体積 [m^3] または面積 [m^2]
 	// **節点あたりの重み ∫N_i dV。均等とは限らない。**
 	// 1 次要素は vol/nen で均等だが、2 次三角形は ∫N dA が
 	// 頂点で 0、辺の中間節点で A/3 になる。「vol/nen を配る」と書くと
 	// 2 次要素で右辺も端子電流も壊れるので、重みを要素側に持たせる
-	double w[8];
+	double w[TRI_NMAX];
 	// 要素中心での形状関数の値 N_i(重心)。場の出力で「中心の値」を作るのに使う。
 	// 2 次三角形では頂点が -1/9、中間節点が 4/9 で、単純平均ではない
-	double wc[8];
+	// (3 次三角形では頂点・辺が 0、面心が 1)
+	double wc[TRI_NMAX];
 	int cond;					// 導体番号 (-1 = 導体でない)
 	int mat;					// 材料番号
 } elem_t;
@@ -49,11 +50,16 @@ static int64_t elem_count(void)
 static void elem_get(int64_t e, elem_t *el)
 {
 	if (MeshMode && (MeshDim == 2)) {
-		int32_t nd[6];
+		int32_t nd[TRI_NMAX];
 		el->nen = tri_nodes((int)e, nd);
 		for (int l = 0; l < el->nen; l++) el->nd[l] = nd[l];
 		el->vol = TriArea[e];
-		if (el->nen == 6) {
+		if (el->nen == 10) {
+			// 3 次三角形 : ∫N dA を等パラメトリック写像で積分する
+			// (直線要素では頂点 A/30、辺 3A/40、面心 9A/20)
+			tri_weights((int)e, el->w, el->wc);
+		}
+		else if (el->nen == 6) {
 			// 2 次三角形 : ∫N dA は頂点で 0、辺の中間節点で A/3
 			for (int l = 0; l < 3; l++) { el->w[l] = 0;                el->wc[l] = -1.0 / 9; }
 			for (int l = 3; l < 6; l++) { el->w[l] = TriArea[e] / 3;   el->wc[l] =  4.0 / 9; }

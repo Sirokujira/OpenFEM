@@ -523,13 +523,14 @@ static int elem_finish(void)
 {
 	if (node_merge_check()) return 1;
 
-	// 3 次 (10 節点) の三角形は 20 節点の四面体の面としてだけ使う。四面体が 3 次でないのに
-	// 10 節点の三角形があると、その面内の 7 節点がどの要素にも属さず行列が特異になる。
-	// 断面 2 次元 (M / F) の 3 次三角形も未対応 (面内の基底と積分を組んでいない)
-	for (int t = 0; t < NTri; t++) {
+	// 3 次元の格子では 3 次 (10 節点) の三角形は 20 節点の四面体の面としてだけ使う。
+	// 四面体が 3 次でないのに 10 節点の三角形があると、その面内の 7 節点がどの要素にも
+	// 属さず行列が特異になる。断面 2 次元 (四面体が無い) の 3 次三角形は体積要素として
+	// 下で次数を決める
+	for (int t = 0; (NTet > 0) && (t < NTri); t++) {
 		if ((Tri3[t * 7] >= 0) && (TetOrder != 3)) {
 			printf("%s\n", "*** mesh : 10-node (third-order) triangles are supported only "
-				"as the faces of 20-node tetrahedra (no 2-D M / F, no mixing with other "
+				"as the faces of 20-node tetrahedra in a 3-D mesh (no mixing with other "
 				"orders)");
 			return 1;
 		}
@@ -686,10 +687,11 @@ static int elem_finish(void)
 			printf("%s\n", "*** mesh : no tetrahedron and no triangle found");
 			return 1;
 		}
-		// 三角形の次数は「中間節点が頂点と違うか」で決まる (1 次では頂点で埋めてある)
-		TetOrder = ((Tri2[0] != Tri[0]) ? 2 : 1);
+		// 三角形の次数は「中間節点が頂点と違うか」で決まる (1 次では頂点で埋めてある)。
+		// 3 次 (10 節点) は Tri3 に辺の 6 節点と面心が入る (3 次でなければ -1)
+		TetOrder = ((Tri3[0] >= 0) ? 3 : (Tri2[0] != Tri[0]) ? 2 : 1);
 		for (int t = 0; t < NTri; t++) {
-			const int o = ((Tri2[(t * 3)] != Tri[(t * 3)]) ? 2 : 1);
+			const int o = ((Tri3[t * 7] >= 0) ? 3 : (Tri2[(t * 3)] != Tri[(t * 3)]) ? 2 : 1);
 			if (o != TetOrder) {
 				printf("%s\n", "*** mesh : mixed triangle orders in a 2-D mesh");
 				return 1;
@@ -4706,12 +4708,17 @@ int solve_nodal_test(FILE *fp_log)
 //
 // 単位長あたりの量として扱うので「体積」は面積そのもの (線路長 1 m 相当)。
 
-// 三角形の局所節点をまとめて取り出す。戻り値は節点数 (1 次 3、2 次 6)。
-// 並びは Gmsh の tri6 と同じ (頂点 3 個のあと辺 (0,1) (1,2) (2,0) の中間節点)
-int tri_nodes(int e, int32_t nd[6])
+// 三角形の局所節点をまとめて取り出す。戻り値は節点数 (1 次 3、2 次 6、3 次 10)。
+// 並びは Gmsh の tri6 と同じ (頂点 3 個のあと辺 (0,1) (1,2) (2,0) の中間節点)。
+// 3 次は gmsh の tri10 (多重指数は TRI3_A、実測)
+int tri_nodes(int e, int32_t nd[TRI_NMAX])
 {
 	for (int l = 0; l < 3; l++) nd[l] = Tri[(e * 3) + l];
 	if (TetOrder < 2) return 3;
+	if ((TetOrder == 3) && (MeshDim == 2)) {
+		for (int l = 0; l < 7; l++) nd[3 + l] = Tri3[(e * 7) + l];
+		return 10;
+	}
 	for (int l = 0; l < 3; l++) nd[3 + l] = Tri2[(e * 3) + l];
 
 	return 6;
@@ -4766,11 +4773,11 @@ void crs_alloc_tri(crs_t *A)
 {
 	const int n = NNode;
 
-	const int nen = ((TetOrder >= 2) ? 6 : 3);
+	const int nen = ((TetOrder == 3) ? 10 : (TetOrder >= 2) ? 6 : 3);
 	int *cnt = (int *)malloc((size_t)n * sizeof(int));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < NTri; e++) {
-		int32_t nd[6];
+		int32_t nd[TRI_NMAX];
 		tri_nodes(e, nd);
 		for (int l = 0; l < nen; l++) cnt[nd[l]]++;
 	}
@@ -4780,7 +4787,7 @@ void crs_alloc_tri(crs_t *A)
 	int32_t *nlist = (int32_t *)malloc((size_t)nptr[n] * sizeof(int32_t));
 	memset(cnt, 0, (size_t)n * sizeof(int));
 	for (int e = 0; e < NTri; e++) {
-		int32_t nd[6];
+		int32_t nd[TRI_NMAX];
 		tri_nodes(e, nd);
 		for (int l = 0; l < nen; l++) {
 			const int32_t i = nd[l];
@@ -4812,7 +4819,7 @@ void crs_alloc_tri(crs_t *A)
 			}
 			int m = 0;
 			for (int64_t p = p0; p < p1; p++) {
-				int32_t nd[6];
+				int32_t nd[TRI_NMAX];
 				tri_nodes(nlist[p], nd);
 				for (int l = 0; l < nen; l++) work[m++] = nd[l];
 			}
@@ -4871,6 +4878,51 @@ static void tri_quad(double lam[NQTRI][3], double wq[NQTRI])
 }
 
 
+// ---- 3 次三角形 (10 節点、断面 2 次元、等パラメトリック) ----
+//
+// 局所節点の並びは **gmsh 4.15.2 の tri10 の出力を重心座標で分類した実測の表**
+// (多重指数 3λ。tri10_2d.msh の 14 要素がすべてこの並び)。四面体の TET3_A の面と同じ
+// 規約で、形状関数も同じ次数によらない Lagrange の式 (lagr_tet に 4 番目の指数 0 を
+// 渡す) で作る。積分は Duffy + 各方向 4 点 (16 点)。∇N・∇N は λ の 4 次で (1-u) の
+// 因子を含めて u の 5 次、質量 N N は 6 次 + 1 = 7 次なので、直線要素ならどちらも厳密
+static const int TRI3_A[10][3] = {
+	{3, 0, 0}, {0, 3, 0}, {0, 0, 3},
+	{2, 1, 0}, {1, 2, 0},		// 辺 (0,1)
+	{0, 2, 1}, {0, 1, 2},		// 辺 (1,2)
+	{1, 0, 2}, {2, 0, 1},		// 辺 (2,0)
+	{1, 1, 1}					// 面心
+};
+#define NQTRI3 (16)
+
+// 積分点 (2 次は 9 点、3 次は 16 点)。戻り値は点の数
+static int tri_quad_ord(double lam[NQTRI3][3], double wq[NQTRI3])
+{
+	if (TetOrder != 3) {
+		double l9[NQTRI][3], w9[NQTRI];
+		tri_quad(l9, w9);
+		for (int q = 0; q < NQTRI; q++) {
+			for (int a = 0; a < 3; a++) lam[q][a] = l9[q][a];
+			wq[q] = w9[q];
+		}
+		return NQTRI;
+	}
+	double gp[5], gw[5];
+	gauss01(4, gp, gw);
+	int q = 0;
+	for (int a = 0; a < 4; a++) {
+	for (int b = 0; b < 4; b++) {
+		const double u = gp[a], v = gp[b];
+		lam[q][1] = u;
+		lam[q][2] = v * (1 - u);
+		lam[q][0] = 1 - lam[q][1] - lam[q][2];
+		wq[q] = gw[a] * gw[b] * (1 - u);
+		q++;
+	}
+	}
+	return q;
+}
+
+
 // 6 節点三角形の形状関数と λ 微分 dl[i][a] = ∂N_i/∂λ_a
 static void tri6_shape(const double lam[3], double n[6], double dl[6][3])
 {
@@ -4890,25 +4942,47 @@ static void tri6_shape(const double lam[3], double n[6], double dl[6][3])
 }
 
 
-// 積分点 1 点での面内勾配 ∇N_i とヤコビアン行列式。戻り値 : 0 = 正常
-static int tri6_grad(const int32_t nd[6], const double lam[3],
-	double gn[6][2], double *det)
+// 6 / 10 節点三角形の形状関数と λ 微分 (nen で切り替え)
+static void trin_shape(int nen, const double lam[3], double n[TRI_NMAX], double dl[TRI_NMAX][3])
+{
+	if (nen == 6) {
+		double n6[6], d6[6][3];
+		tri6_shape(lam, n6, d6);
+		for (int i = 0; i < 6; i++) {
+			n[i] = n6[i];
+			for (int a = 0; a < 3; a++) dl[i][a] = d6[i][a];
+		}
+		return;
+	}
+	const double l4[4] = {lam[0], lam[1], lam[2], 0};
+	for (int i = 0; i < 10; i++) {
+		const int a4[4] = {TRI3_A[i][0], TRI3_A[i][1], TRI3_A[i][2], 0};
+		double dn[4];
+		n[i] = lagr_tet(3, a4, l4, dn);
+		for (int a = 0; a < 3; a++) dl[i][a] = dn[a];
+	}
+}
+
+
+// 積分点 1 点での面内勾配 ∇N_i とヤコビアン行列式 (nen = 6 / 10)。戻り値 : 0 = 正常
+static int tri6_grad(const int32_t *nd, int nen, const double lam[3],
+	double gn[TRI_NMAX][2], double *det)
 {
 	int p, q;
 	tri_axes(&p, &q);
 	const double *cp = ((p == 0) ? Xp : (p == 1) ? Yp : Zp);
 	const double *cq = ((q == 0) ? Xp : (q == 1) ? Yp : Zp);
 
-	double n[6], dl[6][3], dx[6][2];
-	tri6_shape(lam, n, dl);
+	double n[TRI_NMAX], dl[TRI_NMAX][3], dx[TRI_NMAX][2];
+	trin_shape(nen, lam, n, dl);
 	// 参照座標 ξ = (λ1, λ2) についての微分 (λ0 = 1 - λ1 - λ2)
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < nen; i++) {
 		for (int k = 0; k < 2; k++) dx[i][k] = dl[i][k + 1] - dl[i][0];
 	}
 
 	double j[2][2] = {{0, 0}, {0, 0}};
 	for (int k = 0; k < 2; k++) {
-		for (int i = 0; i < 6; i++) {
+		for (int i = 0; i < nen; i++) {
 			j[0][k] += cp[nd[i]] * dx[i][k];
 			j[1][k] += cq[nd[i]] * dx[i][k];
 		}
@@ -4919,7 +4993,7 @@ static int tri6_grad(const int32_t nd[6], const double lam[3],
 	// Jinv[k][r] = ∂ξ_k/∂x_r
 	const double ji[2][2] = {{ j[1][1] / d, -j[0][1] / d},
 	                         {-j[1][0] / d,  j[0][0] / d}};
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < nen; i++) {
 		for (int r = 0; r < 2; r++) {
 			gn[i][r] = (dx[i][0] * ji[0][r]) + (dx[i][1] * ji[1][r]);
 		}
@@ -4930,17 +5004,18 @@ static int tri6_grad(const int32_t nd[6], const double lam[3],
 }
 
 
-// 2 次三角形の面積 (等パラメトリック写像で積分する)
+// 2 次 / 3 次三角形の面積 (等パラメトリック写像で積分する)
 double tri6_area(int e)
 {
-	int32_t nd[6];
-	if (tri_nodes(e, nd) != 6) return 0;
+	int32_t nd[TRI_NMAX];
+	const int nen = tri_nodes(e, nd);
+	if (nen < 6) return 0;
 
-	double lam[NQTRI][3], wq[NQTRI], a = 0;
-	tri_quad(lam, wq);
-	for (int q = 0; q < NQTRI; q++) {
-		double gn[6][2], det;
-		if (tri6_grad(nd, lam[q], gn, &det)) return 0;
+	double lam[NQTRI3][3], wq[NQTRI3], a = 0;
+	const int nq = tri_quad_ord(lam, wq);
+	for (int q = 0; q < nq; q++) {
+		double gn[TRI_NMAX][2], det;
+		if (tri6_grad(nd, nen, lam[q], gn, &det)) return 0;
 		a += wq[q] * fabs(det);
 	}
 
@@ -4948,10 +5023,34 @@ double tri6_area(int e)
 }
 
 
-// 要素の重心での面内 ∇N_i (場の出力に使う)。1 次では要素内一定なので同じ値
-int tri_grad_center(int e, double gn[6][2], int *nen)
+// 3 次三角形の節点の重み ∫N_i dA (等パラメトリック写像で積分) と重心での N_i
+// (直線要素では頂点 A/30、辺 3A/40、面心 9A/20 と、重心で頂点・辺 0、面心 1)。
+// 戻り値は節点数 (3 次でなければ 0 を返し、呼び出し側は従来の閉形式を使う)
+int tri_weights(int e, double w[TRI_NMAX], double wc[TRI_NMAX])
 {
-	int32_t nd[6];
+	int32_t nd[TRI_NMAX];
+	const int nen = tri_nodes(e, nd);
+	if (nen != 10) return 0;
+	double lam[NQTRI3][3], wq[NQTRI3];
+	const int nq = tri_quad_ord(lam, wq);
+	for (int l = 0; l < nen; l++) w[l] = 0;
+	for (int q = 0; q < nq; q++) {
+		double gn[TRI_NMAX][2], det, n[TRI_NMAX], dl[TRI_NMAX][3];
+		if (tri6_grad(nd, nen, lam[q], gn, &det)) return 0;
+		trin_shape(nen, lam[q], n, dl);
+		for (int l = 0; l < nen; l++) w[l] += wq[q] * fabs(det) * n[l];
+	}
+	const double lc[3] = {1.0 / 3, 1.0 / 3, 1.0 / 3};
+	double dl[TRI_NMAX][3];
+	trin_shape(nen, lc, wc, dl);
+	return nen;
+}
+
+
+// 要素の重心での面内 ∇N_i (場の出力に使う)。1 次では要素内一定なので同じ値
+int tri_grad_center(int e, double gn[TRI_NMAX][2], int *nen)
+{
+	int32_t nd[TRI_NMAX];
 	const int n = tri_nodes(e, nd);
 
 	*nen = n;
@@ -4968,7 +5067,7 @@ int tri_grad_center(int e, double gn[6][2], int *nen)
 	const double lam[3] = {1.0 / 3, 1.0 / 3, 1.0 / 3};
 	double det;
 
-	return tri6_grad(nd, lam, gn, &det);
+	return tri6_grad(nd, n, lam, gn, &det);
 }
 
 
@@ -4981,11 +5080,11 @@ void assemble_nu_tri(crs_t *A, const double *nucell)
 	crs_zero(A);
 
 	const int p2 = (TetOrder >= 2);
-	double lam[NQTRI][3], wq[NQTRI];
-	if (p2) tri_quad(lam, wq);
+	double lam[NQTRI3][3], wq[NQTRI3];
+	const int nq = (p2 ? tri_quad_ord(lam, wq) : 0);
 
 	for (int e = 0; e < NTri; e++) {
-		int32_t nd6[6];
+		int32_t nd6[TRI_NMAX];
 		const int nen = tri_nodes(e, nd6);
 		const int32_t *nd = nd6;
 		double g[3][2], area;
@@ -5011,9 +5110,9 @@ void assemble_nu_tri(crs_t *A, const double *nucell)
 		}
 
 		if (p2) {
-			for (int q = 0; q < NQTRI; q++) {
-				double gn[6][2], det;
-				if (tri6_grad(nd, lam[q], gn, &det)) break;
+			for (int q = 0; q < nq; q++) {
+				double gn[TRI_NMAX][2], det;
+				if (tri6_grad(nd, nen, lam[q], gn, &det)) break;
 				const double dw = wq[q] * fabs(det);
 				for (int l = 0; l < nen; l++) {
 					for (int m = 0; m < nen; m++) {
@@ -5052,19 +5151,19 @@ void assemble_mass_tri(crs_t *A)
 		const double sg = CondSigma[id];
 		if (sg <= 0) continue;
 
-		int32_t nd[6];
+		int32_t nd[TRI_NMAX];
 		const int nen = tri_nodes(e, nd);
-		if (nen == 6) {
-			// 2 次三角形 : ∫N_i N_j dA を Gauss 積分する
-			double lam[NQTRI][3], wq[NQTRI];
-			tri_quad(lam, wq);
-			for (int q = 0; q < NQTRI; q++) {
-				double gn[6][2], det, n[6], dl[6][3];
-				if (tri6_grad(nd, lam[q], gn, &det)) break;
-				tri6_shape(lam[q], n, dl);
+		if (nen >= 6) {
+			// 2 次 / 3 次三角形 : ∫N_i N_j dA を Gauss 積分する
+			double lam[NQTRI3][3], wq[NQTRI3];
+			const int nq = tri_quad_ord(lam, wq);
+			for (int q = 0; q < nq; q++) {
+				double gn[TRI_NMAX][2], det, n[TRI_NMAX], dl[TRI_NMAX][3];
+				if (tri6_grad(nd, nen, lam[q], gn, &det)) break;
+				trin_shape(nen, lam[q], n, dl);
 				const double dw = sg * wq[q] * fabs(det);
-				for (int l = 0; l < 6; l++) {
-					for (int m = 0; m < 6; m++) {
+				for (int l = 0; l < nen; l++) {
+					for (int m = 0; m < nen; m++) {
 						const int64_t s = crs_find(A, nd[l], nd[m]);
 						if (s >= 0) A->val[s] += dw * n[l] * n[m];
 					}

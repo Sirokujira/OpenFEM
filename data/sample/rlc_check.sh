@@ -587,6 +587,7 @@ direct_same box_tet
 direct_same coax_tet
 direct_same plate2d_dc
 direct_same plate2d_p2
+direct_same plate2d_p3
 # 非線形 (B-H) の内側でも使えること (内側解法はログを取らないので nolog)
 direct_same plate_line_bh nolog
 # **RCM が実際に効いていることも見る。** 並べ替えを外して密に詰めても答えは
@@ -1588,6 +1589,93 @@ awk '/^[0-9]+ 9 2 / && !done { print $1, 2, 2, $4, $5, $6, $7, $8; done = 1; nex
     "$SRC/plate2d_p2.msh" > "$WORK/mix2d.msh"
 sed 's/^mesh = .*/mesh = mix2d.msh/' "$SRC/plate2d_p2.ofe" > "$WORK/p2mix.ofe"
 mesh_reject "mixed triangle orders in a 2-D mesh" p2mix.ofe
+
+# ---- 断面 2 次元の 3 次三角形 (10 節点、gmsh の tri10) ----
+#
+# 局所節点の並びは gmsh 4.15.2 の tri10 を重心座標で分類した実測の表 (unstruct.c の
+# TRI3_A)。形状関数は 3 次四面体と同じ多重指数の Lagrange の式、積分は Duffy + 4 点。
+#   (a) DC : 導体内の Az は 2 次なので Ldc・Rs は P2 と同じく閉形式に厳密
+#   (b) F (10 MHz、t/δ = 2.4) : 1 次元厳密解に R +6.7e-8 / L +1.8e-7 (実測)。許容 1e-6。
+#       **3 次特有の基底を検査できるのは表皮効果の解だけ** (DC の 2 次の Az は P2 の
+#       部分空間で厳密に表せる)。同じ頂点の 2 次格子 (plate2d_p3o2.msh、gmsh の -order 2)
+#       より R の誤差が 100 倍以上小さいこと (実測 7200 倍) を assert する。L は 43 倍 (> 10)
+#   (c) 2.2 と 4.1 (同じ gmsh の変換で出したもの) で rlc.csv が完全一致
+#   (d) 場の出力 : 面積と損失の恒等式、セルは頂点だけの三角形 (VTK_TRIANGLE、3 節点)
+#   (e) 次数の混在は弾く
+echo "[plate2d_p3] third-order (10-node) triangles on the 2-D mesh (gmsh tri10)"
+run_case plate2d_p3
+compare "Ldc (P3) [H/m]" "$(value_of Ldc)" 2.932153e-07 1e-5
+compare "Rs (P3) [ohm/m]" "$(value_of Rs)" 6.896552e-01 1e-6
+p3z() {	# p3z <格子> <周波数> : plate2d_ac.ofe の格子と周波数を差し替えて解く
+	sed -e "s/plate2d.msh/$1/" -e "s/^frequency = .*/frequency = $2/" "$SRC/plate2d_ac.ofe" > "$WORK/p3ac.ofe"
+	(cd "$WORK" && "$OFE" -n 2 p3ac.ofe > /dev/null && "$OFE_POST" > /dev/null)
+}
+#     閉形式 (awk で全桁) : R = 2k (S + s)、X = 2k (S - s) + ωμ0 d/W、
+#     k = 1/(δσW (cosh 2a - cos 2a))、S = sinh 2a、s = sin 2a、a = t/δ
+set -- $(awk 'BEGIN { pi = atan2(0, -1); mu = 4e-7 * pi; s = 5.8e7; W = 1e-3; t = 0.05e-3; d = 0.2e-3
+	om = 2 * pi * 1e7; de = sqrt(2 / (om * mu * s)); a = t / de
+	S = (exp(2 * a) - exp(-2 * a)) / 2; C = (exp(2 * a) + exp(-2 * a)) / 2
+	k = 1 / (de * s * W * (C - cos(2 * a)))
+	printf "%.12e %.12e", 2 * k * (S + sin(2 * a)), (2 * k * (S - sin(2 * a)) + om * mu * d / W) / om }')
+rex=$1; lex=$2
+p3z plate2d_p3.msh 1e7
+r3=$(value_of Rf); l3=$(value_of Lf)
+compare "R(f = 10 MHz, P3) vs coth closed form [ohm/m]" "$r3" "$rex" 1e-6
+compare "L(f = 10 MHz, P3) vs coth closed form [H/m]" "$l3" "$lex" 1e-6
+p3z plate2d_p3o2.msh 1e7
+res=$(awk -v a="$(value_of Rf)" -v b="$r3" -v c="$(value_of Lf)" -v d="$l3" -v r="$rex" -v l="$lex" 'BEGIN {
+	e2 = (a - r) / r; if (e2 < 0) e2 = -e2
+	e3 = (b - r) / r; if (e3 < 0) e3 = -e3
+	f2 = (c - l) / l; if (f2 < 0) f2 = -f2
+	f3 = (d - l) / l; if (f3 < 0) f3 = -f3
+	ok = (e2 > 100 * e3) && (f2 > 10 * f3)
+	printf "%s (R : P2 %.2e vs P3 %.2e, L : P2 %.2e vs P3 %.2e)", ok ? "OK" : "NG", e2, e3, f2, f3 }')
+echo "  order 3 beats order 2 on the same vertices (10 MHz) : $res"
+case "$res" in NG*) status=1 ;; esac
+#     1 kHz (表皮効果なし) では DC と同じく P2 / P3 とも厳密
+p3z plate2d_p3.msh 1e3
+compare "R(f = 1 kHz, P3) [ohm/m]" "$(value_of Rf)" 6.896552e-01 1e-6
+compare "L(f = 1 kHz, P3) [H/m]" "$(value_of Lf)" 2.932153e-07 1e-5
+# (c) 2.2 と 4.1
+sed 's/^mesh = .*/mesh = plate2d_p3_41.msh/' "$SRC/plate2d_p3.ofe" > "$WORK/p3_41.ofe"
+(cd "$WORK" && "$OFE" -n 2 p3_41.ofe > /dev/null && "$OFE_POST" > /dev/null)
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/p3_41.csv"
+run_case plate2d_p3
+grep -v '^title' "$WORK/rlc.csv" > "$WORK/p3_22.csv"
+if cmp -s "$WORK/p3_22.csv" "$WORK/p3_41.csv"; then echo "  10-node triangles, ASCII 2.2 vs 4.1 : identical -> OK"
+else echo "  10-node triangles, ASCII 2.2 vs 4.1 : differ -> NG" >&2; status=1; fi
+# (d) 場の出力
+sed -e 's/plate2d.msh/plate2d_p3.msh/' "$SRC/plate2d_ac.ofe" | awk '/^analysis/{print "fieldout = 1"} {print}' > "$WORK/p3fld.ofe"
+(cd "$WORK" && "$OFE" -n 2 p3fld.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "field area (P3 2-D) [m^2]" "$(vtk vol J_F_re_port1)" 3.0e-7 1e-9
+pf=$(awk -v a="$(vtk int2 J_F_re_port1)" -v b="$(vtk int2 J_F_im_port1)" \
+	'BEGIN{ printf "%.10e", (a + b) / (2 * 5.8e7) }')
+pt=$(awk -v R="$(value_of Rf)" -v L="$(value_of Lf)" \
+	'BEGIN{ om = 2 * 3.14159265358979324 * 1e3; X = om * L
+	        printf "%.10e", 0.5 * R / ((R * R) + (X * X)) }')
+compare "ohmic loss from the field (P3 2-D) [W/m]" "$pf" "$pt" 1e-4
+res=$(awk '
+	NF == 0       { next }
+	/^CELLS/      { st = "c"; k = 0; next }
+	/^CELL_TYPES/ { st = "t"; k = 0; next }
+	/^[A-Z_]+ /   { st = ""; next }
+	st == "t" { k++; if ($1 != 5) type++; next }
+	st == "c" { if ($1 != 3) nn++; next }
+	END { if (k == 0) { printf "NG (no cells)" }
+	      else if (type || nn) { printf "NG (%d not type 5, %d not 3-node)", type, nn }
+	      else { printf "OK" } }' "$WORK/ofe_field.vtk")
+echo "  VTK cells are vertex triangles (type 5, 3 nodes) : $res"
+case "$res" in NG*) status=1 ;; esac
+# (e) 次数の混在 (tri10 を 1 つだけ tri6 にする) は弾く
+awk '/^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 }
+	e && ($2 == 21) && !done { s = $1 " 9"; for (i = 3; i <= 3 + $3 + 6; i++) s = s " " $i; print s; done = 1; next } { print }' \
+	"$SRC/plate2d_p3.msh" > "$WORK/mix3d2.msh"
+sed 's/^mesh = .*/mesh = mix3d2.msh/' "$SRC/plate2d_p3.ofe" > "$WORK/p3mix.ofe"
+mesh_reject "mixed triangle orders (10-node + 6-node) in a 2-D mesh" p3mix.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 p3mix.ofe 2>&1 | grep -q "mixed triangle orders"); then
+	echo "  *** it was rejected for a different reason than the mixed orders" >&2
+	status=1
+fi
 
 # 異方性の μ。**B は ∇Az を 90 度回したものなので、ν を ∇Az にそのまま掛けると
 # 面内 2 成分を取り違える。** 等方性では一致するので等方性ケースでは検出できない。
@@ -3924,7 +4012,7 @@ th_reject "transient M with a bh curve" mtx_bh.ofe "linear and Jiles-Atherton ma
 #       小さい。ここを取り違えると正しい実装が落ちる偽陽性になる)
 #   (e) 弾くべき入力 (理由の文字列まで)
 echo "[order-3 tet] 20-node tetrahedra (gmsh tet20 / tri10)"
-for m in "$SRC"/box_p3*.msh "$SRC"/coax_p3*.msh "$SRC"/tri10_2d.msh; do cp "$m" "$WORK/"; done
+for m in "$SRC"/box_p3*.msh "$SRC"/coax_p3*.msh; do cp "$m" "$WORK/"; done
 run_case box_p3
 compare "C (tet20 box) [F]" "$(value_of C)" 1.77083756e-13 1e-8
 bin_same "order-3 tetrahedra, binary 2.2" box_p3.ofe box_p3_bin.msh box_p3_bin_22.msh
@@ -3971,8 +4059,10 @@ res=$(awk -v a="$v_coax_p3" -v b="$v_coax_p3f" 'BEGIN { ve = atan2(0, -1) * (1.5
 echo "  tet20 coax, isoparametric volume vs pi (b^2 - a^2) lz, h^4 : $res"
 case "$res" in NG*) status=1 ;; esac
 # (e) 弾くべき入力
-printf 'OpenFEM 1 0\ntitle = tri10 2-D\nmesh = tri10_2d.msh\nmaterial = 1.0 0\nregion = 1 2\nelectrode = 1 0\nelectrode = 1 1\nanalysis = M\ntline = X\nend\n' > "$WORK/p3x_2d.ofe"
-th_reject "10-node triangles in a 2-D (M / F) mesh" p3x_2d.ofe "10-node (third-order) triangles are supported only"
+# 3 次元の格子で 10 節点の三角形が 3 次でない四面体と混ざる (四面体だけ 4 節点にする)
+awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 29) { s = $1 " 4"; for (i = 3; i <= 3 + $3 + 4; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p3.msh" > "$WORK/box_p3_tet4.msh"
+sed 's/^mesh = .*/mesh = box_p3_tet4.msh/' "$SRC/box_p3.ofe" > "$WORK/p3x_t4.ofe"
+th_reject "10-node triangles on 4-node tetrahedra" p3x_t4.ofe "supported only as the faces of 20-node tetrahedra"
 sed 's/^analysis = .*/analysis = E/' "$SRC/box_p3.ofe" > "$WORK/p3x_e.ofe"
 th_reject "analysis E on a 20-node tetrahedral mesh" p3x_e.ofe "need a first-order mesh"
 awk 'BEGIN { e = 0 } /^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 } e && ($2 == 21) { s = $1 " 2"; for (i = 3; i <= 3 + $3 + 3; i++) s = s " " $i; print s; next } { print }' "$WORK/box_p3.msh" > "$WORK/box_p3_tri3.msh"
@@ -4053,7 +4143,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
          temp_resistor aniso_plate box_tet coax_tet edge_test bar_eddy \
          box_p2 coax_p2 nodal_test_p2 plate2d_dc plate2d_ac plate2d_r30 \
-         bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
+         bertotti_core temp_material temp_mur hn_plate plate2d_p2 plate2d_p3 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
          thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
          plate_line_bh_ac bar_air_bh thermal_tet thermal_ac thermal_natconv \

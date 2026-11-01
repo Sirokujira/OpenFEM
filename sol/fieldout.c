@@ -106,10 +106,10 @@ void field_cell_grad(const double *u, int kind, double *v)
 		int p, q;
 		tri_axes(&p, &q);
 		for (int e = 0; e < NTri; e++) {
-			double gn[6][2], d[3] = {0, 0, 0};
+			double gn[TRI_NMAX][2], d[3] = {0, 0, 0};
 			int nen = 0;
 			if (!tri_grad_center(e, gn, &nen)) {
-				int32_t nd[6];
+				int32_t nd[TRI_NMAX];
 				tri_nodes(e, nd);
 				for (int a = 0; a < nen; a++) {
 					d[p] += u[nd[a]] * gn[a][0];
@@ -262,11 +262,12 @@ static void write_grid(FILE *fp)
 			fprintf(fp, "%.9e %.9e %.9e\n", Xp[i], Yp[i], Zp[i]);
 		}
 		// VTK_QUADRATIC_TRIANGLE (22) の中間節点の並びは Gmsh の tri6 と同じ
-		// ((0,1) (1,2) (2,0))。四面体と違い並べ替えは要らない
-		const int nen = ((TetOrder >= 2) ? 6 : 3);
+		// ((0,1) (1,2) (2,0))。四面体と違い並べ替えは要らない。3 次 (tri10) は 3 次四面体と
+		// 同じく頂点だけの 1 次セルで書く (VTK の Lagrange 三角形の並びは検証できないので)
+		const int nen = ((TetOrder == 2) ? 6 : 3);
 		fprintf(fp, "\nCELLS %d %d\n", NTri, (nen + 1) * NTri);
 		for (int e = 0; e < NTri; e++) {
-			int32_t nd[6];
+			int32_t nd[TRI_NMAX];
 			tri_nodes(e, nd);
 			fprintf(fp, "%d", nen);
 			for (int l = 0; l < nen; l++) fprintf(fp, " %d", nd[l]);

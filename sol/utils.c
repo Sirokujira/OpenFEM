@@ -69,6 +69,11 @@ void monitor2(FILE *fp, int nthread)
 		fprintf(fp, "Nodes = %lld, Hexahedra = %d, Quadrilaterals = %d\n",
 			(long long)nnode, NHex, NQuad);
 	}
+	else if (MeshMode && (MeshDim == 2)) {
+		fprintf(fp, "Mesh = %s (unstructured 2-D cross-section, %s triangles)\n", MeshFile,
+			((TetOrder == 3) ? "10-node cubic" : (TetOrder >= 2) ? "6-node quadratic" : "3-node linear"));
+		fprintf(fp, "Nodes = %lld, Triangles = %d\n", (long long)nnode, NTri);
+	}
 	else if (MeshMode) {
 		fprintf(fp, "Mesh = %s (unstructured, %s tetrahedra)\n", MeshFile,
 			((TetOrder == 3) ? "20-node cubic" : (TetOrder >= 2) ? "10-node quadratic" : "4-node linear"));
