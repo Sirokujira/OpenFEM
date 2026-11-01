@@ -1452,7 +1452,14 @@ static int solve_one(FILE *fp_log)
 	}
 
 	crs_t A;
-	crs_alloc(&A);
+	crs_alloc_dist(&A);		// mpisolve = 2 なら自分の行ブロックだけ (それ以外は crs_alloc と同じ)
+	{
+		int64_t r0, r1;
+		if (crs_dist_info(&A, &r0, &r1)) {
+			fprintf(fp_log, "\n=== MPI : the matrix is distributed by rows (mpisolve = 2) : rank %d holds rows %lld..%lld "
+				"of %d (%lld nonzeros) ===\n", mpi_rank(), (long long)r0, (long long)(r1 - 1), n, (long long)A.nnz);
+		}
+	}
 
 	unsigned char *fix = (unsigned char *)malloc(n * sizeof(unsigned char));
 	double *phi  = (double *)malloc(n * sizeof(double));
@@ -1718,6 +1725,12 @@ int solve(FILE *fp_log)
 	掃引の無い入力と fieldout = 1 は分散する仕事が無い / 場が解いた rank に
 	しか無いので、黙って直列で走らず入力エラーにする。
 	*/
+	if ((msize > 1) && (MpiSolve == 2)
+	 && (MeshMode || ThermalOn || Direct || (Analysis & ~(ANALYSIS_C | ANALYSIS_L | ANALYSIS_R)))) {
+		fprintf(fp_log, "*** mpisolve = 2 (the matrix distributed over the ranks) supports the structured grid "
+			"with analysis C / L / R only (no thermal, no direct = 1); use mpisolve = 1\n");
+		return 1;
+	}
 	if ((msize > 1) && MpiSolve) {
 		// 行ブロックの行列ベクトル積 (以下は全 rank が直列と同じ流れを重複して走る)
 		mpi_rows_enable(1);

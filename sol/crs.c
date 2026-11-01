@@ -100,6 +100,61 @@ void crs_alloc(crs_t *A)
 }
 
 
+/*
+行列の分散 (mpisolve = 2、構造格子の C / L / R)。rank は行ブロック [r0, r1) (mpisolve = 1 の行列ベクトル積と
+同じ分け方。構造格子の節点は k が最も速く変わる並びなので、x 方向に切った板状の領域) の**行だけ**を持ち、
+組み立ても自分の行にしか足さない (assemble_core が crs_owns で飛ばす)。rowptr は n + 1 個のまま持ち、
+他の rank の行は空 (p0 == p1) にするので、行を引く既存のコードは自分の行についてそのまま動く。
+行ごとの和の順序は直列と同じなので、行列ベクトル積・対角・反作用は直列と**ビット単位で同じ**になる。
+分散する行列は 1 つだけ (DistA で登録する) なので、他の行列の扱いは一切変わらない。
+*/
+static const crs_t *DistA = NULL;
+static int64_t DistR0 = 0, DistR1 = 0;
+
+void crs_alloc_dist(crs_t *A)
+{
+	crs_alloc(A);
+	if ((MpiSolve != 2) || MeshMode || (mpi_size() < 2)) return;
+	const int n = (int)A->n;
+	int r0, r1;
+	mpi_row_range(n, &r0, &r1);
+	// 自分の行だけを詰め直す
+	const int64_t q0 = A->rowptr[r0], q1 = A->rowptr[r1];
+	const int64_t nl = q1 - q0;
+	int32_t *col = (int32_t *)malloc((size_t)(nl > 0 ? nl : 1) * sizeof(int32_t));
+	memcpy(col, &A->col[q0], (size_t)nl * sizeof(int32_t));
+	free(A->col);
+	free(A->val);
+	A->col = col;
+	A->val = (double *)calloc((size_t)(nl > 0 ? nl : 1), sizeof(double));
+	for (int row = 0; row <= n; row++) {
+		const int64_t p = A->rowptr[row];
+		A->rowptr[row] = ((row <= r0) ? 0 : (row >= r1) ? nl : (p - q0));
+	}
+	A->nnz = nl;
+	DistA = A;
+	DistR0 = r0;
+	DistR1 = r1;
+}
+
+
+// 行 row がこの rank の持ち分か (分散していない行列は常に 1)
+int crs_owns(const crs_t *A, int64_t row)
+{
+	return ((A != DistA) || ((row >= DistR0) && (row < DistR1)));
+}
+
+
+// 分散した行列なら 1 (ログ用に持ち分の行範囲も返す)
+int crs_dist_info(const crs_t *A, int64_t *r0, int64_t *r1)
+{
+	if (A != DistA) return 0;
+	*r0 = DistR0;
+	*r1 = DistR1;
+	return 1;
+}
+
+
 void crs_zero(crs_t *A)
 {
 	// IEEE754 の 0.0 は全ビット 0 なので memset で足りる
@@ -109,6 +164,7 @@ void crs_zero(crs_t *A)
 
 void crs_free(crs_t *A)
 {
+	if (A == DistA) DistA = NULL;
 	free(A->rowptr);
 	free(A->col);
 	free(A->val);
@@ -207,6 +263,8 @@ void crs_diag(const crs_t *A, double *d)
 		}
 		d[row] = s;
 	}
+	// 分散した行列 : 他の rank の行は空なので 0 が入っている。持ち主の値で揃える
+	if (A == DistA) mpi_allgather_rows(d, n);
 }
 
 
@@ -219,6 +277,8 @@ double crs_row_dot(const crs_t *A, int64_t row, const double *x)
 	for (int64_t p = p0; p < p1; p++) {
 		s += A->val[p] * x[A->col[p]];
 	}
+	// 分散した行列 : 行の持ち主が計算した値を配る (全 rank が同じ順に呼ぶので集団通信が揃う)
+	if (A == DistA) mpi_bcast_dbl(&s, 1, mpi_row_owner((int)A->n, (int)row));
 
 	return s;
 }

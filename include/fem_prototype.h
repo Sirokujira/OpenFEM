@@ -144,6 +144,9 @@ int  h5_nfield(void);
 // crs.c
 void crs_alloc(crs_t *);
 void crs_free(crs_t *);
+void crs_alloc_dist(crs_t *);
+int crs_owns(const crs_t *, int64_t);
+int crs_dist_info(const crs_t *, int64_t *, int64_t *);
 void crs_zero(crs_t *);
 int64_t crs_offset(int64_t, int, int, int, int, int, int);
 void crs_spmv(const crs_t *, const double *, double *, const unsigned char *);
@@ -242,6 +245,8 @@ void mpi_rows_enable(int);
 int mpi_enabled(void);
 void mpi_row_range(int, int *, int *);
 void mpi_allgather_rows(double *, int);
+int mpi_row_owner(int, int);
+void mpi_bcast_dbl(double *, int, int);
 FILE *mpi_fopen_out(const char *, const char *);
 
 // expr.c

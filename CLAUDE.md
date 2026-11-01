@@ -450,6 +450,11 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
   `mpi_allgather_rows`)。それ以外は全 rank が直列の順で重複して走るので出力は直列とバイト一致。
   行列ベクトル積を `crs_spmv()` を通さずに書くと分散から漏れる (結果は正しいが遅い) ので、新しい積も
   `crs_spmv()` を使うこと。出力ファイルは `mpi_fopen_out()` で開く (rank > 0 は null デバイス)。
+- **`mpisolve = 2` は行列そのものの行ブロック分散** (構造格子の C / L / R だけ)。分散する行列は `crs_alloc_dist()` で
+  **1 つだけ登録**し、`crs_spmv` / `crs_diag` (持ち主から Allgatherv) / `crs_row_dot` (持ち主が Bcast) / `crs_owns`
+  (組み立てで他の rank の行を飛ばす) がそれを見る。`crs_t` にフィールドを足さないこと (スタックに未初期化で置く箇所が
+  多い)。他の rank の行は rowptr の上で空なので、行を直接引く新しいコードは `crs_owns` で守ること。
+  分散し忘れても答えは同じなので、検査は rank 0 の行数で見る。
 - **MPI の並列化の粒度は「周波数掃引の点」(既定) か、上の行ブロックの積 (`mpisolve`) だけ。** 各点の演算は直列と完全に
   同一なので、`mpirun -np N` の出力は直列と**バイト単位で一致**しなければ
   ならない (それが `rlc_check.sh` の [mpi] 節の恒等式。閉形式も許容誤差も

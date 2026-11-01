@@ -1048,13 +1048,15 @@ int input_data(FILE *fp)
 		else if (!strcmp(strkey, "mpisolve")) {
 			// mpisolve = 0 | 1 : 1 で mpirun の rank に行列ベクトル積を行ブロックで分ける (掃引の点の
 			//   分散の代わり。出力は直列とバイト一致)。WITH_MPI=OFF のビルドでは黙って直列に落ちず入力エラー
-			if ((nval != 1) || ((atoi(token[2]) != 0) && (atoi(token[2]) != 1))) {
+			// mpisolve = 2 : さらに行列そのものを行ブロックで分散する (各 rank は自分の行だけを組み立てて持つ。
+			//   構造格子の C / L / R だけ。出力は同じくバイト一致)
+			if ((nval != 1) || (atoi(token[2]) < 0) || (atoi(token[2]) > 2)) {
 				printf(errfmt2, strkey);
 				return 1;
 			}
 			MpiSolve = atoi(token[2]);
 			if (MpiSolve && !mpi_enabled()) {
-				printf("%s\n", "*** mpisolve = 1 needs a build with -DWITH_MPI=ON (this binary was built without MPI)");
+				printf("%s\n", "*** mpisolve = 1 / 2 needs a build with -DWITH_MPI=ON (this binary was built without MPI)");
 				return 1;
 			}
 		}

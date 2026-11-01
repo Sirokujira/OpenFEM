@@ -1361,6 +1361,7 @@ static void assemble_core(crs_t *A, int mode, const double *coefcell)
 		for (int l = 0; l < 8; l++) {
 			const int li = LI(l), lj = LJ(l), lk = LK(l);
 			const int64_t row = node_index(i + li, j + lj, k + lk);
+			if (!crs_owns(A, row)) continue;		// 分散した行列 (mpisolve = 2) : 他の rank の行
 			const int64_t rowstart = A->rowptr[row];
 			for (int mm = 0; mm < 8; mm++) {
 				const int di = LI(mm) - li;

@@ -149,6 +149,26 @@ void mpi_allgather_rows(double *y, int n)
 	MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, y, RowCnt, RowDsp, MPI_DOUBLE, MPI_COMM_WORLD);
 }
 
+
+// 行 row (n 行の行ブロック分割) を持つ rank
+int mpi_row_owner(int n, int row)
+{
+	if (!RowOn) return 0;
+	for (int r = 0; r < RowSize; r++) {
+		const int b = (int)(((int64_t)n * (r + 1)) / RowSize);
+		if (row < b) return r;
+	}
+	return RowSize - 1;
+}
+
+
+// root の値を全 rank に配る (行列を分散したとき、他の rank の行の内積を受け取る)
+void mpi_bcast_dbl(double *buf, int n, int root)
+{
+	if (!RowOn) return;
+	MPI_Bcast(buf, n, MPI_DOUBLE, root, MPI_COMM_WORLD);
+}
+
 #else		// !OFE_MPI : スタブ (直列)
 
 int mpi_init(int *argc, char ***argv)
@@ -238,6 +258,19 @@ void mpi_row_range(int n, int *r0, int *r1)
 void mpi_allgather_rows(double *y, int n)
 {
 	(void)y; (void)n;
+}
+
+
+int mpi_row_owner(int n, int row)
+{
+	(void)n; (void)row;
+	return 0;
+}
+
+
+void mpi_bcast_dbl(double *buf, int n, int root)
+{
+	(void)buf; (void)n; (void)root;
 }
 
 #endif		// OFE_MPI
