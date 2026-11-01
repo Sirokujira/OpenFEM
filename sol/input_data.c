@@ -279,6 +279,7 @@ int input_data(FILE *fp)
 	RadEps = 0;
 	ConvTabN = 0;
 	RadTabN = 0;
+	RadExchange = 0;
 	NConv = 0;
 	NRad = 0;
 	TransientOn = 0;
@@ -998,6 +999,15 @@ int input_data(FILE *fp)
 			}
 			*tn = nt;
 		}
+		else if (!strcmp(strkey, "radiationexchange")) {
+			// radiationexchange = 1 : 輻射を課した露出面どうしの相互放射 (灰色・拡散、形態係数は
+			//   閉形式、遮蔽は面の中心どうしの線分で判定)。0 なら各面は周囲 (T_r) とだけ交換する
+			if ((nval != 1) || ((atoi(token[2]) != 0) && (atoi(token[2]) != 1))) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			RadExchange = atoi(token[2]);
+		}
 		else if (!strcmp(strkey, "thermal")) {
 			// thermal = <I [A]> [<maxiter> [<tol>]]  : 電気-熱連成 (定常、analysis = R)
 			//   ポートに電流 I を流したときの Joule 発熱で温度分布を解き、
@@ -1535,6 +1545,19 @@ int input_data(FILE *fp)
 			input_warn("convectiontemptable has no effect without convection (it scales "
 				"the h of the convection lines)");
 		}
+		if (RadExchange && MeshMode) {
+			printf("%s\n", "*** radiationexchange is implemented for the structured grid only "
+				"(the closed-form view factors assume axis-aligned rectangular faces)");
+			return 1;
+		}
+		if (RadExchange && (RadTabN > 0)) {
+			printf("%s\n", "*** radiationexchange cannot be combined with radiationtemptable "
+				"(the radiosity matrix is built once for constant emissivities)");
+			return 1;
+		}
+		if (RadExchange && (NRad < 1)) {
+			input_warn("radiationexchange has no effect without radiation");
+		}
 		if ((RadTabN > 0) && (NRad < 1)) {
 			input_warn("radiationtemptable has no effect without radiation (it scales "
 				"the emissivity of the radiation lines)");
@@ -1597,6 +1620,10 @@ int input_data(FILE *fp)
 		}
 		if (RadTabN > 0) {
 			input_warn("radiationtemptable has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (RadExchange) {
+			input_warn("radiationexchange has no effect without thermal (it is only "
 				"read by the electro-thermal coupling)");
 		}
 		if (NRad > 0) {

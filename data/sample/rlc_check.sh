@@ -3575,6 +3575,96 @@ awk '/^convectiontemptable/{print "convectiontemptable = 30 -1 100 1"; next} {pr
 	"$SRC/thermal_natconv.ofe" > "$WORK/thctx_neg.ofe"
 th_reject "convectiontemptable with a negative factor" thctx_neg.ofe "invalid convectiontemptable data"
 
+# ---- 面どうしの相互放射 (radiationexchange、構造格子) ----
+#
+# 形態係数は閉形式 (周回積分 A_i F_ij = (1/2π) ∮∮ ln r dl_i・dl_j の平行な辺の対)、
+# 放射度は密に一度だけ解く (thermal.c の rx_build の注釈)。検査は教科書の閉形式
+# (平行な長方形・辺を共有する直交長方形) と、相互性から厳密に決まる面積の比。
+echo "[thermal radiation exchange] gray-diffuse surface-to-surface radiation (view factors)"
+cp "$SRC/thermal_cavity.ofe" "$SRC/thermal_rad.ofe" "$WORK/"
+rx_row() { awk -v r="$1" '$0 ~ ("radiation exchange : row " r ",") { print $NF; exit }' "$WORK/ofe.log"; }
+rx_sum() { awk '/sum A F_inf \/ sum A/ { print $NF; exit }' "$WORK/ofe.log"; }
+set -- $(awk 'BEGIN { pi = atan2(0, -1); X = 1; Y = 1
+	F = (2 / (pi * X * Y)) * (log(sqrt((1 + X * X) * (1 + Y * Y) / (1 + X * X + Y * Y))) + X * sqrt(1 + Y * Y) * atan2(X, sqrt(1 + Y * Y)) + Y * sqrt(1 + X * X) * atan2(Y, sqrt(1 + X * X)) - X * atan2(X, 1) - Y * atan2(Y, 1))
+	W = 1; H = 1
+	G = (1 / (pi * W)) * (W * atan2(1, W) + H * atan2(1, H) - sqrt(H * H + W * W) * atan2(1, sqrt(H * H + W * W)) + 0.25 * log(((1 + W * W) * (1 + H * H) / (1 + W * W + H * H)) * ((W * W * (1 + W * W + H * H) / ((1 + W * W) * (W * W + H * H))) ^ (W * W)) * ((H * H * (1 + H * H + W * W) / ((1 + H * H) * (H * H + W * W))) ^ (H * H))))
+	printf "%.15e %.15e", F, G }')
+fpar=$1; fper=$2
+# (1) 開いた立方体の空洞 (thermal_cavity.ofe) : 行ごとの F∞ が閉形式に機械精度で一致
+th_run thermal_cavity.ofe
+compare "cavity floor -> opening == parallel squares (Hottel) [-]" "$(rx_row 2)" "$fpar" 1e-10
+compare "cavity wall -> opening == perpendicular squares, common edge [-]" "$(rx_row 3)" "$fper" 1e-10
+compare "cavity : sum A F_inf / sum A == opening / wall area = 0.2 [-]" "$(rx_sum)" 0.2 1e-10
+th_energy "radiation exchange, open cavity"
+tex=$(th_t)
+awk '!/^radiationexchange/' "$SRC/thermal_cavity.ofe" > "$WORK/thrx0.ofe"
+th_run thrx0.ofe
+res=$(awk -v a="$tex" -v b="$(th_t)" 'BEGIN { printf "%s (T_max %.6f with exchange vs %.6f without)", (a > b) ? "OK" : "NG", a, b }')
+echo "  exchange inside the cavity reduces the heat lost to the ambient : $res"
+case "$res" in NG*) status=1 ;; esac
+# (2) 壁で隔てた 2 つの空洞 : 空洞 1 の奥の壁 (x = 2mm) は空洞 2 の奥の壁と向き合うが、
+#     間の壁で遮られるので F∞ は 1 つの空洞のときと同じ閉形式のまま (遮蔽の検査)。
+#     遮蔽を見ないと F∞ が減る。面積の比 12/44 も相互性から厳密
+awk '/^geometry = 0 1 4e-3/{print "geometry = 0 1 2e-3 4e-3 0.5e-3 2.5e-3 1e-3 3e-3"; print "geometry = 0 1 6e-3 8e-3 0.5e-3 2.5e-3 1e-3 3e-3"; next}
+	/^radiation = /{ if (!r) { print "radiation = 0.8 10  2e-3 8e-3  0.5e-3 2.5e-3  1e-3 3e-3"; print "radiation = 0.8 10  2e-3 2e-3  0.5e-3 2.5e-3  1e-3 3e-3" } r = 1; next } {print}' \
+	"$SRC/thermal_cavity.ofe" > "$WORK/thrx2.ofe"
+th_run thrx2.ofe
+compare "two cavities : far wall -> opening unchanged (occlusion by the wall) [-]" "$(rx_row 2)" "$fper" 1e-10
+compare "two cavities : sum A F_inf / sum A == 12/44 [-]" "$(rx_sum)" "$(awk 'BEGIN { printf "%.15e", 12 / 44 }')" 1e-10
+th_energy "radiation exchange, two cavities"
+# (3) 凸な棒 (thermal_rad.ofe) : 見える面の対が無いので、通常の輻射と全桁一致
+th_run thermal_rad.ofe
+rr=$(th_r); tr0=$(th_t)
+awk '/^radiation /{print; print "radiationexchange = 1"; next} {print}' "$SRC/thermal_rad.ofe" > "$WORK/thrx_cv.ofe"
+th_run thrx_cv.ofe
+compare "convex bar with exchange == plain radiation : R [ohm]" "$(th_r)" "$rr" 1e-12
+compare "convex bar with exchange == plain radiation : T_max [degC]" "$(th_t)" "$tr0" 1e-12
+# (4) 閉じた空洞 (導体の中の空隙) : Σ_j F_ij = 1 なので周囲へ逃げる熱は 0
+#     (内部で熱を運ぶだけ)。許容 1e-10 (I²R に対して)
+awk '/^geometry = 0 1 4e-3/{print "geometry = 0 1 4e-3 6e-3 0.5e-3 2.5e-3 0.5e-3 2.2e-3"; next}
+	/^radiation = /{ if (!r) print "radiation = 0.8 10  4e-3 6e-3  0.5e-3 2.5e-3  0.5e-3 2.2e-3"; r = 1; next } {print}' \
+	"$SRC/thermal_cavity.ofe" > "$WORK/thrx_void.ofe"
+th_run thrx_void.ofe
+res=$(awk '/joule power/ { for (i = 1; i <= NF; i++) { if ($i == "R") a = $(i+2); if ($i == "radiation") g = $(i+2) + 0 } }
+	END { d = g / a; if (d < 0) d = -d; printf "%s (to radiation / I^2 R = %.1e)", (d < 1e-10) ? "OK" : "NG", d }' "$WORK/ofe.log")
+echo "  closed void : no heat leaves by radiation : $res"
+case "$res" in NG*) status=1 ;; esac
+compare "closed void : sum A F_inf / sum A == 0 [-]" "$(awk -v s="$(rx_sum)" 'BEGIN { printf "%.15e", 1 + s }')" 1 1e-12
+th_energy "radiation exchange, closed void"
+# (4b) 熱平衡 : 電流 0 (waveform = 0 0) で全体が T_r なら、どんな形・ε でも q = 0 なので
+#      温度は T_r のまま動かない。**反射の項 (1 - ε) の取り違えはこれでしか落ちない**
+#      (形態係数の検査は幾何だけ、閉じた空洞の恒等式は放射度の行列に依らない)
+awk '/^radiation = /{ sub(/ 10 /, " 20 ") } /^thermal/{print; print "heatcap = 2 3.4e6"; print "transient = 0.5 10 0.5"; print "waveform = 0 0"; next} {print}' \
+	"$SRC/thermal_cavity.ofe" > "$WORK/thrx_eq.ofe"
+th_run thrx_eq.ofe
+#      (T_max はヒートシンクの 20 degC に張り付くので見ない。平均温度で見る)
+compare "radiation exchange, equilibrium (I = 0, all at T_r) : T_mean stays 20 degC [degC]" \
+	"$(awk '/T_mean/ { print $8; exit }' "$WORK/ofe.log")" 20 1e-12
+# (4c) α = 0 では対角を Newton、他の面の分を Picard で 5 回 (実測)。上限を assert する
+#      (接線に Q_ii でなく ε を使う誤りは Q_ii = ε(1 - O(F²)) と近いので回数も変わらず、
+#      不動点も同じ。検出できない等価な変異として README に記す)
+awk '/^tempco/{print "tempco = 2 0 0"; next} {print}' "$SRC/thermal_cavity.ofe" > "$WORK/thrx_a0.ofe"
+th_run thrx_a0.ofe
+nit=$(awk '/converged in/ { print $3; exit }' "$WORK/ofe.log")
+if [ -n "$nit" ] && [ "$nit" -le 6 ]; then
+	echo "  radiation exchange (alpha = 0) : converged in $nit iterations (<= 6) -> OK"
+else
+	echo "  radiation exchange (alpha = 0) : ${nit:-?} iterations (> 6) -> NG" >&2
+	status=1
+fi
+# (5) 過渡 (CN) の熱の収支
+awk '/^thermal/{print; print "heatcap = 2 3.4e6"; print "transient = 0.5 20 0.5"; next} {print}' \
+	"$SRC/thermal_cavity.ofe" > "$WORK/thrx_tr.ofe"
+th_run thrx_tr.ofe
+th_balance "radiation exchange, transient (CN)"
+# (6) 弾くべき入力
+awk '/^thermal/{print "radiation = 0.8 10"; print "radiationexchange = 1"} {print}' "$SRC/thermal_tet.ofe" > "$WORK/thrxx_tet.ofe"
+th_reject "radiationexchange on a tetrahedral mesh" thrxx_tet.ofe "structured grid only"
+awk '/^radiationexchange/{print; print "radiationtemptable = 0 1 500 1.2"; next} {print}' "$SRC/thermal_cavity.ofe" > "$WORK/thrxx_tab.ofe"
+th_reject "radiationexchange with radiationtemptable" thrxx_tab.ofe "cannot be combined with radiationtemptable"
+awk '/^radiationexchange/{print "radiationexchange = 2"; next} {print}' "$SRC/thermal_cavity.ofe" > "$WORK/thrxx_2.ofe"
+th_reject "radiationexchange = 2" thrxx_2.ofe "invalid radiationexchange data"
+
 # ---- 3 次四面体 (20 節点、gmsh の tet20 / tri10) ----
 #
 # 局所節点の並びは gmsh 4.15.2 の出力を重心座標で分類した実測の表 (unstruct.c の
@@ -3710,6 +3800,8 @@ lint_expect "convectiontemptable without thermal" lint_ctt_noth.ofe yes
 #   (thrt*.ofe は [thermal h(T)] 節で作ったもの)
 lint_expect "radiationtemptable without radiation" thrtx_norad.ofe yes
 lint_expect "radiationtemptable (clean)" thrt.ofe no
+awk '/^thermal/{print "radiationexchange = 1"} {print}' "$SRC/thermal_bar.ofe" > "$WORK/lint_rx_norad.ofe"
+lint_expect "radiationexchange without radiation" lint_rx_norad.ofe yes
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
@@ -3719,7 +3811,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
          thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
          plate_line_bh_ac bar_air_bh thermal_tet thermal_ac thermal_natconv \
-         box_p3 nodal_test_p3 coax_p3; do
+         box_p3 nodal_test_p3 coax_p3 thermal_cavity; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

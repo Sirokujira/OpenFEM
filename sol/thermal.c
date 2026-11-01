@@ -233,6 +233,19 @@ static const surfbc_t *surf_bc(int rad, double xc, double yc, double zc, int *id
 }
 
 
+// 面どうしの相互放射 (radiationexchange、構造格子)。輻射を課した露出面を 1 枚ずつ
+// 放射度の要素とし (灰色・拡散)、ε を Q_ii に、周囲 (T_r) との交換を面ごとの一様な
+// 項 c_i に置き換える (rx_build / rx_update の注釈)
+static struct {
+	int on, n;
+	int *d, *sg, *row;				// 面の法線の軸、向き (±1)、輻射の行
+	double *lo, *hi;				// [3n] 面の範囲 (軸 d では lo = hi)
+	double *area, *eps, *tr;
+	double *qii, *c, *e;			// Q の対角、一様な項、面の平均の σT⁴
+	double *q, *q0, *finf;			// Q [n*n]、q0、F_i∞
+} RX;
+
+
 // 露出面の境界条件。熱を通すセルの 6 面のうち、隣が格子の外か熱を通さないセルの
 // ものが露出面。電極の面 (4 節点がすべて導体の節点) は端子に接しているので除く。
 //
@@ -315,12 +328,54 @@ static double surf_faces_grid(crs_t *B, double *g, const double *t, const double
 				}
 				continue;
 			}
-			const surfbc_t *bc = surf_bc(rad, xc, yc, zc, NULL);
+			int ridx = 0;
+			const surfbc_t *bc = surf_bc(((rad >= 4) ? 1 : rad), xc, yc, zc, &ridx);
 			if ((bc == NULL) || (bc->c <= 0)) continue;
 			nface++;
 			const double hc = bc->c, ta = bc->t;
+			const int fid = (int)(nface - 1);	// 輻射の面の通し番号 (rad = 1/4/5 で同じ順)
 
 			const double area = h[p] * h[q];
+			if (rad == 4) {
+				// 相互放射の面を集める (rx_build)
+				if (fid < RX.n) {
+					RX.d[fid] = d;
+					RX.sg[fid] = (s ? 1 : -1);
+					RX.row[fid] = ridx;
+					RX.area[fid] = area;
+					RX.eps[fid] = hc;
+					RX.tr[fid] = ta;
+					for (int a = 0; a < 3; a++) {
+						const double *xx = ((a == 0) ? Xn : (a == 1) ? Yn : Zn);
+						double lo = 1e300, hi = -1e300;
+						for (int m = 0; m < 4; m++) {
+							const int ix = ((a == 0) ? li[m] : (a == 1) ? lj[m] : lk[m]);
+							if (xx[ix] < lo) lo = xx[ix];
+							if (xx[ix] > hi) hi = xx[ix];
+						}
+						RX.lo[(fid * 3) + a] = lo;
+						RX.hi[(fid * 3) + a] = hi;
+					}
+				}
+				continue;
+			}
+			if (rad == 5) {
+				// 面の平均の σT_K⁴ (面の 2x2 Gauss、熱流の積分と同じ点)
+				double es = 0;
+				for (int ga = 0; ga < 2; ga++) {
+				for (int gb = 0; gb < 2; gb++) {
+					double tg = 0;
+					for (int m = 0; m < 4; m++) {
+						tg += (((m >> 1) & 1) ? gp[ga] : (1 - gp[ga]))
+						    * ((m & 1) ? gp[gb] : (1 - gp[gb])) * t[nd[m]];
+					}
+					const double tk = tg + KELVIN;
+					es += STEFAN * tk * tk * tk * tk / 4;
+				}
+				}
+				RX.e[fid] = es;
+				continue;
+			}
 			double me[4][4];
 			double ge[4] = {0, 0, 0, 0};
 			if (!rad) {
@@ -351,7 +406,16 @@ static double surf_faces_grid(crs_t *B, double *g, const double *t, const double
 					}
 					const double w = area / 4;
 					double qv, dq;
-					surf_q(rad, hc, ta, tg, &qv, &dq, &bad);
+					if ((rad == 1) && RX.on) {
+						// 相互放射 : q = Q_ii σT⁴ + c_i (c_i は他の面と周囲からの項、反復ごとに更新)
+						const double tk = tg + KELVIN;
+						if (tk <= 0) bad = 1;
+						qv = (RX.qii[fid] * STEFAN * tk * tk * tk * tk) + RX.c[fid];
+						dq = 4 * RX.qii[fid] * STEFAN * tk * tk * tk;
+					}
+					else {
+						surf_q(rad, hc, ta, tg, &qv, &dq, &bad);
+					}
 					qsum += w * qv;
 					for (int m = 0; m < 4; m++) {
 						ge[m] += w * (dq * tg - qv) * nn[m];
@@ -481,6 +545,323 @@ static double surf_faces(crs_t *B, double *g, const double *t, const double *kce
 {
 	if (MeshMode) return surf_faces_tet(B, g, t, rad, hits);
 	return surf_faces_grid(B, g, t, kcell, rad, hits);
+}
+
+
+/*
+面どうしの相互放射 (radiationexchange = 1、構造格子)。
+
+輻射を課した露出面を 1 枚ずつ放射度の要素とする (灰色・拡散、面内で一様な放射度)。
+面 i の放射度 J、入射 G、正味の熱流 q (外向き) は
+	J_i = ε_i E_i + (1 - ε_i) G_i,   G_i = Σ_j F_ij J_j + F_i∞ E∞_i,   q_i = J_i - G_i
+(E = σT⁴ は面の平均、E∞ = σT_r⁴、F_i∞ = 1 - Σ_j F_ij は面の行の周囲温度の黒体へ)。
+J は E の 1 次式なので一度だけ密に解いておく:
+	M = I - diag(1 - ε) F,  X = M⁻¹ diag(ε),  y = M⁻¹ ((1 - ε) F∞ E∞)
+	q = Q E + q0,   Q = (I - F) X,   q0 = (I - F) y - F∞ E∞
+面の熱流の点の値を q(x) = Q_ii σT(x)⁴ + c_i (c_i = Σ_{j≠i} Q_ij E_j + q0_i) とし、
+対角は輻射と同じく Newton 線形化、他の面の分 c は Picard の各回に更新する。
+F = 0 (見える面が無い) なら Q_ii = ε_i、c_i = -ε_i E∞_i で通常の輻射に厳密に戻る。
+
+形態係数は**閉形式** (面が軸に平行な長方形なので、周回積分
+	A_i F_ij = (1/2π) ∮_i ∮_j ln r (dl_i・dl_j)
+で平行な辺の対だけが残り、各対は ln r の 2 重積分の閉形式 F2 になる)。相互性
+A_i F_ij = A_j F_ji は式の対称性から厳密。遮蔽は面の中心どうしを結ぶ線分が熱を
+通すセルを通るかで判定する (全部見えるか全く見えないかの 2 値。部分的な遮蔽は近似)。
+*/
+static double rx_f2(double u, double d)
+{
+	const double r2 = (u * u) + (d * d);
+	if (r2 <= 0) return 0;
+	const double lr = 0.5 * log(r2);
+	double v = (((u * u) - (d * d)) / 2) * lr - (0.75 * u * u);
+	if (d > 0) v += d * u * atan(u / d);
+	return v;
+}
+
+
+// 平行な線分の対の ∫∫ ln r ds1 ds2 (s1 ∈ [a1, a2], s2 ∈ [b1, b2]、垂直方向の距離 d)
+static double rx_seg(double a1, double a2, double b1, double b2, double d)
+{
+	return rx_f2(a2 - b1, d) - rx_f2(a1 - b1, d) - rx_f2(a2 - b2, d) + rx_f2(a1 - b2, d);
+}
+
+
+// 面 f の 4 辺 (法線に対して反時計回り)。辺 k の軸 ax[k]、向き o[k] (±1)、
+// 軸方向の範囲 [s0, s1]、他の 2 軸の座標 pc[k][3] (ax の成分は未使用)
+static void rx_edges(int f, int ax[4], int o[4], double s0[4], double s1[4], double pc[4][3])
+{
+	const int d = RX.d[f];
+	const int p = ((d == 0) ? 1 : 0), q = ((d == 2) ? 1 : 2);
+	const double *lo = &RX.lo[f * 3], *hi = &RX.hi[f * 3];
+	// e_p x e_q = +e_d (d = 0, 2) / -e_d (d = 1)
+	const int ccw = (((d == 1) ? -1 : 1) * RX.sg[f]) > 0;
+	// (p1,q1) -> (p2,q1) -> (p2,q2) -> (p1,q2) が e_p x e_q の向きに反時計回り
+	const int axs[4] = {p, q, p, q};
+	const int ors[4] = {+1, +1, -1, -1};
+	for (int k = 0; k < 4; k++) {
+		ax[k] = axs[k];
+		o[k] = (ccw ? ors[k] : -ors[k]);
+		s0[k] = lo[ax[k]];
+		s1[k] = hi[ax[k]];
+		for (int a = 0; a < 3; a++) pc[k][a] = lo[a];
+		pc[k][d] = lo[d];
+		// 辺の固定座標 : p 向きの辺は q = q1 (k = 0) / q2 (k = 2)、q 向きの辺は p = p2 (k = 1) / p1 (k = 3)
+		if (k == 0) pc[k][q] = lo[q];
+		if (k == 2) pc[k][q] = hi[q];
+		if (k == 1) pc[k][p] = hi[p];
+		if (k == 3) pc[k][p] = lo[p];
+	}
+}
+
+
+// 面 i, j の A_i F_ij (遮蔽なし)
+static double rx_aif(int i, int j)
+{
+	int ai[4], oi[4], aj[4], oj[4];
+	double si0[4], si1[4], pi[4][3], sj0[4], sj1[4], pj[4][3];
+	rx_edges(i, ai, oi, si0, si1, pi);
+	rx_edges(j, aj, oj, sj0, sj1, pj);
+	double sum = 0;
+	for (int k = 0; k < 4; k++) {
+		for (int l = 0; l < 4; l++) {
+			if (ai[k] != aj[l]) continue;
+			const int a = ai[k];
+			double d2 = 0;
+			for (int b = 0; b < 3; b++) {
+				if (b == a) continue;
+				d2 += (pi[k][b] - pj[l][b]) * (pi[k][b] - pj[l][b]);
+			}
+			sum += oi[k] * oj[l] * rx_seg(si0[k], si1[k], sj0[l], sj1[l], sqrt(d2));
+		}
+	}
+	return sum / (2 * PI);
+}
+
+
+// 面の中心 (法線方向に少し浮かせた点) どうしを結ぶ線分が熱を通すセルを通るか
+static int rx_blocked(int i, int j, const double *kcell)
+{
+	double a[3], b[3];
+	for (int c = 0; c < 3; c++) {
+		a[c] = (RX.lo[(i * 3) + c] + RX.hi[(i * 3) + c]) / 2;
+		b[c] = (RX.lo[(j * 3) + c] + RX.hi[(j * 3) + c]) / 2;
+	}
+	// 格子の面上の点から始めると自分のセルに入るので、法線方向に刻みの 1e-6 だけ浮かせる
+	const double *xs[3] = {Xn, Yn, Zn};
+	const int nn[3] = {Nx, Ny, Nz};
+	const double span = fabs(Xn[Nx] - Xn[0]) + fabs(Yn[Ny] - Yn[0]) + fabs(Zn[Nz] - Zn[0]);
+	a[RX.d[i]] += RX.sg[i] * 1e-9 * span;
+	b[RX.d[j]] += RX.sg[j] * 1e-9 * span;
+	// 線分 a + t (b - a) が格子面を横切る t を集め、区間の中点のセルを見る
+	double tt[3 * 4096 + 2];
+	int nt = 0;
+	tt[nt++] = 0;
+	tt[nt++] = 1;
+	for (int c = 0; c < 3; c++) {
+		const double dd = b[c] - a[c];
+		if (fabs(dd) <= 0) continue;
+		for (int m = 0; (m <= nn[c]) && (nt < (3 * 4096)); m++) {
+			const double t = (xs[c][m] - a[c]) / dd;
+			if ((t > 0) && (t < 1)) tt[nt++] = t;
+		}
+	}
+	// 挿入ソート (区間の数は高々数百)
+	for (int m = 1; m < nt; m++) {
+		const double v = tt[m];
+		int k = m - 1;
+		while ((k >= 0) && (tt[k] > v)) { tt[k + 1] = tt[k]; k--; }
+		tt[k + 1] = v;
+	}
+	for (int m = 0; m + 1 < nt; m++) {
+		const double tm = (tt[m] + tt[m + 1]) / 2;
+		int ic[3], out = 0;
+		for (int c = 0; c < 3; c++) {
+			const double x = a[c] + (tm * (b[c] - a[c]));
+			// 二分探索でセル
+			int lo = 0, hi = nn[c];
+			if ((x < xs[c][0]) || (x > xs[c][nn[c]])) { out = 1; break; }
+			while ((hi - lo) > 1) {
+				const int md = (lo + hi) / 2;
+				if (xs[c][md] <= x) lo = md; else hi = md;
+			}
+			ic[c] = lo;
+		}
+		if (out) continue;				// 格子の外は空間
+		if (kcell[((int64_t)ic[0] * Ny + ic[1]) * Nz + ic[2]] > 0) return 1;
+	}
+	return 0;
+}
+
+
+// N 元の密な連立 1 次方程式 (部分ピボット付き Gauss)。a は破壊され、b (n x m) に解が入る
+static int rx_solve(int n, double *a, double *b, int m)
+{
+	for (int k = 0; k < n; k++) {
+		int pv = k;
+		for (int i = k + 1; i < n; i++) {
+			if (fabs(a[(i * n) + k]) > fabs(a[(pv * n) + k])) pv = i;
+		}
+		if (fabs(a[(pv * n) + k]) <= 0) return 1;
+		if (pv != k) {
+			for (int c = 0; c < n; c++) {
+				const double w = a[(k * n) + c]; a[(k * n) + c] = a[(pv * n) + c]; a[(pv * n) + c] = w;
+			}
+			for (int c = 0; c < m; c++) {
+				const double w = b[(k * m) + c]; b[(k * m) + c] = b[(pv * m) + c]; b[(pv * m) + c] = w;
+			}
+		}
+		const double piv = a[(k * n) + k];
+		for (int i = k + 1; i < n; i++) {
+			const double f = a[(i * n) + k] / piv;
+			if (f == 0) continue;
+			for (int c = k; c < n; c++) a[(i * n) + c] -= f * a[(k * n) + c];
+			for (int c = 0; c < m; c++) b[(i * m) + c] -= f * b[(k * m) + c];
+		}
+	}
+	for (int k = n - 1; k >= 0; k--) {
+		for (int c = 0; c < m; c++) {
+			double v = b[(k * m) + c];
+			for (int j = k + 1; j < n; j++) v -= a[(k * n) + j] * b[(j * m) + c];
+			b[(k * m) + c] = v / a[(k * n) + k];
+		}
+	}
+	return 0;
+}
+
+
+#define RX_MAXFACE (2000)
+
+static void rx_free(void)
+{
+	free(RX.d); free(RX.sg); free(RX.row); free(RX.lo); free(RX.hi);
+	free(RX.area); free(RX.eps); free(RX.tr);
+	free(RX.qii); free(RX.c); free(RX.e); free(RX.q); free(RX.q0); free(RX.finf);
+	memset(&RX, 0, sizeof(RX));
+}
+
+
+static int rx_build(FILE *fp_log, const double *kcell)
+{
+	memset(&RX, 0, sizeof(RX));
+	const int n = (int)surf_faces_grid(NULL, NULL, NULL, kcell, 4, NULL);	// 面の数
+	if (n > RX_MAXFACE) {
+		fprintf(fp_log, "*** radiation exchange : %d radiating faces exceed the limit %d "
+			"(the view-factor matrix is dense)\n", n, RX_MAXFACE);
+		return 1;
+	}
+	RX.n = n;
+	RX.d = (int *)malloc(((size_t)n + 1) * sizeof(int));
+	RX.sg = (int *)malloc(((size_t)n + 1) * sizeof(int));
+	RX.row = (int *)malloc(((size_t)n + 1) * sizeof(int));
+	RX.lo = (double *)malloc(((size_t)n * 3 + 1) * sizeof(double));
+	RX.hi = (double *)malloc(((size_t)n * 3 + 1) * sizeof(double));
+	RX.area = (double *)malloc(((size_t)n + 1) * sizeof(double));
+	RX.eps = (double *)malloc(((size_t)n + 1) * sizeof(double));
+	RX.tr = (double *)malloc(((size_t)n + 1) * sizeof(double));
+	RX.qii = (double *)malloc(((size_t)n + 1) * sizeof(double));
+	RX.c = (double *)malloc(((size_t)n + 1) * sizeof(double));
+	RX.e = (double *)malloc(((size_t)n + 1) * sizeof(double));
+	RX.q0 = (double *)malloc(((size_t)n + 1) * sizeof(double));
+	RX.finf = (double *)malloc(((size_t)n + 1) * sizeof(double));
+	RX.q = (double *)malloc(((size_t)n * n + 1) * sizeof(double));
+	surf_faces_grid(NULL, NULL, NULL, kcell, 4, NULL);		// 面の幾何を集める
+
+	// 形態係数 (面どうしが向き合い、同一平面でなく、遮られないときだけ)
+	double *f = (double *)calloc((size_t)n * n + 1, sizeof(double));
+	int nvis = 0;
+	for (int i = 0; i < n; i++) {
+		for (int j = i + 1; j < n; j++) {
+			double ci[3], cj[3];
+			for (int c = 0; c < 3; c++) {
+				ci[c] = (RX.lo[(i * 3) + c] + RX.hi[(i * 3) + c]) / 2;
+				cj[c] = (RX.lo[(j * 3) + c] + RX.hi[(j * 3) + c]) / 2;
+			}
+			const double fi = RX.sg[i] * (cj[RX.d[i]] - ci[RX.d[i]]);
+			const double fj = RX.sg[j] * (ci[RX.d[j]] - cj[RX.d[j]]);
+			if ((fi <= 0) || (fj <= 0)) continue;		// 向き合っていない (同一平面を含む)
+			if (rx_blocked(i, j, kcell)) continue;
+			const double aif = rx_aif(i, j);
+			if (aif <= 0) continue;
+			f[(i * n) + j] = aif / RX.area[i];
+			f[(j * n) + i] = aif / RX.area[j];			// 相互性 A_i F_ij = A_j F_ji
+			nvis++;
+		}
+	}
+	double amax = 0, asum = 0, afinf = 0;
+	for (int i = 0; i < n; i++) {
+		double rs = 0;
+		for (int j = 0; j < n; j++) rs += f[(i * n) + j];
+		RX.finf[i] = 1 - rs;
+		if (rs > amax) amax = rs;
+		asum += RX.area[i];
+		afinf += RX.area[i] * RX.finf[i];
+	}
+	fprintf(fp_log, "  radiation exchange : %d faces, %d visible pairs, max sum_j F_ij = %.12f, "
+		"sum A F_inf / sum A = %.12e\n", n, nvis, amax, afinf / ((asum > 0) ? asum : 1));
+	for (int r = 0; r < NRad; r++) {
+		double ar = 0, af = 0;
+		for (int i = 0; i < n; i++) {
+			if (RX.row[i] != r) continue;
+			ar += RX.area[i];
+			af += RX.area[i] * RX.finf[i];
+		}
+		if (ar > 0) {
+			fprintf(fp_log, "  radiation exchange : row %d, area = %.6e [m^2], mean F_inf = %.12f\n",
+				r + 1, ar, af / ar);
+		}
+	}
+	if (amax > 1 + 1e-9) {
+		fprintf(fp_log, "*** radiation exchange : a view-factor row sum exceeds 1 (%.12f)\n", amax);
+		free(f);
+		return 1;
+	}
+
+	// M = I - diag(1-ε) F、右辺 [diag(ε) | (1-ε) F∞ E∞]
+	double *m = (double *)malloc(((size_t)n * n + 1) * sizeof(double));
+	double *rhs = (double *)malloc(((size_t)n * (n + 1) + 1) * sizeof(double));
+	for (int i = 0; i < n; i++) {
+		const double einf = STEFAN * pow(RX.tr[i] + KELVIN, 4);
+		for (int j = 0; j < n; j++) {
+			m[(i * n) + j] = ((i == j) ? 1 : 0) - ((1 - RX.eps[i]) * f[(i * n) + j]);
+			rhs[(i * (n + 1)) + j] = ((i == j) ? RX.eps[i] : 0);
+		}
+		rhs[(i * (n + 1)) + n] = (1 - RX.eps[i]) * RX.finf[i] * einf;
+	}
+	if (rx_solve(n, m, rhs, n + 1)) {
+		fprintf(fp_log, "*** radiation exchange : the radiosity system is singular\n");
+		free(f); free(m); free(rhs);
+		return 1;
+	}
+	// Q = (I - F) X、q0 = (I - F) y - F∞ E∞
+	for (int i = 0; i < n; i++) {
+		const double einf = STEFAN * pow(RX.tr[i] + KELVIN, 4);
+		for (int j = 0; j <= n; j++) {
+			double v = rhs[(i * (n + 1)) + j];
+			for (int k = 0; k < n; k++) v -= f[(i * n) + k] * rhs[(k * (n + 1)) + j];
+			if (j < n) RX.q[(i * n) + j] = v;
+			else       RX.q0[i] = v - (RX.finf[i] * einf);
+		}
+		RX.qii[i] = RX.q[(i * n) + i];
+		RX.c[i] = RX.q0[i];
+	}
+	free(f); free(m); free(rhs);
+	RX.on = 1;
+	return 0;
+}
+
+
+// いまの温度で面の平均の E を作り、c_i = Σ_{j≠i} Q_ij E_j + q0_i を更新する
+static void rx_update(const double *tn, const double *kcell)
+{
+	const int n = RX.n;
+	surf_faces_grid(NULL, NULL, tn, kcell, 5, NULL);
+	for (int i = 0; i < n; i++) {
+		double v = RX.q0[i];
+		for (int j = 0; j < n; j++) {
+			if (j != i) v += RX.q[(i * n) + j] * RX.e[j];
+		}
+		RX.c[i] = v;
+	}
 }
 
 
@@ -747,6 +1128,7 @@ static int th_radlin(FILE *fp_log, crs_t *B, const double *b0, double *gr,
 	const int64_t nnz = B->rowptr[B->n];
 	for (int64_t e = 0; e < nnz; e++) B->val[e] = b0[e];
 	for (int64_t i = 0; i < B->n; i++) gr[i] = 0;
+	if (RX.on) rx_update(tn, kcell);	// 相互放射 : 他の面からの項を今の温度で
 	if ((RadEps > 0) && (surf_faces(B, gr, tn, kcell, 1, NULL) < -1e299)) {
 		fprintf(fp_log, "*** thermal : the absolute temperature became non-positive "
 			"on a radiating face (iteration %d)\n", it);
@@ -1264,6 +1646,9 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 			"have no node and no face is exposed to convection / radiation)\n");
 		ierr = 1;
 	}
+	// 面どうしの相互放射 : 形態係数と放射度の行列を一度だけ作る
+	memset(&RX, 0, sizeof(RX));
+	if (!ierr && RadExchange && (RadEps > 0)) ierr = rx_build(fp_log, kcell);
 	// 輻射は温度に依るので、反復ごとに伝導 + 対流の行列 (b0) に接線を足し直す
 	const int64_t nnz = B.rowptr[n];
 	double *b0 = NULL;
@@ -1294,6 +1679,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	free(b0);
 	free(TFace);
 	TFace = NULL;
+	rx_free();
 
 	return ierr;
 }

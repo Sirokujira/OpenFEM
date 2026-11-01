@@ -350,6 +350,7 @@ EXTERN double ConvH;			// 対流の h の最大値 (0 : 対流なし)
 EXTERN double RadEps;			// 輻射の ε の最大値 (0 : 輻射なし)
 EXTERN int ConvTabN;			// 対流の h の温度依存の折れ線の点数 (0 : h は一定)
 EXTERN double ConvTabT[MAXTEMPTAB], ConvTabF[MAXTEMPTAB];	// 面の温度 [degC] と h の倍率
+EXTERN int RadExchange;			// 1 : 輻射の面どうしの相互放射 (形態係数、構造格子)
 EXTERN int RadTabN;				// 輻射の ε の温度依存の折れ線の点数 (0 : ε は一定)
 EXTERN double RadTabT[MAXTEMPTAB], RadTabF[MAXTEMPTAB];	// 面の温度 [degC] と ε の倍率
 EXTERN int TransientOn;			// 1 : 熱連成を過渡解析にする (電流を t = 0 で入れる)

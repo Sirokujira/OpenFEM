@@ -1,0 +1,37 @@
+OpenFEM 1 0
+title = radiation exchange in an open cubic cavity (closed-form view factors)
+#
+# 面どうしの相互放射 (radiationexchange = 1)。導体のブロック (10 x 3 x 3 mm) の上面に
+# 2 x 2 x 2 mm の立方体の空洞を掘り、空洞の 5 面に輻射 (ε = 0.8) を課す。空洞の面は
+# 互いに見えるので、周囲へ逃げる熱は開口を通る分だけになる。
+#
+# 形態係数は閉形式 (周回積分の平行な辺の対の ln r の 2 重積分) なので、空洞の面の
+# 行ごとの F∞ (= 開口への形態係数) が教科書の閉形式に機械精度で一致する:
+#   底 -> 開口 (平行な正方形、辺 = 距離)       F = 0.199824895698
+#   側壁 -> 開口 (辺を共有する直交する正方形)   F = 0.200043776075
+#   Σ A F∞ / Σ A = 開口の面積 / 壁の面積 = 0.2 (相互性)
+# 行 2 / 3 は底と側壁 (x = 4mm) を選び出すためだけの行 (ε は同じ)。
+# 刻みは x 0.25mm、空洞の中の y / z 0.4mm で、**面の面積が向きごとに違う** (相互性
+# A_i F_ij = A_j F_ji の取り違えは面積が揃った格子では検出できない)。
+#
+xmesh = 0 40 0.01
+ymesh = 0 2 0.5e-3 5 2.5e-3 2 3e-3
+zmesh = 0 4 1e-3 5 3e-3
+material = 1.0 1e6
+tempco = 2 4e-3 0
+kthermal = 2 10
+geometry = 2 1 0 0.01 0 3e-3 0 3e-3
+geometry = 0 1 4e-3 6e-3 0.5e-3 2.5e-3 1e-3 3e-3
+conductor = 0 1 0    0    0 3e-3 0 3e-3
+conductor = 1 1 0.01 0.01 0 3e-3 0 3e-3
+heatsink = 0 20
+heatsink = 1 20
+radiation = 0.8 10  4e-3 6e-3  0.5e-3 2.5e-3  1e-3 3e-3
+radiation = 0.8 10  4e-3 6e-3  0.5e-3 2.5e-3  1e-3 1e-3
+radiation = 0.8 10  4e-3 4e-3  0.5e-3 2.5e-3  1e-3 3e-3
+radiationexchange = 1
+temperature = 20
+thermal = 60
+analysis = R
+solver = 20000 500 1e-12
+end
