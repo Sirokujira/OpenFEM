@@ -158,6 +158,7 @@ static int32_t *TFaceEl;		// [TFaceN] 露出面を持つ要素 (外向きの法�
 static const signed char *ThNodeCond;	// ヒートシンクを選ぶ節点の導体番号 (3 次元は NodeConductor、
 										// 断面 2 次元は導体の三角形の節点)
 static int32_t *TOcc;			// [4*TOccN] 熱を通す要素の境界面すべて (電極の面も含む。相互放射の遮蔽)
+static int32_t *TOccEl;			// [TOccN] その面を持つ要素 (高次の四面体の曲がった遮蔽物に使う)
 static int TOccN;
 
 // 面の記録 : 昇順の鍵 4 個 (三角形は -1 埋め) + 巡回順の節点 4 個
@@ -242,6 +243,7 @@ static void tri_edges_build(const double *kcell)
 	TFace = (int32_t *)malloc(((size_t)ne * 4 + 1) * sizeof(int32_t));
 	TFaceEl = (int32_t *)malloc(((size_t)ne + 1) * sizeof(int32_t));
 	TOcc = (int32_t *)malloc(sizeof(int32_t));
+	TOccEl = (int32_t *)malloc(sizeof(int32_t));
 	TFaceN = 0;
 	TOccN = 0;
 	for (int i = 0; i < ne; ) {
@@ -303,6 +305,7 @@ static void tet_faces_build(const double *kcell)
 	TFace = (int32_t *)malloc(((size_t)nf * 4 + 1) * sizeof(int32_t));
 	TFaceEl = (int32_t *)malloc(((size_t)nf + 1) * sizeof(int32_t));
 	TOcc = (int32_t *)malloc(((size_t)nf * 4 + 1) * sizeof(int32_t));
+	TOccEl = (int32_t *)malloc(((size_t)nf + 1) * sizeof(int32_t));
 	TFaceN = 0;
 	TOccN = 0;
 	for (int i = 0; i < nf; ) {
@@ -311,6 +314,7 @@ static void tet_faces_build(const double *kcell)
 		if ((j - i) == 1) {
 			const int32_t *v = &all[i * 9];
 			for (int l = 0; l < 4; l++) TOcc[(TOccN * 4) + l] = v[4 + l];
+			TOccEl[TOccN] = v[8];
 			TOccN++;
 			const int k = ((v[3] < 0) ? 3 : 4);
 			int ncond = 0;
@@ -391,9 +395,16 @@ static struct {
 	double *q, *q0, *finf;			// Q [n*n]、q0、F_i∞
 	// 非構造格子 : 露出面 (TFace) -> 放射度の要素の番号 (-1 = 輻射なし)、面の頂点
 	// (外向きの法線に対して反時計回り、三角形は 3 個)、外向きの単位法線、中心
+	// 高次の四面体の曲がった面は、辺を各 2p 分割の折れ線で近似した境界 (周回積分は境界だけで決まる)
+	// 高次の四面体では遮蔽物も曲がった面 (各面を (2p)² 枚の三角形に割ったもの、ocv [9 nocc]) で、
+	// 線分は曲がった面の中心どうし。自分と相手の面の三角形は除く (okey は面の頂点の昇順の 3 つ組)
 	int *fid, *nv;
-	double *pv, *nrm, *ctr;			// [12n] / [3n] / [3n]
+	double *pv, *nrm, *ctr;			// [3 RX_MAXV n] / [3n] / [3n]
+	int nocc;
+	double *ocv;
+	int32_t *okey, *fkey;			// [3 nocc] / [3n]
 } RX;
+#define RX_MAXV (32)				// 面の境界の点の最大数 (5 次で 3 x 10 = 30)
 
 
 // 露出面の境界条件。熱を通すセルの 6 面のうち、隣が格子の外か熱を通さないセルの
@@ -699,7 +710,7 @@ static double surf_tri_ho(crs_t *B, double *g, const double *t, int rad, int f,
 			if (nd[l] == cn[k]) fa[k] = l;
 		}
 	}
-	double mu[36][3], wq[36];
+	double mu[64][3], wq[64];		// 5 次で 7 x 7 = 49 点
 	const int nq = tri_quad_pub(TetOrder + 2, mu, wq);
 	static double me[TET_NMAX][TET_NMAX];
 	double ge[TET_NMAX], qsum = 0;
@@ -727,7 +738,17 @@ static double surf_tri_ho(crs_t *B, double *g, const double *t, int rad, int f,
 		}
 		else {
 			double qv, dq;
-			surf_q(rad, hc, ta, tg, &qv, &dq, bad);
+			if ((rad == 1) && RX.on && RX.fid && (RX.fid[f] >= 0)) {
+				// 相互放射 : q = Q_ii σT⁴ + c_i (1 次の面と同じ。c_i は反復ごとに更新)
+				const int fi = RX.fid[f];
+				const double tk = tg + KELVIN;
+				if (tk <= 0) *bad = 1;
+				qv = (RX.qii[fi] * STEFAN * tk * tk * tk * tk) + RX.c[fi];
+				dq = 4 * RX.qii[fi] * STEFAN * tk * tk * tk;
+			}
+			else {
+				surf_q(rad, hc, ta, tg, &qv, &dq, bad);
+			}
 			qsum += w * qv;
 			for (int a = 0; a < nen; a++) {
 				ge[a] += w * ((dq * tg) - qv) * nv[a];
@@ -1208,6 +1229,7 @@ static int rx_finish(FILE *fp_log, double *f, int nvis);
 static void rx_free(void)
 {
 	free(RX.fid); free(RX.nv); free(RX.pv); free(RX.nrm); free(RX.ctr);
+	free(RX.ocv); free(RX.okey); free(RX.fkey);
 	free(RX.d); free(RX.sg); free(RX.row); free(RX.lo); free(RX.hi);
 	free(RX.area); free(RX.eps); free(RX.tr);
 	free(RX.qii); free(RX.c); free(RX.e); free(RX.q); free(RX.q0); free(RX.finf);
@@ -1294,10 +1316,18 @@ static int rx_finish(FILE *fp_log, double *f, int nvis)
 				r + 1, ar, af / ar);
 		}
 	}
-	if (amax > 1 + 1e-9) {
+	// 高次の四面体の曲がった面は境界を折れ線で近似するので、行の和が 1 を僅かに越え得る (粗い球の空隙で
+	// 1.6e-3、実測)。1% までは警告にして続ける (F∞ が僅かに負 = 周囲からの僅かな入射になるだけで、熱の収支の
+	// 恒等式は保たれる)。平らな面 (1 次) は従来どおり厳密に弾く
+	const double rtol = ((MeshMode && (TetOrder >= 2)) ? 1e-2 : 1e-9);
+	if (amax > 1 + rtol) {
 		fprintf(fp_log, "*** radiation exchange : a view-factor row sum exceeds 1 (%.12f)\n", amax);
 		free(f);
 		return 1;
+	}
+	if (amax > 1 + 1e-9) {
+		fprintf(fp_log, "*** warning : radiation exchange : a view-factor row sum exceeds 1 by %.3e "
+			"(curved faces; refine the mesh or raise the element order)\n", amax - 1);
 	}
 
 	// M = I - diag(1-ε) F、右辺 [diag(ε) | (1-ε) F∞ E∞]
@@ -1473,7 +1503,7 @@ static double rx_segpair(const double p0[3], const double p1[3], const double q0
 static double rx_aif_poly(int i, int j)
 {
 	const int ni = RX.nv[i], nj = RX.nv[j];
-	const double *pi = &RX.pv[i * 12], *pj = &RX.pv[j * 12];
+	const double *pi = &RX.pv[i * 3 * RX_MAXV], *pj = &RX.pv[j * 3 * RX_MAXV];
 	double sum = 0;
 	for (int k = 0; k < ni; k++) {
 		const double *a0 = &pi[k * 3], *a1 = &pi[((k + 1) % ni) * 3];
@@ -1525,6 +1555,17 @@ static int rx_blocked_tet(int i, int j)
 		a[c] = RX.ctr[(i * 3) + c] + (1e-9 * span * RX.nrm[(i * 3) + c]);
 		b[c] = RX.ctr[(j * 3) + c] + (1e-9 * span * RX.nrm[(j * 3) + c]);
 	}
+	if (RX.ocv != NULL) {
+		const int32_t *ki = &RX.fkey[i * 3], *kj = &RX.fkey[j * 3];
+		for (int o = 0; o < RX.nocc; o++) {
+			const int32_t *ko = &RX.okey[o * 3];
+			if ((ko[0] == ki[0]) && (ko[1] == ki[1]) && (ko[2] == ki[2])) continue;
+			if ((ko[0] == kj[0]) && (ko[1] == kj[1]) && (ko[2] == kj[2])) continue;
+			const double *v = &RX.ocv[o * 9];
+			if (rx_hit_tri(a, b, &v[0], &v[3], &v[6])) return 1;
+		}
+		return 0;
+	}
 	for (int f = 0; f < TOccN; f++) {
 		const int32_t *nd = &TOcc[f * 4];
 		double v[4][3];
@@ -1562,9 +1603,10 @@ static int rx_build_tet(FILE *fp_log)
 	}
 	RX.n = n;
 	RX.nv = (int *)malloc(((size_t)n + 1) * sizeof(int));
-	RX.pv = (double *)malloc(((size_t)n * 12 + 1) * sizeof(double));
+	RX.pv = (double *)malloc(((size_t)n * 3 * RX_MAXV + 1) * sizeof(double));
 	RX.nrm = (double *)malloc(((size_t)n * 3 + 1) * sizeof(double));
 	RX.ctr = (double *)malloc(((size_t)n * 3 + 1) * sizeof(double));
+	RX.fkey = (int32_t *)malloc(((size_t)n * 3 + 1) * sizeof(int32_t));
 	RX.row = (int *)malloc(((size_t)n + 1) * sizeof(int));
 	RX.area = (double *)malloc(((size_t)n + 1) * sizeof(double));
 	RX.eps = (double *)malloc(((size_t)n + 1) * sizeof(double));
@@ -1579,37 +1621,116 @@ static int rx_build_tet(FILE *fp_log)
 		const int i = RX.fid[f];
 		if (i < 0) continue;
 		const int32_t *nd = &TFace[f * 4];
-		const int k = ((nd[3] < 0) ? 3 : 4);
-		double v[4][3], c[3] = {0, 0, 0};
-		for (int l = 0; l < k; l++) {
-			v[l][0] = Xp[nd[l]]; v[l][1] = Yp[nd[l]]; v[l][2] = Zp[nd[l]];
-			for (int a = 0; a < 3; a++) c[a] += v[l][a] / k;
+		int k = ((nd[3] < 0) ? 3 : 4);
+		double v[RX_MAXV][3], c[3] = {0, 0, 0}, an[3] = {0, 0, 0}, ar = 0;
+		if (TetOrder >= 2) {
+			// 高次の四面体の曲がった面 : 境界は辺を 2p 分割した折れ線 (点は曲がった辺の上)、面積は
+			// 曲がった面の積分 (surf_tri_ho と同じ点)、中心と法線は面の重心の点
+			const int e = TFaceEl[f];
+			int32_t tn[TET_NMAX];
+			tet_nodes(e, tn);
+			int fa[3];
+			for (int q = 0; q < 3; q++) {
+				fa[q] = 0;
+				for (int l = 0; l < 4; l++) {
+					if (tn[l] == nd[q]) fa[q] = l;
+				}
+			}
+			const int ten = tet_nen(), msub = 2 * TetOrder;
+			k = 3 * msub;
+			for (int s3 = 0; s3 < 3; s3++) {
+				for (int jj = 0; jj < msub; jj++) {
+					double mu[3] = {0, 0, 0}, nv[TET_NMAX], t1[3], t2[3];
+					mu[s3] = 1 - ((double)jj / msub);
+					mu[(s3 + 1) % 3] = (double)jj / msub;
+					tet_face_shape(e, fa, mu, nv, t1, t2);
+					double *x = v[(s3 * msub) + jj];
+					x[0] = x[1] = x[2] = 0;
+					for (int a = 0; a < ten; a++) {
+						x[0] += nv[a] * Xp[tn[a]]; x[1] += nv[a] * Yp[tn[a]]; x[2] += nv[a] * Zp[tn[a]];
+					}
+				}
+			}
+			{
+				const double mc[3] = {1.0 / 3, 1.0 / 3, 1.0 / 3};
+				double nv[TET_NMAX], t1[3], t2[3];
+				tet_face_shape(e, fa, mc, nv, t1, t2);
+				for (int a = 0; a < ten; a++) {
+					c[0] += nv[a] * Xp[tn[a]]; c[1] += nv[a] * Yp[tn[a]]; c[2] += nv[a] * Zp[tn[a]];
+				}
+				an[0] = (t1[1] * t2[2]) - (t1[2] * t2[1]);
+				an[1] = (t1[2] * t2[0]) - (t1[0] * t2[2]);
+				an[2] = (t1[0] * t2[1]) - (t1[1] * t2[0]);
+			}
+			double mu[64][3], wq[64];
+			const int nq = tri_quad_pub(TetOrder + 2, mu, wq);
+			for (int q = 0; q < nq; q++) {
+				double nv[TET_NMAX], t1[3], t2[3];
+				tet_face_shape(e, fa, mu[q], nv, t1, t2);
+				const double cx = (t1[1] * t2[2]) - (t1[2] * t2[1]);
+				const double cy = (t1[2] * t2[0]) - (t1[0] * t2[2]);
+				const double cz = (t1[0] * t2[1]) - (t1[1] * t2[0]);
+				ar += wq[q] * sqrt((cx * cx) + (cy * cy) + (cz * cz));
+			}
+			// 折れ線の向きを法線 an に合わせる (面積ベクトルと an が同じ向き)
+			double pa[3] = {0, 0, 0};
+			for (int l = 0; l < k; l++) {
+				const double *pp = v[l], *qq = v[(l + 1) % k];
+				pa[0] += 0.5 * ((pp[1] * qq[2]) - (pp[2] * qq[1]));
+				pa[1] += 0.5 * ((pp[2] * qq[0]) - (pp[0] * qq[2]));
+				pa[2] += 0.5 * ((pp[0] * qq[1]) - (pp[1] * qq[0]));
+			}
+			if (((pa[0] * an[0]) + (pa[1] * an[1]) + (pa[2] * an[2])) < 0) {
+				for (int l = 1; l < (k + 1) / 2; l++) {
+					for (int a = 0; a < 3; a++) {
+						const double w = v[l][a]; v[l][a] = v[k - l][a]; v[k - l][a] = w;
+					}
+				}
+			}
 		}
-		// 面積ベクトル (多角形の外積の和の半分)
-		double an[3] = {0, 0, 0};
-		for (int l = 0; l < k; l++) {
-			const double *p = v[l], *q = v[(l + 1) % k];
-			an[0] += 0.5 * ((p[1] * q[2]) - (p[2] * q[1]));
-			an[1] += 0.5 * ((p[2] * q[0]) - (p[0] * q[2]));
-			an[2] += 0.5 * ((p[0] * q[1]) - (p[1] * q[0]));
+		else {
+			for (int l = 0; l < k; l++) {
+				v[l][0] = Xp[nd[l]]; v[l][1] = Yp[nd[l]]; v[l][2] = Zp[nd[l]];
+				for (int a = 0; a < 3; a++) c[a] += v[l][a] / k;
+			}
+			// 面積ベクトル (多角形の外積の和の半分)
+			for (int l = 0; l < k; l++) {
+				const double *p = v[l], *q = v[(l + 1) % k];
+				an[0] += 0.5 * ((p[1] * q[2]) - (p[2] * q[1]));
+				an[1] += 0.5 * ((p[2] * q[0]) - (p[0] * q[2]));
+				an[2] += 0.5 * ((p[0] * q[1]) - (p[1] * q[0]));
+			}
 		}
-		// 外向き : 要素の重心から面の中心へ向かう側
+		// 外向き : 要素の重心から面の中心へ向かう側。高次の四面体は面に無い頂点から面の中心へ向かう側
+		// (粗く曲がった要素では全節点の重心が面の外側に出ることがある。実測 : 粗い球の空隙で 97 対の
+		// 法線が裏返って「向き合わない」と判定された)
 		int32_t en[ELEM_NMAX];
 		const int nen = elem3d_nodes(TFaceEl[f], en);
 		double ec[3] = {0, 0, 0};
-		for (int l = 0; l < nen; l++) {
-			ec[0] += Xp[en[l]] / nen; ec[1] += Yp[en[l]] / nen; ec[2] += Zp[en[l]] / nen;
+		if (TetOrder >= 2) {
+			for (int l = 0; l < 4; l++) {
+				if ((en[l] != nd[0]) && (en[l] != nd[1]) && (en[l] != nd[2])) {
+					ec[0] = Xp[en[l]]; ec[1] = Yp[en[l]]; ec[2] = Zp[en[l]];
+				}
+			}
+		}
+		else {
+			for (int l = 0; l < nen; l++) {
+				ec[0] += Xp[en[l]] / nen; ec[1] += Yp[en[l]] / nen; ec[2] += Zp[en[l]] / nen;
+			}
 		}
 		const double dot = (an[0] * (c[0] - ec[0])) + (an[1] * (c[1] - ec[1])) + (an[2] * (c[2] - ec[2]));
-		const double ar = sqrt((an[0] * an[0]) + (an[1] * an[1]) + (an[2] * an[2]));
+		const double anr = sqrt((an[0] * an[0]) + (an[1] * an[1]) + (an[2] * an[2]));
+		if (TetOrder < 2) ar = anr;
 		RX.nv[i] = k;
 		for (int l = 0; l < k; l++) {
 			const int ls = ((dot >= 0) ? l : ((k - l) % k));	// 内向きなら並びを逆に
-			for (int a = 0; a < 3; a++) RX.pv[(i * 12) + (l * 3) + a] = v[ls][a];
+			for (int a = 0; a < 3; a++) RX.pv[(i * 3 * RX_MAXV) + (l * 3) + a] = v[ls][a];
 		}
 		for (int a = 0; a < 3; a++) {
-			RX.nrm[(i * 3) + a] = ((dot >= 0) ? 1 : -1) * an[a] / ar;
+			RX.nrm[(i * 3) + a] = ((dot >= 0) ? 1 : -1) * an[a] / anr;
 			RX.ctr[(i * 3) + a] = c[a];
+			RX.fkey[(i * 3) + a] = nd[a];		// 三角形の TFace は昇順
 		}
 		RX.area[i] = ar;
 		int row = 0;
@@ -1619,6 +1740,63 @@ static int rx_build_tet(FILE *fp_log)
 		RX.tr[i] = bc->t;
 	}
 
+	// 高次の四面体 : 遮蔽物を曲がった面にする (各面を (2p)² 枚の平らな三角形に割る。点は曲がった面の上)
+	if (TetOrder >= 2) {
+		const int m = 2 * TetOrder, nsub = m * m;
+		RX.nocc = TOccN * nsub;
+		RX.ocv = (double *)malloc(((size_t)RX.nocc * 9 + 1) * sizeof(double));
+		RX.okey = (int32_t *)malloc(((size_t)RX.nocc * 3 + 1) * sizeof(int32_t));
+		int o = 0;
+		for (int fo = 0; fo < TOccN; fo++) {
+			const int32_t *cn = &TOcc[fo * 4];
+			const int e = TOccEl[fo];
+			int32_t tn[TET_NMAX];
+			const int ten = tet_nodes(e, tn);
+			int fa[3];
+			for (int q = 0; q < 3; q++) {
+				fa[q] = 0;
+				for (int l = 0; l < 4; l++) {
+					if (tn[l] == cn[q]) fa[q] = l;
+				}
+			}
+			int32_t key[3] = {cn[0], cn[1], cn[2]};
+			for (int x = 0; x < 2; x++) {
+				for (int y = x + 1; y < 3; y++) {
+					if (key[y] < key[x]) { const int32_t w = key[x]; key[x] = key[y]; key[y] = w; }
+				}
+			}
+			// 格子点 (a, b) の物理座標 : μ = (1 − (a + b)/m, a/m, b/m)
+			double lp[(2 * 5 + 1) * (2 * 5 + 1)][3];
+			for (int aa = 0; aa <= m; aa++) {
+				for (int bb = 0; aa + bb <= m; bb++) {
+					const double mu[3] = {1 - ((double)(aa + bb) / m), (double)aa / m, (double)bb / m};
+					double nv[TET_NMAX], t1[3], t2[3];
+					tet_face_shape(e, fa, mu, nv, t1, t2);
+					double *x = lp[(aa * (m + 1)) + bb];
+					x[0] = x[1] = x[2] = 0;
+					for (int q = 0; q < ten; q++) {
+						x[0] += nv[q] * Xp[tn[q]]; x[1] += nv[q] * Yp[tn[q]]; x[2] += nv[q] * Zp[tn[q]];
+					}
+				}
+			}
+			for (int aa = 0; aa < m; aa++) {
+				for (int bb = 0; aa + bb < m; bb++) {
+					const int tri[2][3][2] = {{{aa, bb}, {aa + 1, bb}, {aa, bb + 1}},
+					                          {{aa + 1, bb}, {aa + 1, bb + 1}, {aa, bb + 1}}};
+					const int nt = ((aa + bb + 1 < m) ? 2 : 1);
+					for (int t = 0; t < nt; t++) {
+						for (int v = 0; v < 3; v++) {
+							const double *x = lp[(tri[t][v][0] * (m + 1)) + tri[t][v][1]];
+							for (int c = 0; c < 3; c++) RX.ocv[(o * 9) + (v * 3) + c] = x[c];
+						}
+						for (int c = 0; c < 3; c++) RX.okey[(o * 3) + c] = key[c];
+						o++;
+					}
+				}
+			}
+		}
+		RX.nocc = o;
+	}
 	double *f = (double *)calloc((size_t)n * n + 1, sizeof(double));
 	int nvis = 0;
 	for (int i = 0; i < n; i++) {
@@ -1644,6 +1822,61 @@ static int rx_build_tet(FILE *fp_log)
 			nvis++;
 		}
 	}
+	// 曲がった面は凹なら自分を見る (F_ii > 0。球の内側では F_ii = A_i / A_球、平らな面は 0)。周回積分は
+	// 自分自身には使えないので、面の積分点の対で直接積分する : A_i F_ii = ∫∫ cosθ1 cosθ2 / (π r²) dA dA
+	// (両方の cos が正の対だけ)。被積分関数は有界なので、対角 (q = q') を除いた和を
+	// A² / (A² − Σ w²) 倍して補う (被積分関数が一定の球では厳密)
+	if (TetOrder >= 2) {
+		double mu[64][3], wq[64];
+		const int nq = tri_quad_pub(TetOrder + 3, mu, wq);
+		for (int fc = 0; fc < TFaceN; fc++) {
+			const int i = RX.fid[fc];
+			if (i < 0) continue;
+			const int e = TFaceEl[fc];
+			const int32_t *cn = &TFace[fc * 4];
+			int32_t tn[TET_NMAX];
+			const int ten = tet_nodes(e, tn);
+			int fa[3];
+			for (int q = 0; q < 3; q++) {
+				fa[q] = 0;
+				for (int l = 0; l < 4; l++) {
+					if (tn[l] == cn[q]) fa[q] = l;
+				}
+			}
+			double xq[64][3], nq3[64][3], wa[64], aa = 0, w2 = 0;
+			for (int q = 0; q < nq; q++) {
+				double nv[TET_NMAX], t1[3], t2[3];
+				tet_face_shape(e, fa, mu[q], nv, t1, t2);
+				xq[q][0] = xq[q][1] = xq[q][2] = 0;
+				for (int a = 0; a < ten; a++) {
+					xq[q][0] += nv[a] * Xp[tn[a]]; xq[q][1] += nv[a] * Yp[tn[a]]; xq[q][2] += nv[a] * Zp[tn[a]];
+				}
+				double cr[3] = {(t1[1] * t2[2]) - (t1[2] * t2[1]), (t1[2] * t2[0]) - (t1[0] * t2[2]),
+				                (t1[0] * t2[1]) - (t1[1] * t2[0])};
+				const double cl = sqrt((cr[0] * cr[0]) + (cr[1] * cr[1]) + (cr[2] * cr[2]));
+				const double sg = ((((cr[0] * RX.nrm[i * 3]) + (cr[1] * RX.nrm[(i * 3) + 1]) + (cr[2] * RX.nrm[(i * 3) + 2])) >= 0) ? 1 : -1);
+				for (int a = 0; a < 3; a++) nq3[q][a] = sg * cr[a] / cl;
+				wa[q] = wq[q] * cl;
+				aa += wa[q];
+				w2 += wa[q] * wa[q];
+			}
+			double sum = 0;
+			for (int q = 0; q < nq; q++) {
+				for (int r = 0; r < nq; r++) {
+					if (r == q) continue;
+					const double d[3] = {xq[r][0] - xq[q][0], xq[r][1] - xq[q][1], xq[r][2] - xq[q][2]};
+					const double r2 = (d[0] * d[0]) + (d[1] * d[1]) + (d[2] * d[2]);
+					if (r2 <= 0) continue;
+					const double c1 = (nq3[q][0] * d[0]) + (nq3[q][1] * d[1]) + (nq3[q][2] * d[2]);
+					const double c2 = -((nq3[r][0] * d[0]) + (nq3[r][1] * d[1]) + (nq3[r][2] * d[2]));
+					if ((c1 <= 0) || (c2 <= 0)) continue;
+					sum += wa[q] * wa[r] * c1 * c2 / (PI * r2 * r2);
+				}
+			}
+			const double den = (aa * aa) - w2;
+			if (den > 0) f[(i * n) + i] = (sum * (aa * aa) / den) / RX.area[i];
+		}
+	}
 	return rx_finish(fp_log, f, nvis);
 }
 
@@ -1657,7 +1890,34 @@ static void rx_emean_tet(const double *tn)
 		if (i < 0) continue;
 		const int32_t *nd = &TFace[f * 4];
 		double es = 0, ws = 0;
-		if (nd[3] < 0) {
+		if (TetOrder >= 2) {
+			// 高次の四面体の曲がった面 : 熱の組み立て (surf_tri_ho) と同じ点・同じ重み
+			const int e = TFaceEl[f];
+			int32_t tq[TET_NMAX];
+			const int ten = tet_nodes(e, tq);
+			int fa[3];
+			for (int k = 0; k < 3; k++) {
+				fa[k] = 0;
+				for (int l = 0; l < 4; l++) {
+					if (tq[l] == nd[k]) fa[k] = l;
+				}
+			}
+			double mu[64][3], wq[64];
+			const int nq = tri_quad_pub(TetOrder + 2, mu, wq);
+			for (int q = 0; q < nq; q++) {
+				double nv[TET_NMAX], t1[3], t2[3], tg = 0;
+				tet_face_shape(e, fa, mu[q], nv, t1, t2);
+				const double cx = (t1[1] * t2[2]) - (t1[2] * t2[1]);
+				const double cy = (t1[2] * t2[0]) - (t1[0] * t2[2]);
+				const double cz = (t1[0] * t2[1]) - (t1[1] * t2[0]);
+				const double w = wq[q] * sqrt((cx * cx) + (cy * cy) + (cz * cz));
+				for (int a = 0; a < ten; a++) tg += nv[a] * tn[tq[a]];
+				const double tk = tg + KELVIN;
+				es += w * STEFAN * tk * tk * tk * tk;
+				ws += w;
+			}
+		}
+		else if (nd[3] < 0) {
 			for (int gq = 0; gq < 3; gq++) {
 				double tg = 0;
 				for (int m = 0; m < 3; m++) tg += ((m == gq) ? (2.0 / 3) : (1.0 / 6)) * tn[nd[m]];
@@ -2575,14 +2835,14 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 		}
 	}
 	else if ((Analysis & ANALYSIS_F) || (MeshMode && ((MeshDim != 3)
-	         || ((TetOrder >= 2) && (((Analysis & ANALYSIS_A) && !p2tet) || RadExchange))))) {
+	         || ((TetOrder >= 2) && (((Analysis & ANALYSIS_A) && !p2tet) || (RadExchange && ((NHex + NPrism + NPyr) > 0))))))) {
 		if (Analysis & ANALYSIS_F) {
 			fprintf(fp_log, "*** AC heating with analysis F (thermal + F) needs a 2-D cross-section "
 				"mesh of 3-node triangles\n");
 			return 1;
 		}
 		fprintf(fp_log, "*** thermal on an unstructured mesh supports first-order 3-D elements "
-			"and higher-order tetrahedra / hexahedra / prisms (DC, without radiationexchange) only (this mesh is %d-D, element "
+			"and higher-order tetrahedra / hexahedra / prisms (DC; radiationexchange on tetrahedra only) only (this mesh is %d-D, element "
 			"order %d, %d-node hexahedra, %d-node prisms)\n",
 			MeshDim, TetOrder, HexNen, PrismNen);
 		return 1;
@@ -2652,6 +2912,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	TFace = NULL;
 	TFaceEl = NULL;
 	TOcc = NULL;
+	TOccEl = NULL;
 	TFaceN = 0;
 	TOccN = 0;
 	if (MeshMode) tet_faces_build(kcell);
@@ -2784,7 +3045,7 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	free(fix); free(fixt); free(phi); free(work); free(diag);
 	free(f); free(tn); free(rhs); free(u); free(gc); free(gr); free(q);
 	free(b0);
-	free(TFace); free(TFaceEl); free(TOcc); free(nc2d);
+	free(TFace); free(TFaceEl); free(TOcc); free(TOccEl); free(nc2d);
 	TFace = NULL;
 	rx_free();
 

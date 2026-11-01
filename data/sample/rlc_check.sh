@@ -3885,12 +3885,7 @@ done
 res=$(awk -v a="$ecy1" -v b="$ecy2" 'BEGIN { printf "%s (P1 %.2e vs P2 %.2e)", (a > 50 * b) ? "OK" : "NG", a, b }')
 echo "  cylinder : the curved P2 surface beats the P1 facets (geometry h^4 vs h^2) : $res"
 case "$res" in NG*) status=1 ;; esac
-# (4) 弾くべき入力 : 高次の四面体の交流の発熱 (A は 1 次格子だけ) と相互放射 (曲がった面)
-awk '/^thermal/{print "radiation = 0.8 10"; print "radiationexchange = 1"} {print}' "$WORK/tho_cy.ofe" > "$WORK/thox_rx.ofe"
-mesh_reject "radiationexchange on a higher-order tetrahedral mesh" thox_rx.ofe
-if ! grep -q "higher-order tetrahedra / hexahedra / prisms (DC, without radiationexchange)" "$WORK/ofe.log"; then
-	echo "  *** it was rejected for a different reason than radiationexchange" >&2; status=1
-fi
+# (高次の四面体の相互放射は [radiation exchange] の (8))
 
 # ---- 熱連成の 2 次の六面体・角柱 (20 / 27 / 15 / 18 節点、等パラメトリック) ----
 #
@@ -3985,7 +3980,7 @@ case "$res" in NG*) status=1 ;; esac
 # (4) 弾くべき入力 : 2 次の六面体の相互放射
 h2_write box_hex2 100 'heatsink = 0 20\nradiation = 0.8 20\nradiationexchange = 1'
 mesh_reject "radiationexchange on a second-order hexahedral mesh" th2.ofe
-if ! grep -q "hexahedra / prisms (DC, without radiationexchange)" "$WORK/ofe.log"; then
+if ! grep -q "radiationexchange on tetrahedra only" "$WORK/ofe.log"; then
 	echo "  *** it was rejected for a different reason than radiationexchange" >&2; status=1
 fi
 
@@ -4927,6 +4922,37 @@ rx_unst thermal_cavity2_hex_p rxg.ofe rxhp.ofe
 th_run rxhp.ofe
 compare "two cavities, hexahedra perturbed by 1 ulp == structured grid : sum A F_inf / sum A [-]" \
 	"$(awk -v s="$(rx_sum)" 'BEGIN { printf "%.15e", 1 + s }')" "$(awk -v s="$f0" 'BEGIN { printf "%.15e", 1 + s }')" 1e-12
+# (8) 高次の四面体の曲がった面 (thermal.c の rx_build_tet)。境界は辺を 2p 分割した折れ線 (周回積分は境界だけで
+#     決まる)、面積は曲がった面の積分、凹の面は自分を見る (F_ii を面の積分点の対で直接積分)、遮蔽物も曲がった面
+#     ((2p)² 枚の三角形)。
+#     (a) 平らな面の 2 次の格子 (thermal_cavity_tet2.msh、gmsh_cavity.py) : 行ごとの F∞ が Hottel に 1e-10
+#         (折れ線が直線の上に乗るので周回積分は 1 次と同じ値)
+#     (b) 閉じた球の空隙 (thermal_sphere_void.ofe) : Σ A F∞ / Σ A が 2 次 4e-3・3 次はその 0.6 倍以下 (実測 2.7e-3 /
+#         1.3e-3)、周囲へ逃げる熱 / I²R が 1e-5 以下、熱の収支の恒等式。F_ii を落とすと 1.2e-2、遮蔽を平らな面で
+#         見ると対の 96% が遮られ F∞ = 0.96 (どちらも実測)
+cp "$SRC/thermal_cavity_tet2.msh" "$SRC/sphere_void_p2.msh" "$SRC/sphere_void_p3.msh" "$SRC/thermal_sphere_void.ofe" "$WORK/"
+rx_x20 thermal_cavity.ofe rxg.ofe
+rx_unst thermal_cavity_tet2 rxg.ofe rxt2.ofe
+th_run rxt2.ofe
+compare "second-order tetrahedra (flat faces) : cavity floor -> opening == parallel squares (Hottel) [-]" "$(rx_row 2)" "$fpar" 1e-10
+compare "second-order tetrahedra (flat faces) : cavity wall -> opening == perpendicular squares [-]" "$(rx_row 3)" "$fper" 1e-10
+compare "second-order tetrahedra (flat faces) : sum A F_inf / sum A == 0.2 [-]" "$(rx_sum)" 0.2 1e-10
+th_energy "radiation exchange, second-order tetrahedra"
+rxs_loss() {	# 周囲へ逃げる熱 / I²R
+	awk '/joule power/ { for (i = 1; i <= NF; i++) { if ($i == "R") a = $(i+2); if ($i == "radiation") g = $(i+2) + 0 } }
+		END { d = g / a; if (d < 0) d = -d; printf "%.3e", d }' "$WORK/ofe.log"
+}
+for o in 2 3; do
+	sed "s/^mesh = .*/mesh = sphere_void_p$o.msh/" "$WORK/thermal_sphere_void.ofe" > "$WORK/rxs$o.ofe"
+	th_run "rxs$o.ofe"
+	th_energy "radiation exchange, spherical void, order $o"
+	eval "rxs_c$o=\$(rx_sum); rxs_l$o=\$(rxs_loss)"
+done
+res=$(awk -v a="$rxs_c2" -v b="$rxs_c3" -v la="$rxs_l2" -v lb="$rxs_l3" 'function ab(x) { return (x < 0) ? -x : x }
+	BEGIN { ok = (a != "") && (ab(a) <= 4e-3) && (ab(b) <= 0.6 * ab(a)) && (la <= 1e-5) && (lb <= 1e-5)
+	printf "%s (sum A F_inf / sum A : P2 %.2e, P3 %.2e; to radiation / I^2 R : %.1e, %.1e)", ok ? "OK" : "NG", a, b, la, lb }')
+echo "  closed spherical void (curved faces) : the enclosure closes as the order rises, no heat leaves : $res"
+case "$res" in NG*) status=1 ;; esac
 # (6) 弾くべき入力
 awk '/^radiationexchange/{print; print "radiationtemptable = 0 1 500 1.2"; next} {print}' "$SRC/thermal_cavity.ofe" > "$WORK/thrxx_tab.ofe"
 th_reject "radiationexchange with radiationtemptable" thrxx_tab.ofe "cannot be combined with radiationtemptable"

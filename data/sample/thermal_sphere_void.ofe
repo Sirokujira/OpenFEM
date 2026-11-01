@@ -1,0 +1,24 @@
+OpenFEM 1 0
+title = radiation exchange inside a spherical void (curved high-order faces)
+#
+# 導体の直方体 (x 方向 10 mm、断面 3 x 3 mm、x の両端がヒートシンクの電極) の中の球の空隙 (半径 1 mm) の内面だけに
+# 輻射と相互放射を課す。空隙は閉じているので Σ_j F_ij = 1 (F∞ = 0) になり、周囲へ逃げる熱は 0。曲がった面は
+# 凹なので自分自身を見る (F_ii > 0)。境界の折れ線の近似の誤差だけが閉じ具合に残り、次数を上げると縮む
+# (gmsh_sphere_void.py、sphere_void_p2.msh / _p3.msh。実測 sum A F_inf / sum A = 2.7e-3 / 1.3e-3)。
+#
+mesh = sphere_void_p2.msh
+material = 1.0 1e6
+tempco = 2 4e-3 0
+kthermal = 2 10
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+heatsink = 0 20
+heatsink = 1 20
+radiation = 0.8 10  3.9e-3 6.1e-3  0.4e-3 2.6e-3  0.4e-3 2.6e-3
+radiationexchange = 1
+temperature = 20
+thermal = 60
+analysis = R
+solver = 20000 500 1e-12
+end
