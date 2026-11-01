@@ -279,6 +279,8 @@ int input_data(FILE *fp)
 	RadEps = 0;
 	ConvTabN = 0;
 	RadTabN = 0;
+	ProfN[0] = ProfN[1] = 0;
+	ProfAxis[0] = ProfAxis[1] = 0;
 	RadExchange = 0;
 	NConv = 0;
 	NRad = 0;
@@ -999,6 +1001,31 @@ int input_data(FILE *fp)
 			}
 			*tn = nt;
 		}
+		else if (!strcmp(strkey, "convectionprofile") || !strcmp(strkey, "radiationprofile")) {
+			// convectionprofile = <x|y|z> <p1> <f1> <p2> <f2> ...
+			// radiationprofile  = <x|y|z> <p1> <f1> ...
+			//   h (ε) を位置の連続関数にする : h(r) = h f(r の軸成分) (すべての行に掛かる、折れ線で
+			//   範囲の外は端の値)。面の中心で引く (直方体で面を選ぶのと同じ点)。高さで変わる自然対流など
+			const int k = ((strkey[0] == 'r') ? 1 : 0);
+			const char ax = token[2][0];
+			if ((nval < 3) || (((nval - 1) % 2) != 0) || (((nval - 1) / 2) > MAXTEMPTAB) || (ProfN[k] > 0)
+			 || (token[2][1] != '\0') || ((ax != 'x') && (ax != 'y') && (ax != 'z'))) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int np = (nval - 1) / 2;
+			for (int i = 0; i < np; i++) {
+				ProfX[k][i] = atof(token[3 + (2 * i)]);
+				ProfF[k][i] = atof(token[4 + (2 * i)]);
+				// 位置は狭義単調増加、倍率は 0 以上
+				if ((ProfF[k][i] < 0) || ((i > 0) && (ProfX[k][i] <= ProfX[k][i - 1]))) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+			}
+			ProfAxis[k] = ax - 'x';
+			ProfN[k] = np;
+		}
 		else if (!strcmp(strkey, "radiationexchange")) {
 			// radiationexchange = 1 : 輻射を課した露出面どうしの相互放射 (灰色・拡散、形態係数は
 			//   閉形式、遮蔽は面の中心どうしの線分で判定)。0 なら各面は周囲 (T_r) とだけ交換する
@@ -1564,6 +1591,38 @@ int input_data(FILE *fp)
 			input_warn("radiationtemptable has no effect without radiation (it scales "
 				"the emissivity of the radiation lines)");
 		}
+		// 位置の折れ線は convection / radiation の行に掛かる倍率なので、行が無ければ読まれない
+		if ((ProfN[0] > 0) && (NConv < 1)) {
+			input_warn("convectionprofile has no effect without convection (it scales "
+				"the h of the convection lines)");
+		}
+		if ((ProfN[1] > 0) && (NRad < 1)) {
+			input_warn("radiationprofile has no effect without radiation (it scales "
+				"the emissivity of the radiation lines)");
+		}
+		// 倍率が全部 0 なら面から熱が出ない (逃げ場の検査は行の値で見ているので、ここで弾く)
+		for (int k = 0; k < 2; k++) {
+			double fm = 0;
+			for (int i = 0; i < ProfN[k]; i++) fm = ((ProfF[k][i] > fm) ? ProfF[k][i] : fm);
+			if ((ProfN[k] > 0) && (fm <= 0)) {
+				printf("*** %s : all factors are zero\n", (k ? "radiationprofile" : "convectionprofile"));
+				return 1;
+			}
+			if ((k == 1) && (ProfN[1] > 0) && ((RadEps * fm) > 1)) {
+				printf("*** radiationprofile : emissivity %g x factor %g exceeds 1\n", RadEps, fm);
+				return 1;
+			}
+		}
+		if ((ProfN[1] > 0) && (RadTabN > 0)) {
+			double fm = 0, gm = 0;
+			for (int i = 0; i < ProfN[1]; i++) fm = ((ProfF[1][i] > fm) ? ProfF[1][i] : fm);
+			for (int i = 0; i < RadTabN; i++) gm = ((RadTabF[i] > gm) ? RadTabF[i] : gm);
+			if ((RadEps * fm * gm) > 1) {
+				printf("*** radiationprofile x radiationtemptable : emissivity %g x %g x %g exceeds 1\n",
+					RadEps, fm, gm);
+				return 1;
+			}
+		}
 		// 放射率は 1 を越えられない : 表の最大の倍率 x 最大の ε <= 1
 		for (int k = 0; k < RadTabN; k++) {
 			if ((RadEps * RadTabF[k]) > 1) {
@@ -1647,6 +1706,14 @@ int input_data(FILE *fp)
 		}
 		if (ConvTabN > 0) {
 			input_warn("convectiontemptable has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (ProfN[0] > 0) {
+			input_warn("convectionprofile has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (ProfN[1] > 0) {
+			input_warn("radiationprofile has no effect without thermal (it is only "
 				"read by the electro-thermal coupling)");
 		}
 		if (RadTabN > 0) {

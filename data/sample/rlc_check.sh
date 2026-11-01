@@ -4237,6 +4237,96 @@ awk '/^convectiontemptable/{print "convectiontemptable = 30 -1 100 1"; next} {pr
 	"$SRC/thermal_natconv.ofe" > "$WORK/thctx_neg.ofe"
 th_reject "convectiontemptable with a negative factor" thctx_neg.ofe "invalid convectiontemptable data"
 
+# ---- 位置に依存する h / ε (convectionprofile / radiationprofile) ----
+#
+# h(r) = h f(r の軸成分) の折れ線 (範囲の外は端の値)。面の中心で引く (直方体で面を選ぶのと
+# 同じ点。thermal.c の surf_bc)。
+#   (a) 一定の倍率 f = 2 で h = 100 は h = 200 と同じ演算 -> ofe.out がバイト一致
+#   (b) 急な段差 (x = L/2 の前後 1e-8 で 0.5 -> 2) は「左半分 h/2・右半分 2h の直方体 2 行」と
+#       面ごとの係数が同じ -> ofe.out がバイト一致 (構造格子・六面体・四面体。輻射も)。
+#       軸の取り違え・面の中心でない点で引く誤りはここで落ちる (面の境目が段差に乗らないので)
+#   (c) 連続な 1 次の倍率 (f = 0.5 -> 1.5) を熱伝導の大きい棒 (k = 1e5、mL = 0.035) で :
+#       温度はほぼ一様で T - T_a = I²R / (h P L <f>)、<f> = 1 (1 次の f は中点則で厳密に積分
+#       される)。一様からのずれは f の勾配と (mL)² の積の 2 次で 1e-5 程度 (実測 1.0e-5) なので許容 1e-4。
+#       k = 1e7 にすると系が悪条件になり、恒等式が CG の残差 (2e-8) で落ちる (実測)
+#   (d) 鏡映 : f を x について裏返しても棒は左右対称なので R・T_max が一致 (1e-9)
+echo "[thermal h(x)] position-dependent convection / emissivity (convectionprofile / radiationprofile)"
+cp "$SRC/thermal_conv.ofe" "$SRC/thermal_hex.ofe" "$SRC/thermal_tet.ofe" "$SRC/thermal_hex40.msh" "$SRC/thermal_tet40.msh" "$WORK/"
+pf_same() {	# pf_same <ラベル> <ofe a> <ofe b> : 2 つの入力の ofe.out がバイト一致すること
+	rm -rf "$WORK/pfa" "$WORK/pfb"; mkdir -p "$WORK/pfa" "$WORK/pfb"
+	cp "$WORK/$2" "$WORK/pfa/"; cp "$WORK/$3" "$WORK/pfb/"
+	cp "$WORK"/thermal_hex40.msh "$WORK"/thermal_tet40.msh "$WORK/pfa/"; cp "$WORK"/thermal_hex40.msh "$WORK"/thermal_tet40.msh "$WORK/pfb/"
+	(cd "$WORK/pfa" && "$OFE" -n 2 "$2" > /dev/null 2>&1) || true
+	(cd "$WORK/pfb" && "$OFE" -n 2 "$3" > /dev/null 2>&1) || true
+	if [ -s "$WORK/pfa/ofe.out" ] && cmp -s "$WORK/pfa/ofe.out" "$WORK/pfb/ofe.out"; then
+		echo "  $1 : ofe.out identical -> OK"
+	else
+		echo "  $1 : ofe.out differs (or missing) -> NG" >&2; status=1
+	fi
+}
+# (a)
+awk '/^convection/{print "convection = 100 30"; print "convectionprofile = x 0 2 1 2"; next} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/thpf_a2.ofe"
+pf_same "constant profile f = 2 x h = 100 == h = 200" thermal_conv.ofe thpf_a2.ofe
+# (b) 構造格子 (対流 / 輻射)
+awk '/^convection/{print "convection = 400 30"; print "convectionprofile = x 0.00499999 0.5 0.00500001 2"; next} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/thpf_s.ofe"
+awk '/^convection/{print "convection = 200 30"; print "convection = 800 30 0.005 0.01 0 1e-3 0 0.5e-3"; next} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/thpf_b.ofe"
+pf_same "step profile == two boxes (structured grid, convection)" thpf_s.ofe thpf_b.ofe
+awk '/^convection/{print "radiation = 0.8 30"; print "radiationprofile = x 0.00499999 0.5 0.00500001 1"; next} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/thpf_rs.ofe"
+awk '/^convection/{print "radiation = 0.4 30"; print "radiation = 0.8 30 0.005 0.01 0 1e-3 0 0.5e-3"; next} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/thpf_rb.ofe"
+pf_same "step profile == two boxes (structured grid, radiation)" thpf_rs.ofe thpf_rb.ofe
+#     y 向きの 3 段 (棒の幅方向) : y = 0 の面 0.5、y = 1e-3 の面 2、z の面 (中心 y = 0.5e-3) は
+#     平らな区間の 1.25 (傾き 0 なので丸めずに 1.25)。直方体 3 行 (500 / 200 / 800) と同じ演算
+awk '/^convection/{print "convection = 400 30"; print "convectionprofile = y 0.2e-3 0.5 0.3e-3 1.25 0.7e-3 1.25 0.8e-3 2"; next} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/thpf_y.ofe"
+awk '/^convection/{print "convection = 500 30"; print "convection = 200 30 0 0.01 0 0 0 0.5e-3"; print "convection = 800 30 0 0.01 1e-3 1e-3 0 0.5e-3"; next} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/thpf_yb.ofe"
+pf_same "y profile (three levels) == three boxes" thpf_y.ofe thpf_yb.ofe
+# (b) 六面体・四面体
+for m in thermal_hex thermal_tet; do
+	awk '/^heatsink = 1/{next} /^thermal/{print "convection = 400 30"; print "convectionprofile = x 0.00499999 0.5 0.00500001 2"} {print}' \
+		"$SRC/$m.ofe" > "$WORK/thpf_${m}_s.ofe"
+	awk '/^heatsink = 1/{next} /^thermal/{print "convection = 200 30"; print "convection = 800 30 0.005 0.01 -1 1 -1 1"} {print}' \
+		"$SRC/$m.ofe" > "$WORK/thpf_${m}_b.ofe"
+	pf_same "step profile == two boxes ($m)" "thpf_${m}_s.ofe" "thpf_${m}_b.ofe"
+done
+# (c) 連続な 1 次の倍率、熱伝導の大きい棒 (α = 0)
+awk '/^tempco/{print "tempco = 2 0 0"; next} /^kthermal/{print "kthermal = 2 1e5"; next}
+	/^convection/{print "convection = 200 30"; print "convectionprofile = x 0 0.5 0.01 1.5"; next} {print}' \
+	"$SRC/thermal_conv.ofe" > "$WORK/thpf_c.ofe"
+th_run thpf_c.ofe
+#     R = 1e-6 x 0.01 / 5e-7 = 0.02、P = 6² x 0.02 = 0.72 W、h P L <f> = 200 x 3e-3 x 0.01 = 6e-3
+compare "linear profile, high k : T_mean - T_a = I^2 R / (h P L <f>) [K]" \
+	"$(awk -v t="$(t3_tm)" 'BEGIN { printf "%.12e", t - 30 }')" 120 1e-4
+th_energy "linear profile, high k"
+grep -q "convection h(r) = h f(x), f : (0, 0.5) (0.01, 1.5) (at the face centre)" "$WORK/ofe.log" \
+	&& echo "  the profile is echoed to the log -> OK" || { echo "  the profile is not in the log -> NG" >&2; status=1; }
+# (d) 鏡映
+awk '/^tempco/{print "tempco = 2 4e-3 0"; next} {print}' "$WORK/thpf_c.ofe" | awk '/^kthermal/{print "kthermal = 2 10"; next} {print}' > "$WORK/thpf_m1.ofe"
+awk '/^convectionprofile/{print "convectionprofile = x 0 1.5 0.01 0.5"; next} {print}' "$WORK/thpf_m1.ofe" > "$WORK/thpf_m2.ofe"
+th_run thpf_m1.ofe; r1=$(th_r); t1=$(th_t)
+th_run thpf_m2.ofe
+compare "mirrored profile : R (mirror symmetry) [ohm]" "$(th_r)" "$r1" 1e-9
+compare "mirrored profile : T_max (mirror symmetry) [degC]" "$(th_t)" "$t1" 1e-9
+#     対照 : 1 次の倍率は一定の h と違う答えになること (倍率が効いていない誤りの対)
+th_run thermal_conv.ofe
+res=$(awk -v a="$t1" -v b="$(th_t)" 'BEGIN { d = (a - b) / b; if (d < 0) d = -d; printf "%s (%.2e)", (d > 1e-3) ? "OK" : "NG", d }')
+echo "  a linear profile changes T_max against a constant h (control) : $res"
+case "$res" in NG*) status=1 ;; esac
+# (e) 弾くべき入力
+awk '/^convection/{print; print "convectionprofile = w 0 1 1 2"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thpfx_ax.ofe"
+th_reject "convectionprofile with an unknown axis" thpfx_ax.ofe "invalid convectionprofile data"
+awk '/^convection/{print; print "convectionprofile = x 0.01 1 0 2"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thpfx_dec.ofe"
+th_reject "convectionprofile with decreasing positions" thpfx_dec.ofe "invalid convectionprofile data"
+awk '/^convection/{print "radiation = 0.8 30"; print "radiationprofile = x 0 1 0.01 1.5"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thpfx_eps.ofe"
+th_reject "radiationprofile with an emissivity above 1" thpfx_eps.ofe "exceeds 1"
+awk '/^convection/{print; print "convectionprofile = x 0 0 1 0"; next} {print}' "$SRC/thermal_conv.ofe" > "$WORK/thpfx_zero.ofe"
+th_reject "convectionprofile with all factors zero" thpfx_zero.ofe "all factors are zero"
+
 # ---- 面どうしの相互放射 (radiationexchange、構造格子) ----
 #
 # 形態係数は閉形式 (周回積分 A_i F_ij = (1/2π) ∮∮ ln r dl_i・dl_j の平行な辺の対)、
@@ -4620,6 +4710,13 @@ lint_expect "convectiontemptable without thermal" lint_ctt_noth.ofe yes
 #   (thrt*.ofe は [thermal h(T)] 節で作ったもの)
 lint_expect "radiationtemptable without radiation" thrtx_norad.ofe yes
 lint_expect "radiationtemptable (clean)" thrt.ofe no
+#   (thpf*.ofe は [thermal h(x)] 節で作ったもの)
+lint_expect "convectionprofile (clean)" thpf_s.ofe no
+lint_expect "radiationprofile (clean)" thpf_rs.ofe no
+awk '/^convection =/{next} /^thermal/{print "heatsink = 0 20"} {print}' "$WORK/thpf_s.ofe" > "$WORK/lint_pf_noconv.ofe"
+lint_expect "convectionprofile without convection" lint_pf_noconv.ofe yes
+awk '/^thermal/{next} {print}' "$WORK/thpf_s.ofe" | awk '!/^kthermal|^convection = /' > "$WORK/lint_pf_noth.ofe"
+lint_expect "convectionprofile without thermal" lint_pf_noth.ofe yes
 awk '/^thermal/{print "radiationexchange = 1"} {print}' "$SRC/thermal_bar.ofe" > "$WORK/lint_rx_norad.ofe"
 lint_expect "radiationexchange without radiation" lint_rx_norad.ofe yes
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)

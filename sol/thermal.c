@@ -344,14 +344,23 @@ static int surf_in(const surfbc_t *bc, double xc, double yc, double zc)
 
 // 面の中心での対流 (rad = 0) / 輻射 (rad = 1) の行。あとに書いた行ほど優先し、
 // どの行にも入らなければ NULL (断熱)
+// 位置の折れ線 (convectionprofile / radiationprofile) があれば係数に面の中心での倍率を掛けた
+// 写しを返す (対流と輻射で別の置き場。呼び出し側は対流と輻射の行を同時に持つことがある)
 static const surfbc_t *surf_bc(int rad, double xc, double yc, double zc, int *idx)
 {
-	const surfbc_t *list = ((rad == 1) ? RadBC : ConvBC);
-	const int nb = ((rad == 1) ? NRad : NConv);
+	static surfbc_t prof[2];
+	const int k = ((rad == 1) ? 1 : 0);
+	const surfbc_t *list = (k ? RadBC : ConvBC);
+	const int nb = (k ? NRad : NConv);
 	for (int e = nb - 1; e >= 0; e--) {
 		if (surf_in(&list[e], xc, yc, zc)) {
 			if (idx) *idx = e;
-			return &list[e];
+			if (ProfN[k] < 1) return &list[e];
+			const double r[3] = {xc, yc, zc};
+			double sl;
+			prof[k] = list[e];
+			prof[k].c = list[e].c * tab_eval(ProfN[k], ProfX[k], ProfF[k], r[ProfAxis[k]], &sl);
+			return &prof[k];
 		}
 	}
 	return NULL;
@@ -2588,6 +2597,13 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 				bc->g[0], bc->g[1], bc->g[2], bc->g[3], bc->g[4], bc->g[5]);
 		}
 		fprintf(fp_log, "\n");
+	}
+	for (int k = 0; k < 2; k++) {
+		if (ProfN[k] < 1) continue;
+		fprintf(fp_log, "  %s(r) = %s f(%c), f :", (k ? "emissivity e" : "convection h"), (k ? "e" : "h"),
+			'x' + ProfAxis[k]);
+		for (int i = 0; i < ProfN[k]; i++) fprintf(fp_log, " (%g, %g)", ProfX[k][i], ProfF[k][i]);
+		fprintf(fp_log, " (at the face centre)\n");
 	}
 	if ((RadEps > 0) && (RadTabN > 0)) {
 		fprintf(fp_log, "  emissivity e(T) = e f(T), f :");
