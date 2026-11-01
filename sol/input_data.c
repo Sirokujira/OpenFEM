@@ -1371,8 +1371,9 @@ int input_data(FILE *fp)
 				if (Material[m].be_d > 0) use_bertotti_sigma = 1;
 			}
 		}
+		// M の過渡解析 (渦電流) は導体でない材料の Material[].sigma を読む
 		const int use_matsig = ((Analysis & (ANALYSIS_R | ANALYSIS_A | ANALYSIS_E)) != 0)
-		                     || use_bertotti_sigma;
+		                     || use_bertotti_sigma || ((Analysis == ANALYSIS_M) && TransientOn);
 		const int use_mu   = (Analysis & (ANALYSIS_M | ANALYSIS_F | ANALYSIS_A | ANALYSIS_E)) != 0;
 		int have_condsig = 0;
 		for (int p = 0; p < MAXPORT; p++) {
@@ -1588,9 +1589,38 @@ int input_data(FILE *fp)
 			}
 		}
 	}
+	else if (TransientOn && (Analysis == ANALYSIS_M)) {
+		// 静磁場の過渡解析 (渦電流 σ∂A/∂t + ヒステリシス)。断面 2 次元の構造格子・
+		// 単一ポート・後退 Euler に限る (J-A の履歴は刻みの終わりの状態で確定させる)
+		if (MeshMode) {
+			printf("%s\n", "*** transient with analysis M is implemented for the structured grid only");
+			return 1;
+		}
+		if (NPort != 1) {
+			printf("%s\n", "*** transient with analysis M needs exactly one port");
+			return 1;
+		}
+		if (TransientTheta != 1) {
+			printf("%s\n", "*** transient with analysis M supports theta = 1 (backward Euler) only "
+				"(the hysteresis state is committed at the end of each step)");
+			return 1;
+		}
+		if (NSweep > 0) {
+			printf("%s\n", "*** transient with analysis M cannot be combined with currentsweep "
+				"(use waveform for the current history)");
+			return 1;
+		}
+		for (int m = 0; m < NMaterial; m++) {
+			if ((Material[m].nbh[0] > 0) && !Material[m].ja.on) {
+				printf("%s\n", "*** transient with analysis M supports linear and Jiles-Atherton "
+					"materials only (not bh curves)");
+				return 1;
+			}
+		}
+	}
 	else if (TransientOn) {
-		printf("%s\n", "*** transient needs thermal (it is the time-dependent form "
-			"of the electro-thermal coupling)");
+		printf("%s\n", "*** transient needs thermal or analysis M (it is the time-dependent form "
+			"of the electro-thermal coupling or of the magnetostatic analysis)");
 		return 1;
 	}
 	else {

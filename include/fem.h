@@ -389,6 +389,7 @@ EXTERN double Sweep[MAXSWEEP];
 
 // Jiles-Atherton の状態 (Gauss 点毎、添字 = cell * 8 + g)
 EXTERN double *JaB, *JaH, *JaM;		// 収束済みの |B|, H, M
+EXTERN int JaSafeSlope;			// 1 : dH/dB に両方向の枝の大きい方を返す (固定点の安定化)
 EXTERN double *JaBn, *JaHn, *JaMn;	// 反復中の |B|, H, M
 EXTERN double *JaD, *JaDn;		// 磁化方向の基準ベクトル (符号付き B を取るため)
 EXTERN int JaSub;				// 1 ステップあたりの部分積分数

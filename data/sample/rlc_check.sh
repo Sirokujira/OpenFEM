@@ -3665,6 +3665,95 @@ th_reject "radiationexchange with radiationtemptable" thrxx_tab.ofe "cannot be c
 awk '/^radiationexchange/{print "radiationexchange = 2"; next} {print}' "$SRC/thermal_cavity.ofe" > "$WORK/thrxx_2.ofe"
 th_reject "radiationexchange = 2" thrxx_2.ofe "invalid radiationexchange data"
 
+# ---- 静磁場の過渡解析 (analysis = M + transient : 渦電流 + ヒステリシス) ----
+#
+# -∇・(ν∇A) + σ(∂A/∂t - c_k) = J_s(t) を後退 Euler で解く (solve.c の mag_transient の注釈)。
+# 孤立した導電領域ごとに正味の電流 0 (c_k を射影質量で消去)。刻みに ΔA を掛けると
+#   入力 b・ΔA = 磁気の仕事 ΔA・r_ja + 渦電流損 ΔA・M_eff ΔA/Δt
+# が反復の打ち切りを除いて厳密 (ログの energy の行)。
+echo "[transient M] eddy currents + hysteresis in the time domain (Az, backward Euler)"
+cp "$SRC/lamination_step.ofe" "$SRC/plate_line_ja_eddy.ofe" "$SRC/plate_line_ja.ofe" "$WORK/"
+mt_b() { awk -F, 'END { print $5 }' "$WORK/ofe_transient.csv"; }
+mt_energy() {	# mt_energy <ラベル> <許容> : 入力 = 磁気の仕事 + 渦電流損
+	res=$(awk -v tol="$2" '/energy \(per unit length\)/ { for (i = 1; i <= NF; i++) {
+			if ($i == "input") a = $(i+2) + 0
+			if ($i == "work") b = $(i+2) + 0
+			if ($i == "loss") c = $(i+2) + 0 } got = 1 }
+		END { if (!got) { printf "NG (no energy line)"; exit }
+		      d = (a - b - c) / a; if (d < 0) d = -d
+		      printf "%s (%.1e)", (d < tol) ? "OK" : "NG", d }' "$WORK/ofe.log")
+	echo "  $1 : input = magnetic work + eddy loss : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+mt_loss() { awk '/energy \(per unit length\)/ { for (i = 1; i <= NF; i++) if ($i == "loss") print $(i+2) + 0 }' "$WORK/ofe.log"; }
+# (1) 線形の積層板のステップ応答 (lamination_step.ofe) : Fourier 級数解と、後退 Euler の
+#     1 次の時間誤差。100 / 200 刻みの Richardson 補外 2 B200 - B100 は空間の h² 誤差だけ
+#     (+6e-5) が残るので許容 2e-4
+bex=$(awk 'BEGIN { pi = atan2(0, -1); mu = 4e-7 * pi * 1000; tau = 1e6 * mu * 0.2e-3 * 0.2e-3; t = 1e-5
+	S = 0; for (k = 1; k < 4000; k += 2) S += 8 / (k * k * pi * pi) * exp(-k * k * pi * pi * t / tau)
+	printf "%.12e", mu * 1000 * (1 - S) }')
+th_run lamination_step.ofe
+b100=$(mt_b)
+mt_energy "lamination, 100 steps" 1e-9
+awk '/^transient/{print "transient = 1e-5 200"; next} {print}' "$SRC/lamination_step.ofe" > "$WORK/lam200.ofe"
+th_run lam200.ofe
+b200=$(mt_b)
+compare "lamination step : B_mean, Richardson 2 B(200) - B(100) vs Fourier series [T]" \
+	"$(awk -v a="$b100" -v b="$b200" 'BEGIN { printf "%.12e", 2 * b - a }')" "$bex" 2e-4
+res=$(awk -v a="$b100" -v b="$b200" -v e="$bex" 'BEGIN {
+	e1 = (a - e) / e; if (e1 < 0) e1 = -e1
+	e2 = (b - e) / e; if (e2 < 0) e2 = -e2
+	q = (e2 > 0) ? e1 / e2 : 0
+	printf "%s (err %.2e -> %.2e, ratio %.3f)", ((q > 1.85) && (q < 2.25)) ? "OK" : "NG", e1, e2, q }')
+echo "  lamination step : first-order in time (100 -> 200 steps) : $res"
+case "$res" in NG*) status=1 ;; esac
+#     正味の電流 0 の射影を外すと、板の電流が回路の外へ逃げて Fourier 級数から外れる
+# (2) σ = 0 の J-A : 刻みを電流掃引の点 (plate_line_ja.ofe) に揃えると解の列が一致する
+#     (刻みの式が静磁場そのものになる)。B の列を印字の全桁で比べる
+th_run plate_line_ja.ofe
+awk '/Jiles-Atherton hysteresis/ { f = 1; next } f && (NF == 6) && ($1 ~ /^[0-9]+$/) && ($2 ~ /e/) { print $1, $2, $4 }' "$WORK/ofe.log" > "$WORK/mt_sweep.txt"
+awk '/^currentsweep|^jasub/{next} /^current =/{print; print "transient = 11 11"; print "waveform = 0 0 1 0.5 2 1 3 2 4 1 5 0 6 -1 7 -2 8 -1 9 0 10 1 11 2"; next}
+	/^nlsolver/{print; print "jasub = 40"; next} {print}' "$SRC/plate_line_ja.ofe" > "$WORK/mt_ja0.ofe"
+th_run mt_ja0.ofe
+awk '/H_mean/ { f = 1; next } f && (NF == 7) && ($1 ~ /^[0-9]+$/) && ($3 ~ /e/) { print $1, $3, $6 }' "$WORK/ofe.log" > "$WORK/mt_tr.txt"
+if [ -s "$WORK/mt_sweep.txt" ] && cmp -s "$WORK/mt_sweep.txt" "$WORK/mt_tr.txt"; then
+	echo "  sigma = 0 transient == quasi-static current sweep (11 steps, all printed digits) -> OK"
+else
+	echo "  sigma = 0 transient differs from the quasi-static current sweep -> NG" >&2
+	diff "$WORK/mt_sweep.txt" "$WORK/mt_tr.txt" | head -4 >&2
+	status=1
+fi
+mt_energy "sigma = 0 hysteresis (input == loop work)" 1e-8
+# (3) J-A + 渦電流 (plate_line_ja_eddy.ofe、1 区間 1 ms と 2 ms) : 恒等式、渦電流損が
+#     周期に反比例 (比 2)、終わりの B が独立な ODE 積分の値 1.342754 T に 1/T で近づく
+th_run plate_line_ja_eddy.ofe
+mt_energy "hysteresis + eddy currents, 1 ms per segment" 1e-9
+l1=$(mt_loss); bb1=$(mt_b)
+awk '/^transient/{print "transient = 0.022 110"; next}
+	/^waveform/{ s = "waveform ="; for (i = 3; i <= NF; i += 2) s = s " " (2 * $i) " " $(i+1); print s; next } {print}' \
+	"$SRC/plate_line_ja_eddy.ofe" > "$WORK/mt_je2.ofe"
+th_run mt_je2.ofe
+mt_energy "hysteresis + eddy currents, 2 ms per segment" 1e-9
+l2=$(mt_loss); bb2=$(mt_b)
+res=$(awk -v a="$l1" -v b="$l2" 'BEGIN { q = (b > 0) ? a / b : 0
+	printf "%s (%.4e -> %.4e J/m, ratio %.4f)", ((q > 1.98) && (q < 2.02)) ? "OK" : "NG", a, b, q }')
+echo "  classical eddy loss halves when the period doubles : $res"
+case "$res" in NG*) status=1 ;; esac
+res=$(awk -v a="$bb1" -v b="$bb2" 'BEGIN { r = 1.342754
+	e1 = a - r; if (e1 < 0) e1 = -e1
+	e2 = b - r; if (e2 < 0) e2 = -e2
+	q = (e2 > 0) ? e1 / e2 : 0
+	printf "%s (|B - B_ODE| %.2e -> %.2e, ratio %.2f)", ((e1 < 5e-5) && (q > 1.7) && (q < 2.3)) ? "OK" : "NG", e1, e2, q }')
+echo "  final B approaches the independent J-A ODE value as 1/T : $res"
+case "$res" in NG*) status=1 ;; esac
+# (4) 弾くべき入力
+awk '/^transient/{print "transient = 1e-5 100 0.5"; next} {print}' "$SRC/lamination_step.ofe" > "$WORK/mtx_cn.ofe"
+th_reject "transient M with theta = 0.5" mtx_cn.ofe "theta = 1 (backward Euler) only"
+awk '/^transient/{print; print "currentsweep = 0.5 1"; next} {print}' "$SRC/lamination_step.ofe" > "$WORK/mtx_sw.ofe"
+th_reject "transient M with currentsweep" mtx_sw.ofe "cannot be combined with currentsweep"
+awk '/^mur/{print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; next} {print}' "$SRC/lamination_step.ofe" > "$WORK/mtx_bh.ofe"
+th_reject "transient M with a bh curve" mtx_bh.ofe "linear and Jiles-Atherton materials only"
+
 # ---- 3 次四面体 (20 節点、gmsh の tet20 / tri10) ----
 #
 # 局所節点の並びは gmsh 4.15.2 の出力を重心座標で分類した実測の表 (unstruct.c の
@@ -3811,7 +3900,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
          thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
          plate_line_bh_ac bar_air_bh thermal_tet thermal_ac thermal_natconv \
-         box_p3 nodal_test_p3 coax_p3 thermal_cavity; do
+         box_p3 nodal_test_p3 coax_p3 thermal_cavity lamination_step plate_line_ja_eddy; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

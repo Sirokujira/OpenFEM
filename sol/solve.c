@@ -234,6 +234,397 @@ static double iron_loss(const double *az, FILE *fp_log, int kport)
 // 導体内部の電流分布を含むため内部インダクタンスが自動的に入り、μr にも対応する。
 // 材料に B-H 曲線 (bh キー) があるときは ν = H(|B|)/|B| を反復更新する非線形解析に
 // なる (単一ポートのみ)。得られる L は与えた電流での磁束鎖交 (割線) インダクタンス。
+/*
+静磁場の過渡解析 (analysis = M + transient、断面 2 次元の構造格子)。
+
+	-∇・(ν ∇A) + σ (∂A/∂t - c_k(t)) = J_s(t)
+
+J_s は駆動導体 (conductor) の一様な電流密度 I(t)/S (撚り線とみなし、導体の中の渦電流は
+入れない)。渦電流は導体でない材料の σ (Material[].sigma) で流れる。断面 2 次元では
+**孤立した導電領域ごとに正味の電流が 0** (無限に長い板の端は開いている) なので、
+c_k = (1/S_k)∫_k σ ∂A/∂t を消去した射影質量
+	M_eff y = M y - Σ_k m_k (m_k・y) / S_k,   m_k = ∫_k σ N,  S_k = ∫_k σ
+を使う (M_eff は半正定値で、定数 (ゲージ) を零空間に持つので 1 節点固定のまま解ける)。
+
+時間は後退 Euler。各刻みで
+	R(A) = b(t_{n+1}) - r_ja(A) - M_eff (A - A^n) / Δt = 0
+を、行列 K(dH/dB) + M_eff/Δt の固定点反復で解く (ヒステリシスの静磁場と同じ構成。
+行列は常に正の微分磁気抵抗率、残差だけ正確な H(B))。収束したら J-A の状態を確定させる。
+
+**離散エネルギーの恒等式**: 刻みの式に w = ΔA = A^{n+1} - A^n を掛けると
+	b(t_{n+1})・ΔA = ΔA・r_ja(A^{n+1}) + ΔA・M_eff ΔA / Δt
+左辺は端子から入れた仕事 I ΔΛ、右辺第 1 項は磁気の仕事 ∫H・ΔB (残差と同じ Gauss 点)、
+第 2 項は渦電流損 Δt ∫σ|E|² (E = -(ΔA/Δt - c))。刻みを足し合わせた
+	入力 = 磁気の仕事 + 渦電流損
+が反復の打ち切りを除いて厳密に成り立つ (ログに出し、rlc_check.sh で見る)。
+σ = 0 なら刻みの式は静磁場そのもので、waveform の点と刻みを揃えれば準静的な
+電流掃引 (currentsweep) と同じ解の列になる (検証の恒等式)。
+*/
+
+// 刻みの終わり t の電流の倍率 f(t^-) (waveform の折れ線の左極限。無ければ 1)
+static double mt_wave(double t)
+{
+	if (WaveN < 1) return 1;
+	int k = -1;
+	for (int m = 0; m < WaveN; m++) {
+		if (WaveT[m] < t) k = m;
+	}
+	if (k < 0) return WaveF[0];
+	if (k == (WaveN - 1)) return WaveF[k];
+	const double w = (t - WaveT[k]) / (WaveT[k + 1] - WaveT[k]);
+	return WaveF[k] + (w * (WaveF[k + 1] - WaveF[k]));
+}
+
+
+static int mt_find(int *par, int x)
+{
+	while (par[x] != x) {
+		par[x] = par[par[x]];
+		x = par[x];
+	}
+	return x;
+}
+
+
+// M_eff y = M y - Σ_k m_k (m_k・y)/S_k   (out = M_eff y、comp[i] < 0 は導電領域の外)
+static void mt_meff(const crs_t *M, const double *mv, const int *comp, const double *sk,
+	double *dk, int ncomp, const double *y, double *out)
+{
+	const int n = (int)M->n;
+	crs_spmv(M, y, out, NULL);
+	for (int k = 0; k < ncomp; k++) dk[k] = 0;
+	for (int i = 0; i < n; i++) {
+		if (comp[i] >= 0) dk[comp[i]] += mv[i] * y[i];
+	}
+	for (int i = 0; i < n; i++) {
+		if (comp[i] >= 0) out[i] -= mv[i] * dk[comp[i]] / sk[comp[i]];
+	}
+}
+
+
+// (A - sc Σ_k m_k m_kᵀ/S_k) x = b の Jacobi-PCG (A は CRS、固定節点は恒等行で x = 0)
+static int mt_pcg(const crs_t *A, const double *mv, const int *comp, const double *sk,
+	int ncomp, double sc, const double *b, double *x, const unsigned char *fix,
+	int maxiter, double tol)
+{
+	const int n = (int)A->n;
+	double *r = (double *)malloc((size_t)n * sizeof(double));
+	double *z = (double *)malloc((size_t)n * sizeof(double));
+	double *p = (double *)malloc((size_t)n * sizeof(double));
+	double *q = (double *)malloc((size_t)n * sizeof(double));
+	double *dg = (double *)malloc((size_t)n * sizeof(double));
+	double *dk = (double *)malloc(((size_t)ncomp + 1) * sizeof(double));
+	crs_diag(A, dg);
+	double bn = 0;
+	for (int i = 0; i < n; i++) {
+		x[i] = 0;
+		r[i] = (fix[i] ? 0 : b[i]);
+		bn += r[i] * r[i];
+	}
+	bn = sqrt(bn);
+	int it = 0, ok = (bn == 0);
+	double rz = 0;
+	for (int i = 0; i < n; i++) {
+		z[i] = (fix[i] ? 0 : r[i] / dg[i]);
+		p[i] = z[i];
+		rz += r[i] * z[i];
+	}
+	for (it = 1; !ok && (it <= maxiter); it++) {
+		crs_spmv(A, p, q, fix);
+		for (int k = 0; k < ncomp; k++) dk[k] = 0;
+		for (int i = 0; i < n; i++) {
+			if (comp[i] >= 0) dk[comp[i]] += mv[i] * p[i];
+		}
+		double pq = 0;
+		for (int i = 0; i < n; i++) {
+			if (fix[i]) { q[i] = 0; continue; }
+			if (comp[i] >= 0) q[i] -= sc * mv[i] * dk[comp[i]] / sk[comp[i]];
+			pq += p[i] * q[i];
+		}
+		const double al = rz / pq;
+		double rn = 0, rz2 = 0;
+		for (int i = 0; i < n; i++) {
+			x[i] += al * p[i];
+			r[i] -= al * q[i];
+			rn += r[i] * r[i];
+		}
+		if (sqrt(rn) <= (tol * bn)) { ok = 1; break; }
+		for (int i = 0; i < n; i++) {
+			z[i] = (fix[i] ? 0 : r[i] / dg[i]);
+			rz2 += r[i] * z[i];
+		}
+		const double be = rz2 / rz;
+		rz = rz2;
+		for (int i = 0; i < n; i++) p[i] = z[i] + (be * p[i]);
+	}
+	free(r); free(z); free(p); free(q); free(dg); free(dk);
+	return (ok ? it : -1);
+}
+
+
+static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char *fix,
+	double *nucell, double *az)
+{
+	const int n = (int)num_node();
+	const int64_t ncell = (int64_t)Nx * Ny * Nz;
+	const double dt = TransientTime / TransientSteps;
+	const double scale = 1 / TlineLength;
+	int ierr = 0;
+
+	// 渦電流の σ (導体でない材料のセル)
+	double *sig = (double *)malloc((size_t)ncell * sizeof(double));
+	int nsigc = 0;
+	for (int64_t c = 0; c < ncell; c++) {
+		const double s = Material[CellMaterial[c]].sigma;
+		sig[c] = (((CellConductor[c] < 0) && (s > 0)) ? s : 0);
+		if (sig[c] > 0) nsigc++;
+	}
+	crs_t Ms;
+	crs_alloc(&Ms);
+	assemble_mass_cell(&Ms, sig);
+
+	// 孤立した導電領域 (節点を共有するセルどうしを 1 つにまとめる)
+	int *par = (int *)malloc((size_t)n * sizeof(int));
+	int *comp = (int *)malloc((size_t)n * sizeof(int));
+	for (int i = 0; i < n; i++) par[i] = i;
+	for (int i = 0; i < Nx; i++) {
+	for (int j = 0; j < Ny; j++) {
+	for (int k = 0; k < Nz; k++) {
+		if (sig[((int64_t)i * Ny + j) * Nz + k] <= 0) continue;
+		const int a0 = mt_find(par, (int)node_index(i, j, k));
+		for (int l = 1; l < 8; l++) {
+			const int b = mt_find(par, (int)node_index(i + ((l >> 2) & 1), j + ((l >> 1) & 1), k + (l & 1)));
+			if (b != mt_find(par, a0)) par[b] = mt_find(par, a0);
+		}
+	}
+	}
+	}
+	double *mv = (double *)malloc((size_t)n * sizeof(double));
+	double *one = (double *)malloc((size_t)n * sizeof(double));
+	for (int i = 0; i < n; i++) one[i] = 1;
+	crs_spmv(&Ms, one, mv, NULL);			// m = M 1 = ∫σ N_i
+	int ncomp = 0;
+	int *cid = (int *)malloc((size_t)n * sizeof(int));
+	for (int i = 0; i < n; i++) cid[i] = -1;
+	for (int i = 0; i < n; i++) {
+		comp[i] = -1;
+		if (mv[i] <= 0) continue;
+		const int r = mt_find(par, i);
+		if (cid[r] < 0) cid[r] = ncomp++;
+		comp[i] = cid[r];
+	}
+	double *sk = (double *)calloc((size_t)ncomp + 1, sizeof(double));
+	double *dk = (double *)malloc(((size_t)ncomp + 1) * sizeof(double));
+	for (int i = 0; i < n; i++) {
+		if (comp[i] >= 0) sk[comp[i]] += mv[i];
+	}
+	free(par); free(cid); free(one);
+
+	fprintf(fp_log, "  transient (eddy currents%s) : t_end = %.6e [s], %d steps (dt = %.6e [s]), "
+		"%d conducting cells in %d isolated regions (zero net current each)\n",
+		((JaB != NULL) ? " + hysteresis" : ""), TransientTime, TransientSteps, dt, nsigc, ncomp);
+	FILE *fcsv = fopen(FN_transient, "w");
+	if (fcsv == NULL) {
+		fprintf(fp_log, "*** cannot open %s\n", FN_transient);
+		ierr = 1;
+	}
+	else {
+		fprintf(fcsv, "t [s],I [A],Lambda [Wb/m],H_mean [A/m],B_mean [T],iter\n");
+	}
+	fprintf(fp_log, "  %6s %13s %13s %13s %13s %13s %5s\n", "step", "t [s]", "I [A]",
+		"Lambda [Wb/m]", "H_mean [A/m]", "B_mean [T]", "iter");
+
+	double *res = (double *)malloc((size_t)n * sizeof(double));
+	double *del = (double *)malloc((size_t)n * sizeof(double));
+	double *r = (double *)malloc((size_t)n * sizeof(double));
+	double *aold = (double *)malloc((size_t)n * sizeof(double));
+	double *da = (double *)malloc((size_t)n * sizeof(double));
+	double *w = (double *)malloc((size_t)n * sizeof(double));
+	double *abest = (double *)malloc((size_t)n * sizeof(double));
+	memset(az, 0, (size_t)n * sizeof(double));
+	memset(aold, 0, (size_t)n * sizeof(double));
+
+	// 残差の基準 : 波形の最大電流での右辺のノルム
+	double fmax = 1;
+	if (WaveN > 0) {
+		fmax = 0;
+		for (int m = 0; m < WaveN; m++) {
+			if (fabs(WaveF[m]) > fmax) fmax = fabs(WaveF[m]);
+		}
+	}
+	double bref = 0;
+	for (int i = 0; i < n; i++) {
+		if (!fix[i]) bref += b1[i] * b1[i];
+	}
+	bref = sqrt(bref) * ((fmax > 0) ? fmax : 1);
+	if (bref <= 0) bref = 1;
+
+	double win = 0, wmag = 0, wed = 0, lam = 0, cur = 0;
+	for (int step = 1; !ierr && (step <= TransientSteps); step++) {
+		const double t = step * dt;
+		cur = Curr * mt_wave(t);
+		const double fac = cur / Curr;
+		field_free();
+		int it, conv = 0, nback = 0;
+		double rnorm = 0, rbest = 0, lrel = NlRelax;
+		for (it = 1; it <= NlMaxiter; it++) {
+			assemble_ja(az, res, nucell);
+			for (int i = 0; i < n; i++) da[i] = az[i] - aold[i];
+			if (nsigc > 0) mt_meff(&Ms, mv, comp, sk, dk, ncomp, da, w);
+			rnorm = 0;
+			for (int i = 0; i < n; i++) {
+				r[i] = (fix[i] ? 0 : (((fac * b1[i]) - res[i]) - ((nsigc > 0) ? (w[i] / dt) : 0)));
+				rnorm += r[i] * r[i];
+			}
+			rnorm = sqrt(rnorm) / bref;
+			if (rnorm < NlTol) {
+				conv = 1;
+				break;
+			}
+			// 残差が増えたら直前の更新を半分に戻してやり直す (反転の近くでは微分磁気
+			// 抵抗率の行列が真の接線より小さく、固定点が不安定になることがある : 実測)。
+			// 単調に減っている間は何もしないので、σ = 0 の電流掃引との一致は崩れない
+			// 発散の検出 : 残差がそれまでの最良の 10 倍を越えたら最良の反復に戻り、
+			// この刻みの残りは行列の傾きを両方の枝の大きい方にする (単調な H(B) に対して
+			// 縮小写像になる)。それでも越えるときは更新を半分にする。固定点の反復は
+			// 単調に減るとは限らない (実測で途中 4 倍に増えてから収束する) ので、
+			// 1 回増えただけでは何もしない (σ = 0 の電流掃引との一致を崩さないため)
+			if ((it == 1) || (rnorm < rbest)) {
+				rbest = rnorm;
+				memcpy(abest, az, (size_t)n * sizeof(double));
+			}
+			else if ((rnorm > (10 * rbest)) && (nback < 30)) {
+				memcpy(az, abest, (size_t)n * sizeof(double));
+				if (!JaSafeSlope) JaSafeSlope = 1;
+				else lrel /= 2;
+				nback++;
+				continue;
+			}
+			assemble_nu(A, nucell);
+			int li;
+			if (nsigc > 0) {
+				const int64_t nnz = A->rowptr[n];
+				for (int64_t e = 0; e < nnz; e++) A->val[e] += Ms.val[e] / dt;
+				li = mt_pcg(A, mv, comp, sk, ncomp, 1 / dt, r, del, fix, Solver.maxiter, Solver.converg);
+			}
+			else {
+				li = solver_cg(A, r, del, fix, Solver.maxiter, Solver.nout, Solver.converg, NULL, "ja");
+			}
+			if (li < 0) {
+				fprintf(fp_log, "*** linear solver did not converge (step %d)\n", step);
+				ierr = 1;
+				break;
+			}
+			for (int i = 0; i < n; i++) az[i] += lrel * del[i];
+		}
+		JaSafeSlope = 0;
+		if (ierr) break;
+		if (!conv) {
+			fprintf(fp_log, "*** transient : the iteration did not converge at step %d "
+				"(residual = %.3e)\n", step, rnorm);
+			ierr = 1;
+			break;
+		}
+
+		// J-A の状態を確定させる (静磁場の電流掃引と同じ)
+		if (JaB != NULL) {
+			memcpy(JaB, JaBn, (size_t)ncell * 8 * sizeof(double));
+			memcpy(JaH, JaHn, (size_t)ncell * 8 * sizeof(double));
+			memcpy(JaM, JaMn, (size_t)ncell * 8 * sizeof(double));
+			for (int64_t id = 0; id < ncell * 8; id++) {
+				double *d = &JaD[id * 3];
+				if ((d[0] == 0) && (d[1] == 0) && (d[2] == 0)) {
+					d[0] = JaDn[(id * 3) + 0];
+					d[1] = JaDn[(id * 3) + 1];
+					d[2] = JaDn[(id * 3) + 2];
+				}
+			}
+		}
+
+		// エネルギー : 入力 b・ΔA、磁気の仕事 ΔA・r_ja、渦電流損 ΔA・M_eff ΔA / Δt
+		double din = 0, dmag = 0, ded = 0, lb = 0;
+		for (int i = 0; i < n; i++) {
+			if (fix[i]) continue;
+			din += fac * b1[i] * da[i];
+			dmag += da[i] * res[i];
+			lb += b1[i] * az[i];
+		}
+		if (nsigc > 0) {
+			mt_meff(&Ms, mv, comp, sk, dk, ncomp, da, w);
+			for (int i = 0; i < n; i++) {
+				if (!fix[i]) ded += da[i] * w[i] / dt;
+			}
+		}
+		win += din * scale;
+		wmag += dmag * scale;
+		wed += ded * scale;
+		lam = lb / Curr * scale;
+
+		// 平均の H, B : ヒステリシス材料は J-A の状態 (符号つき)、それ以外の導電領域は
+		// セル中心の |B|
+		double bsum = 0, hsum = 0, vsum = 0;
+		for (int i = 0; i < Nx; i++) {
+		for (int j = 0; j < Ny; j++) {
+		for (int k = 0; k < Nz; k++) {
+			const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
+			const material_t *mt = &Material[CellMaterial[c]];
+			const double dx = Xn[i + 1] - Xn[i], dy = Yn[j + 1] - Yn[j], dz = Zn[k + 1] - Zn[k];
+			const double v = dx * dy * dz;
+			if (mt->ja.on && (JaB != NULL)) {
+				// 静磁場の電流掃引と同じ式・同じ順に足す (σ = 0 で解の列が一致する恒等式のため)
+				const double wg = (Xn[i + 1] - Xn[i]) * (Yn[j + 1] - Yn[j]) * (Zn[k + 1] - Zn[k]) / 8;
+				for (int g = 0; g < 8; g++) {
+					bsum += JaB[(c * 8) + g] * wg;
+					hsum += JaH[(c * 8) + g] * wg;
+					vsum += wg;
+				}
+			}
+			else if (sig[c] > 0) {
+				double gr[3] = {0, 0, 0};
+				for (int l = 0; l < 8; l++) {
+					const double al = az[node_index(i + ((l >> 2) & 1), j + ((l >> 1) & 1), k + (l & 1))];
+					gr[0] += al * (((l >> 2) & 1) ? 1 : -1) / (4 * dx);
+					gr[1] += al * (((l >> 1) & 1) ? 1 : -1) / (4 * dy);
+					gr[2] += al * ((l & 1) ? 1 : -1) / (4 * dz);
+				}
+				const double bm = sqrt((gr[0] * gr[0]) + (gr[1] * gr[1]) + (gr[2] * gr[2]));
+				bsum += bm * v;
+				hsum += bm * v / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
+				vsum += v;
+			}
+		}
+		}
+		}
+		const double bmean = ((vsum > 0) ? (bsum / vsum) : 0);
+		const double hmean = ((vsum > 0) ? (hsum / vsum) : 0);
+		fprintf(fp_log, "  %6d %13.6e %13.6e %13.6e %13.6e %13.6e %5d\n", step, t, cur, lam,
+			hmean, bmean, it);
+		if (fcsv) fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%d\n", t, cur, lam, hmean, bmean, it);
+		fflush(fp_log);
+		memcpy(aold, az, (size_t)n * sizeof(double));
+	}
+
+	if (!ierr) {
+		fprintf(fp_log, "  energy (per unit length) : input = %.12e, magnetic work = %.12e, "
+			"eddy loss = %.12e [J/m]\n", win, wmag, wed);
+		if (cur != 0) {
+			Mmat[0] = lam * Curr / cur;		// 終了時刻の Λ / I
+			HaveM = 1;
+		}
+		if (FieldOut) {
+			field_add_node("Az", az);
+			field_add_grad("B", az, 1);
+		}
+	}
+	if (fcsv) fclose(fcsv);
+	crs_free(&Ms);
+	free(sig); free(comp); free(mv); free(sk); free(dk);
+	free(res); free(del); free(r); free(aold); free(da); free(w); free(abest);
+
+	return ierr;
+}
+
+
 static int solve_magnetostatic(FILE *fp_log)
 {
 	const int n = (int)num_node();
@@ -316,6 +707,14 @@ static int solve_magnetostatic(FILE *fp_log)
 	double *rhs = (double *)malloc(n * sizeof(double));
 	double *az  = (double *)malloc(n * sizeof(double));
 	const double scale = 1 / TlineLength;
+
+	// 過渡解析 (渦電流 + ヒステリシス) : mag_transient が時間発展を解く
+	if (TransientOn) {
+		ierr = mag_transient(fp_log, &A, b[0], fix, nucell, az);
+		free(b[0]); free(b); free(rhs); free(az); free(fix); free(nucell);
+		crs_free(&A);
+		return ierr;
+	}
 
 	// ヒステリシス (Jiles-Atherton) : 電流掃引に沿って履歴を追う
 	//

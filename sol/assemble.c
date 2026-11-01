@@ -439,7 +439,15 @@ void ja_eval(const ja_t *ja, double b0, double h0, double m0, double b,
 		m += (f1m + f2m) / 2 * db;
 	}
 
-	const double chi = ja_dmdh(ja, h, m, delta);
+	double chi = ja_dmdh(ja, h, m, delta);
+	// H(B) は確定済みの状態で枝が切り替わる (B が b0 の両側で傾きが違う折れ点を持つ)。
+	// 過渡解析で B がほとんど動かない点があると反復がその折れ点をまたいで往復し、
+	// 小さい方の傾きの行列では固定点が不安定になる (実測)。JaSafeSlope のときは両方の
+	// 枝の大きい方の dH/dB (χ の小さい方) を返す。行列だけに使うので解は変わらない
+	if (JaSafeSlope) {
+		const double chi2 = ja_dmdh(ja, h, m, -delta);
+		if (chi2 < chi) chi = chi2;
+	}
 
 	*mout = m;
 	*hout = h;
