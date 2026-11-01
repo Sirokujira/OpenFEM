@@ -1245,6 +1245,7 @@ end
 | `bhtempco` | `<material_id> <alpha> [<T0>]` | なし | B-H 曲線の温度依存 B(H;T) = B0(H)(1 + α(T−T0))。飽和磁化 Ms も同じ割合で動く |
 | `epstemptable` / `mutemptable` / `bhtemptable` | `<material_id> <T1> <f1> <T2> <f2> ...` | なし | 上の 1 次係数の代わりに、倍率 f(T) を (温度, 倍率) の折れ線で与える (範囲の外は端の値)。キュリー点近傍の非線形な落ち込みを書く。1 次係数との併用は不可 |
 | `tempcotable` | `<material_id> <T1> <f1> <T2> <f2> ...` | なし | `tempco` の代わりに抵抗率の倍率 ρ(T)/ρ0 = f(T) を折れ線で与える (σ = σ0 / f)。熱連成の σ(T) もこれを通る |
+| `conductortempcotable` | `<conductor_id> <T1> <f1> <T2> <f2> ...` | なし | `conductortempco` の代わりの折れ線 (Rs と `F` が使う系統) |
 | `temperature` | 実数 [°C] | 20 | 動作温度。`tempco` / `conductortempco` と併用する |
 | `tempco` | `<material_id> <alpha> [<T0>]` | なし | 材料の導電率の温度依存 σ(T) = σ0/(1+α(T−T0))。T0 の既定は 20 °C |
 | `conductortempco` | `<conductor_id> <alpha> [<T0>]` | なし | `conductorsigma` で与えた導体に同じモデルを適用する (Rs と `F` が使う系統) |
@@ -1469,6 +1470,8 @@ mutemptable = 2  20 1  100 1  110 0.25    # 100〜110 degC で μr が 4 から 
 2 区間目の途中) と、表の外だけを通る棒 (f = 2 一定 → 放物線が節点で厳密) で
 機械精度の一致を見ます。入力の補正で表を無視する誤り / 熱連成で 1 次係数を
 使う誤りはどちらも落ちます (−20〜−50%)。
+`conductorsigma` の系統 (Rs / `F`) も `conductortempcotable` で同じ折れ線を与えられ、
+Rs(85 °C) = 1.76 Rs(20 °C) が厳密に出ます (表を無視する誤りは −20% / −43% で落ちる)。
 
 ### 電気-熱連成 (`thermal`)
 
@@ -1925,7 +1928,7 @@ np = 2 / 3 の出力を直列と `cmp` することを検証にしています
   `tempco` / `conductortempco` を使い分ける (「どの解析がどの材料量を読むか」
   節を参照。取り違えると警告が出る)。1 次で表せない温度依存 (キュリー点近傍の
   落ち込みなど) は `epstemptable` / `mutemptable` / `bhtemptable` / `tempcotable`
-  (σ) の折れ線で書ける (`conductortempco` の系統は 1 次係数のみ)。
+  (σ) / `conductortempcotable` (Rs / F の σ) の折れ線で書ける。
   **温度分布を解く熱連成は `thermal` で対応** (定常、構造格子の `R`、単一ポート)。
   表面からの対流 (`convection`) と輻射 (`radiation`、周囲は黒体の壁)、
   過渡解析 (`transient`、θ 法) と電流の波形 (`waveform`、折れ線) にも対応。

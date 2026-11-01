@@ -74,20 +74,24 @@ void element_matrix(double dx, double dy, double dz, const double c[6], double k
 // 温度 T での材料係数の倍率。kind = 0 : εr、1 : μr、2 : B-H、3 : 抵抗率 (σ = σ0 / f)。
 // 表 (epstemptable 等) があれば (T, f) の折れ線 (範囲の外は端の値)、
 // 無ければ 1 次係数 1 + α (T - T0)
+// (tt, ff) の折れ線の x での値 (範囲の外は端の値)。tt は狭義単調増加
+double table_interp(int nt, const double *tt, const double *ff, double x)
+{
+	if (x <= tt[0]) return ff[0];
+	for (int k = 0; k < (nt - 1); k++) {
+		if (x <= tt[k + 1]) {
+			const double w = (x - tt[k]) / (tt[k + 1] - tt[k]);
+			return ff[k] + (w * (ff[k + 1] - ff[k]));
+		}
+	}
+	return ff[nt - 1];
+}
+
+
 double temp_factor_at(const material_t *mt, int kind, double t)
 {
 	const int nt = mt->ntemp[kind];
-	if (nt > 0) {
-		const double *tt = mt->tempT[kind], *ff = mt->tempF[kind];
-		if (t <= tt[0]) return ff[0];
-		for (int k = 0; k < (nt - 1); k++) {
-			if (t <= tt[k + 1]) {
-				const double w = (t - tt[k]) / (tt[k + 1] - tt[k]);
-				return ff[k] + (w * (ff[k + 1] - ff[k]));
-			}
-		}
-		return ff[nt - 1];
-	}
+	if (nt > 0) return table_interp(nt, mt->tempT[kind], mt->tempF[kind], t);
 	if (kind == 0) return 1 + (mt->epstempco * (t - mt->epstemp0));
 	if (kind == 1) return 1 + (mt->mutempco  * (t - mt->mutemp0));
 	if (kind == 2) return 1 + (mt->bhtempco * (t - mt->bhtemp0));

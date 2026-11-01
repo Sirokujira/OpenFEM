@@ -401,6 +401,8 @@ EXTERN signed char *CellConductor;
 EXTERN double CondSigma[MAXPORT];	// 導電率 [S/m] (0 = 未指定)
 EXTERN double CondTempco[MAXPORT];	// 抵抗率の温度係数 α [1/K] (0 = 温度依存なし)
 EXTERN double CondTemp0[MAXPORT];	// 基準温度 T0 [degC]
+EXTERN int CondNTemp[MAXPORT];		// conductortempcotable の点数 (0 : 1 次係数)
+EXTERN double CondTempT[MAXPORT][MAXTEMPTAB], CondTempF[MAXPORT][MAXTEMPTAB];
 EXTERN double CondArea[MAXPORT];	// 断面積 [m^2] (tline 指定時)
 
 // 抽出結果 (行列は [NPort][NPort]、単位は Tline 指定時 F/m, H/m, S/m)

@@ -264,6 +264,7 @@ int input_data(FILE *fp)
 		CondSigma[p] = 0;
 		CondTempco[p] = 0;
 		CondTemp0[p] = 20;
+		CondNTemp[p] = 0;
 	}
 	Temperature = 20;
 	ThermalOn = 0;
@@ -824,6 +825,30 @@ int input_data(FILE *fp)
 			CondTempco[cid] = atof(token[3]);
 			if (nval == 3) CondTemp0[cid] = atof(token[4]);
 		}
+		else if (!strcmp(strkey, "conductortempcotable")) {
+			// conductortempcotable = <conductor_id> <T1> <f1> <T2> <f2> ...
+			//   conductortempco の代わりに抵抗率の倍率 ρ(T)/ρ0 = f(T) を折れ線で与える
+			//   (CondSigma = σ0 / f、範囲の外は端の値)
+			if ((nval < 3) || ((nval % 2) == 0) || (((nval - 1) / 2) > MAXTEMPTAB)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int cid = atoi(token[2]);
+			if ((cid < 0) || (cid >= MAXPORT) || (CondNTemp[cid] > 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int nt = (nval - 1) / 2;
+			for (int k = 0; k < nt; k++) {
+				CondTempT[cid][k] = atof(token[3 + (2 * k)]);
+				CondTempF[cid][k] = atof(token[4 + (2 * k)]);
+				if ((CondTempF[cid][k] <= 0) || ((k > 0) && (CondTempT[cid][k] <= CondTempT[cid][k - 1]))) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+			}
+			CondNTemp[cid] = nt;
+		}
 		else if (!strcmp(strkey, "kthermal")) {
 			// kthermal = <material_id> <k [W/(m K)]>  : 熱伝導率 (熱連成 thermal で使う)
 			//   material 行より後に書くこと (材料番号を参照するため)
@@ -1271,8 +1296,15 @@ int input_data(FILE *fp)
 		}
 	}
 	for (int p = 0; p < MAXPORT; p++) {
-		if (CondTempco[p] == 0) continue;
-		const double den = 1 + (CondTempco[p] * (Temperature - CondTemp0[p]));
+		if ((CondTempco[p] == 0) && (CondNTemp[p] < 1)) continue;
+		if ((CondTempco[p] != 0) && (CondNTemp[p] > 0)) {
+			printf("*** conductor %d has both conductortempco and conductortempcotable; "
+				"give only one\n", p);
+			return 1;
+		}
+		const double den = ((CondNTemp[p] > 0)
+			? table_interp(CondNTemp[p], CondTempT[p], CondTempF[p], Temperature)
+			: (1 + (CondTempco[p] * (Temperature - CondTemp0[p]))));
 		if (den <= 0) {
 			printf("*** conductortempco : conductor %d has a non-positive resistivity "
 				"factor (1 + alpha (T - T0) = %.4e) at T = %.4e degC\n", p, den, Temperature);
@@ -1362,13 +1394,15 @@ int input_data(FILE *fp)
 			}
 		}
 		for (int p = 0; p < MAXPORT; p++) {
-			if ((CondTempco[p] != 0) && !use_condsig) {
-				input_warn("conductortempco (conductor %d) scales CondSigma, which only "
-					"Rs and analysis F read; for R / A / E use tempco instead", p);
+			const int ctt = ((CondTempco[p] != 0) || (CondNTemp[p] > 0));
+			if (ctt && !use_condsig) {
+				input_warn("conductortempco / conductortempcotable (conductor %d) scales "
+					"CondSigma, which only Rs and analysis F read; for R / A / E use "
+					"tempco instead", p);
 			}
-			if ((CondTempco[p] != 0) && (CondSigma[p] <= 0)) {
-				input_warn("conductortempco (conductor %d) has no effect because "
-					"conductorsigma was not given for it", p);
+			if (ctt && (CondSigma[p] <= 0)) {
+				input_warn("conductortempco / conductortempcotable (conductor %d) has no "
+					"effect because conductorsigma was not given for it", p);
 			}
 		}
 		// 積層厚だけ与えて σ が無いと古典渦電流項が黙って 0 になる

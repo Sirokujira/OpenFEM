@@ -133,6 +133,7 @@ void assemble_cell(crs_t *, const double *);
 void assemble_mass_cell(crs_t *, const double *);
 double temp_factor(const material_t *, int);
 double temp_factor_at(const material_t *, int, double);
+double table_interp(int, const double *, const double *, double);
 void joule_load(const double *, const double *, double *);
 void assemble_mass(crs_t *);
 double bh_nu(const material_t *, int, double);

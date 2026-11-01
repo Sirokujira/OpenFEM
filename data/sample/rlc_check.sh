@@ -301,6 +301,29 @@ sed -e "s/^analysis = .*/conductortempco = 0 3.93e-3 20\nconductortempco = 1 3.9
     "$SRC/plate_line_dc.ofe" > "$WORK/temp_rs.ofe"
 (cd "$WORK" && "$OFE" -n 2 temp_rs.ofe > /dev/null && "$OFE_POST" > /dev/null)
 compare "Rs(T=85 degC) [ohm/m]" "$(value_of Rs)" 8.658275862e-01 0.001
+# conductortempcotable (CondSigma 系統の折れ線)。Rs は抵抗率に厳密に比例するので、
+# 直線の表は conductortempco と一致し、折れ線の表では Rs(85) = f(85) Rs(20)
+rs_lin=$(value_of Rs)
+sed -e "s/^analysis = .*/conductortempcotable = 0 20 1 220 1.786\nconductortempcotable = 1 20 1 220 1.786\ntemperature = 85\n&/" \
+    "$SRC/plate_line_dc.ofe" > "$WORK/temp_rs_tab.ofe"
+(cd "$WORK" && "$OFE" -n 2 temp_rs_tab.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "conductortempcotable (a straight line) == conductortempco, Rs(85) [ohm/m]" "$(value_of Rs)" "$rs_lin" 1e-12
+sed -e "s/^analysis = .*/conductortempcotable = 0 20 1 50 1.2 100 2.0\nconductortempcotable = 1 20 1 50 1.2 100 2.0\ntemperature = 85\n&/" \
+    "$SRC/plate_line_dc.ofe" > "$WORK/temp_rs_tab2.ofe"
+(cd "$WORK" && "$OFE" -n 2 temp_rs_tab2.ofe > /dev/null && "$OFE_POST" > /dev/null)
+rs_tab=$(value_of Rs)
+(cd "$WORK" && cp "$SRC/plate_line_dc.ofe" . && "$OFE" -n 2 plate_line_dc.ofe > /dev/null && "$OFE_POST" > /dev/null)
+compare "conductortempcotable : Rs(85) = 1.76 Rs(20) [ohm/m]" "$rs_tab" \
+	"$(awk -v r="$(value_of Rs)" 'BEGIN { printf "%.12e", 1.76 * r }')" 1e-7
+sed -e "s/^analysis = .*/conductortempco = 0 3.93e-3 20\nconductortempcotable = 0 20 1 100 1.3\n&/" \
+    "$SRC/plate_line_dc.ofe" > "$WORK/temp_rs_both.ofe"
+if (cd "$WORK" && "$OFE" -n 2 temp_rs_both.ofe > "$WORK/temp_rs_both.txt" 2>&1); then
+	echo "  conductortempco and conductortempcotable together : accepted -> NG" >&2; status=1
+elif ! grep -q "both conductortempco and conductortempcotable" "$WORK/temp_rs_both.txt"; then
+	echo "  conductortempco and conductortempcotable together : rejected for a different reason -> NG" >&2; status=1
+else
+	echo "  conductortempco and conductortempcotable together : rejected -> OK"
+fi
 
 echo "[aniso_plate] anisotropic eps (10, 5, 2), field along z"
 run_case aniso_plate
@@ -3058,6 +3081,9 @@ sed "s/^mutempco = .*/mutemptable = 2 20 1 120 0.7/" "$SRC/temp_mur.ofe" > "$WOR
 lint_expect "mutemptable + analysis=M (clean)" lint_mutab_ok.ofe no
 sed "s/^epstempco = .*/tempcotable = 2 20 1 120 1.3/" "$SRC/temp_material.ofe" > "$WORK/lint_sigtab.ofe"
 lint_expect "tempcotable + analysis=C"     lint_sigtab.ofe    yes
+awk '/^analysis = /{print "conductortempcotable = 1 20 1 120 1.3"} {print}' \
+    "$SRC/bar_eddy.ofe" > "$WORK/lint_ctab_a.ofe"
+lint_expect "conductortempcotable + analysis=A" lint_ctab_a.ofe yes
 # 正しいケースでは 1 件も出ないこと (誤検知は警告を無視させるので同じくらい悪い)
 for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          plate_line_ac plate_line_bh dispersive_plate drude_plate colecole_plate \
