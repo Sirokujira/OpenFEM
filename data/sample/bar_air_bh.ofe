@@ -1,0 +1,49 @@
+OpenFEM 1 0
+title = 3D eddy current (A-phi) with a nonlinear (B-H) magnetic layer
+#
+# 非線形 (B-H) と 3 次元渦電流 (analysis = A) の同時解析。bar_air.ofe の空気層
+# (厚さ g = 0.5mm、導電率 0) を B-H 曲線の磁性体に替える (曲線は plate_line_bh.ofe と同じ)。
+# 実効磁気抵抗率法: 要素ごとの ν = H/B を波高値 |B| で評価して反復する
+# (単一ポート、電流振幅 current)。
+#
+# 解は 1 次元のまま。層の中は A が線形なので H が一様で、層は界面の Robin 条件
+#   A(t) + κ A'(t) = 0,   κ = g μr_layer / μr_conductor
+# に潰れる。閉形式 (bar_air.ofe の式で g/μr を κ にしたもの):
+#   X = ((cosh γt - 1) + κγ sinh γt) / (sinh γt + κγ cosh γt),  γ = sqrt(jω μ0 σ)
+#   Z = γ L / (σ W D),  D = sinh γt - X (cosh γt - 1)
+#   層の H = |A(t)| / (g μ0 μr_layer)、A(t) = (E0/(jω)) ((1 - cosh γt) + X sinh γt)、
+#   E0 = I γ / (W σ D)
+# 非線形では μr_layer = B(H)/(μ0 H) が自己無撞着になる点を解く (rlc_check.sh が
+# g(μ) = B(H(μ))/(μ0 H(μ)) - μ の符号の変化を ln μ で二分法)。
+#
+#   f = 1e2 Hz :
+#     I = 150 A : H = 554.6 A/m (曲線の 2 区間目)、μr = 1079.8
+#                 R = 1.3793744023e-04, L = 3.3463411431e-09
+#     I = 200 A : H = 1112.6 A/m (3 区間目)、μr = 717.0
+#                 R = 1.3793742901e-04, L = 3.3439969033e-09
+#     I = 250 A : H = 11273 A/m (外挿の区間)、μr = 86.7
+#                 R = 1.3793719381e-04, L = 3.2943247026e-09
+# 格子の離散化誤差は線形の層 (μr = 50) と同じ L -0.028% (実測)。
+#
+# この構成は**磁束で駆動される** (層の μ を上げると H がほぼ反比例して下がる) ので、
+# H を独立変数にした更新の収束は遅く、Anderson 加速で 18〜56 回かかる。電流で
+# 駆動される構成 (plate_line_bh_ac.ofe、H が Ampère で決まる) では 2 回。
+#
+mesh = bar_air.msh
+material = 1.0 5.8e7
+material = 1.0 0
+bh = 3 100   0.5
+bh = 3 1000  1.0
+bh = 3 10000 1.2
+region = 1 2
+region = 2 3
+electrode = 10 0
+electrode = 11 1
+awall = 20
+
+frequency = 1e2
+current = 200
+nlsolver = 60 1e-9 1.0
+analysis = A
+solver = 20000 2000 1e-9
+end

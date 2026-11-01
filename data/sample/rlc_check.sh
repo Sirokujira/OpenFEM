@@ -2402,6 +2402,62 @@ else
 	status=1
 fi
 
+# 非線形 (B-H) と 3 次元渦電流 (A) : bar_air の層を B-H 曲線の磁性体に替える
+# (data/sample/bar_air_bh.ofe)。層の H が一様なので、界面の Robin 条件の κ = g μr を
+# 自己無撞着に解いた 1 次元の閉形式 (data/sample/bar_layer.awk) と比べる
+echo "[bar_air_bh] nonlinear B-H with 3-D eddy currents (effective reluctivity)"
+na_val() { awk -F, -v name="$2" '$1 == name && NF == 2 { f = 1; next } f && $1 == "1" { print $2; exit }' "$WORK/$1/rlc.csv"; }
+na_run() {	# na_run <dir> : $WORK/<dir>/x.ofe を解いて ofe_post まで
+	cp "$SRC/bar_air.msh" "$WORK/$1/"
+	if ! (cd "$WORK/$1" && "$OFE" -n 2 x.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1); then
+		echo "  $1 : the run failed -> NG" >&2; status=1
+	fi
+}
+#   (a) 3 つの電流で曲線の 2 区間目 (150 A)・3 区間目 (200 A)・外挿の区間 (250 A) を通す。
+#       許容 0.1% : 線形の層 (μr = 50) と同じ格子の離散化誤差が L -0.028% (実測)
+#       磁束で駆動される構成 (層の μ を上げると H が下がる) なので収束は遅く、
+#       上限 60 回 (実測 18〜56 回)。上限を越えたら入力エラーになる
+for I in 150 200 250; do
+	mkdir -p "$WORK/na$I"
+	sed "s/^current = .*/current = $I/" "$SRC/bar_air_bh.ofe" > "$WORK/na$I/x.ofe"
+	na_run "na$I"
+	set -- $(awk -v f=1e2 -v mode=nl -v I="$I" -f "$SRC/bar_layer.awk")
+	compare "I = $I A (layer H = $(printf '%.0f' "$3") A/m, mur = $(printf '%.0f' "$4")) : R [ohm]" "$(na_val na$I Rf)" "$1" 1e-3
+	compare "I = $I A : L [H]" "$(na_val na$I Lf)" "$2" 1e-3
+done
+#   非線形は電流振幅で決まるので、励振の電圧 (voltage) に依らない。既定の 1 V だと
+#   端子電流に電圧を掛け忘れる誤りが等価になるので、0.5 V でも解いて一致を見る
+mkdir -p "$WORK/na200v"
+awk '/^frequency/{print; print "voltage = 0.5"; next} {print}' "$WORK/na200/x.ofe" > "$WORK/na200v/x.ofe"
+na_run na200v
+compare "nonlinear A does not depend on the drive voltage (0.5 V vs 1 V) : L [H]" "$(na_val na200v Lf)" "$(na_val na200 Lf)" 1e-7
+#   線形の層の閉形式 (κ = g μr) そのものも見ておく (μr = 50、同じ許容)
+mkdir -p "$WORK/nal50"
+awk '/^bh/{next} /^current|^nlsolver/{next} /^region = 2 3/{print; print "mur = 3 50"; next} {print}' \
+	"$SRC/bar_air_bh.ofe" > "$WORK/nal50/x.ofe"
+na_run nal50
+set -- $(awk -v f=1e2 -v mode=lin -v mr=50 -v I=1 -f "$SRC/bar_layer.awk")
+compare "linear layer, mur = 50 (kappa = g mur) : L [H]" "$(na_val nal50 Lf)" "$2" 1e-3
+#   (b) 直線の B-H 曲線 (初期透磁率と同じ傾き) は線形の μr = 3979 の層と一致する
+mkdir -p "$WORK/nalin" "$WORK/namur"
+awk '/^bh = 3 10000 /{next} /^bh = 3 1000 /{print "bh = 3 1000 5.0"; next} {print}' "$SRC/bar_air_bh.ofe" > "$WORK/nalin/x.ofe"
+awk '/^bh/{next} /^current|^nlsolver/{next} /^region = 2 3/{print; print "mur = 3 3978.873577297384"; next} {print}' \
+	"$SRC/bar_air_bh.ofe" > "$WORK/namur/x.ofe"
+na_run nalin; na_run namur
+compare "a straight-line B-H layer == linear mur, L [H]" "$(na_val nalin Lf)" "$(na_val namur Lf)" 1e-7
+compare "a straight-line B-H layer == linear mur, R [ohm]" "$(na_val nalin Rf)" "$(na_val namur Rf)" 1e-7
+#   (c) 弾く入力。**A の検査は非構造格子の分岐の中に置く** (構造格子向けの bh の検査は
+#       非構造格子の早期 return の後ろにあって A には効かない)
+na_reject() {	# na_reject <ラベル> <awk の置換> <理由>
+	awk "$2" "$SRC/bar_air_bh.ofe" > "$WORK/nax.ofe"
+	mesh_reject "$1" nax.ofe
+	if ! (cd "$WORK" && "$OFE" -n 2 nax.ofe 2>&1 | grep -q "$3"); then
+		echo "  *** it was rejected for a different reason than: $3" >&2; status=1
+	fi
+}
+na_reject "nonlinear A with a frequency sweep" '/^frequency/{print "frequencysweep = 1e2 1e3"; next} {print}' "cannot be combined with frequencysweep"
+na_reject "nonlinear A with per-axis B-H curves" '/^bh = 3 100 /{print "bh = 3 x 100 0.5"; print "bh = 3 y 100 0.5"; print "bh = 3 z 100 0.5"; next} /^bh/{next} {print}' "isotropic bh curves only"
+
 # ---- 電気-熱連成 (thermal) ----
 #
 # 電流が一様な棒では熱の式が T について線形になり、閉形式が残る
@@ -3230,7 +3286,7 @@ for c in parallel_plate resistor_bar coax microstrip plate_line_dc coax_loss \
          bertotti_core temp_material temp_mur hn_plate plate2d_p2 \
          box_tet_41 plate2d_41 coupled_microstrip thermal_bar thermal_neck \
          thermal_conv thermal_rad thermal_transient thermal_pulse thermal_plate \
-         plate_line_bh_ac; do
+         plate_line_bh_ac bar_air_bh; do
 	lint_expect "$c (clean)" "$c.ofe" no
 done
 

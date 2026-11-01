@@ -1616,6 +1616,31 @@ int input_data(FILE *fp)
 					"(the ungauged A-phi system is singular)");
 				return 1;
 			}
+			// 非線形 (B-H) の A (実効磁気抵抗率法)。**この分岐は非構造格子の早期 return
+			// の手前なので、下の構造格子向けの bh の検査はここには効かない**
+			int nl3 = 0;
+			for (int m = 0; m < NMaterial; m++) {
+				if (Material[m].nbh[0] > 0) nl3 = 1;
+				if ((Material[m].nbh[0] > 0) && Material[m].bhaniso) {
+					printf("%s\n", "*** analysis A supports isotropic bh curves only "
+						"(not per-axis curves)");
+					return 1;
+				}
+				if (Material[m].ja.on) {
+					printf("%s\n", "*** the ja key cannot be combined with analysis A");
+					return 1;
+				}
+			}
+			if (nl3 && (NPort != 1)) {
+				printf("%s\n", "*** a nonlinear (bh) model requires exactly one port "
+					"(superposition does not hold)");
+				return 1;
+			}
+			if (nl3 && (NFreqSweep > 0)) {
+				printf("%s\n", "*** a nonlinear (bh) analysis A cannot be combined with "
+					"frequencysweep (solve each frequency separately)");
+				return 1;
+			}
 		}
 		return 0;
 	}

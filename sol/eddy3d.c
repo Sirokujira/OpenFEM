@@ -204,7 +204,9 @@ void crs_alloc_edge_node(crs_t *A)
 //
 //	Kr = [ S     TG ;  (TG)^T   0        ]
 //	Ki = [ ωT    0  ;   0      -G^T TG/ω ]
-void assemble_eddy3d(crs_t *Kr, crs_t *Ki, double omega)
+// nuelem が非 NULL なら、B-H 曲線を持つ材料の要素だけ等方性の ν = nuelem[e] を使う
+// (非線形の実効磁気抵抗率の反復)
+void assemble_eddy3d(crs_t *Kr, crs_t *Ki, double omega, const double *nuelem)
 {
 	crs_zero(Kr);
 	crs_zero(Ki);
@@ -219,6 +221,10 @@ void assemble_eddy3d(crs_t *Kr, crs_t *Ki, double omega)
 		const int (*tab)[2] = edge_elem_table(e);
 		double nu[6];
 		material_coef_pub(m, 3, nu);			// ν = (μ0 μ~)^-1
+		if ((nuelem != NULL) && (Material[m].nbh[0] > 0)) {
+			nu[0] = nu[1] = nu[2] = nuelem[e];
+			nu[3] = nu[4] = nu[5] = 0;
+		}
 		const double sig = Material[m].sigma;
 
 		double se[12][12], te[12][12];
@@ -385,6 +391,48 @@ static void row_dot_c(const crs_t *Kr, const crs_t *Ki, int32_t row,
 }
 
 
+#define AAM3 (5)		// 非線形の Anderson 加速の深さ
+
+// 要素中心の B = ∇×A (実部・虚部)。四面体は Whitney 基底の閉形式
+// (∇×W_e = 2∇λ_a×∇λ_b、要素内で一定)、六面体・角柱は参照基底を Piola 変換した
+// 要素中心の値 (場の出力と同じ式)
+static void elem_bfield(int e, const double *ur, const double *ui, double bre[3], double bim[3])
+{
+	const int kind = edge_elem_kind(e);
+	const int nedge = edge_elem_nedge(e);
+	const int32_t *ed = &TetEdge[EdgeOff[e]];
+	const signed char *sg = &TetEdgeSgn[EdgeOff[e]];
+	for (int c = 0; c < 3; c++) bre[c] = bim[c] = 0;
+	if (kind == MESHELEM_TET) {
+		double g[4][3], vol;
+		if (tet_grad_pub(&Tet[e * 4], g, &vol)) return;
+		for (int k = 0; k < 6; k++) {
+			const int a = EDGE_NODE3[k][0], b = EDGE_NODE3[k][1];
+			const double cr[3] = {
+				(g[a][1] * g[b][2]) - (g[a][2] * g[b][1]),
+				(g[a][2] * g[b][0]) - (g[a][0] * g[b][2]),
+				(g[a][0] * g[b][1]) - (g[a][1] * g[b][0])};
+			const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
+			for (int c = 0; c < 3; c++) {
+				bre[c] += 2 * wr * cr[c];
+				bim[c] += 2 * wi * cr[c];
+			}
+		}
+	}
+	else {
+		double wc[12][3], cc[12][3];
+		edge_elem_center(e, wc, cc);
+		for (int k = 0; k < nedge; k++) {
+			const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
+			for (int c = 0; c < 3; c++) {
+				bre[c] += wr * cc[k][c];
+				bim[c] += wi * cc[k][c];
+			}
+		}
+	}
+}
+
+
 int solve_eddy3d(FILE *fp_log)
 {
 	const int np = NPort;
@@ -467,7 +515,30 @@ int solve_eddy3d(FILE *fp_log)
 	crs_t Kr, Ki;
 	crs_alloc_edge_node(&Kr);
 	crs_alloc_edge_node(&Ki);
-	assemble_eddy3d(&Kr, &Ki, omega);
+	// 非線形 (B-H) の磁性体があれば実効磁気抵抗率法 (solve.c の F と同じ):
+	// 要素ごとの ν を波高値 |B| で評価し、H を独立変数にした更新 ν = |H|/B(|H|) に
+	// ln ν の Anderson 加速を掛ける。単一ポート・電流振幅 current
+	int nlf = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh[0] > 0) nlf = 1;
+	}
+	double *nuelem = NULL, *aay = NULL, *aaf = NULL, *aayp = NULL, *aafp = NULL;
+	double *aady = NULL, *aadf = NULL;
+	int aan = 0;
+	if (nlf) {
+		nuelem = (double *)malloc((size_t)nelem * sizeof(double));
+		aay  = (double *)malloc((size_t)nelem * sizeof(double));
+		aaf  = (double *)malloc((size_t)nelem * sizeof(double));
+		aayp = (double *)malloc((size_t)nelem * sizeof(double));
+		aafp = (double *)malloc((size_t)nelem * sizeof(double));
+		aady = (double *)malloc((size_t)nelem * AAM3 * sizeof(double));
+		aadf = (double *)malloc((size_t)nelem * AAM3 * sizeof(double));
+		for (int e = 0; e < nelem; e++) {
+			const material_t *mt = &Material[edge_elem_mat(e)];
+			nuelem[e] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0) : 0);
+		}
+	}
+	assemble_eddy3d(&Kr, &Ki, omega, nuelem);
 	fprintf(fp_log, "  coupled matrix : %lld nonzeros (%.1f per row)\n",
 		(long long)Kr.nnz, (double)Kr.nnz / ((n > 0) ? n : 1));
 
@@ -556,6 +627,15 @@ int solve_eddy3d(FILE *fp_log)
 	fprintf(fp_log, "  %-10s %8s %13s\n", "excite", "iter", "residual");
 	fflush(fp_log);
 
+	// 線形なら 1 回で終わり。非線形は ν が収束するまで回し、最後にもう 1 回
+	// (場の出力つき) 解いて Z を作る
+	int final = !nlf;
+	if (nlf) {
+		fprintf(fp_log, "  nonlinear (B-H) : effective reluctivity at current amplitude "
+			"%.6e [A], maxiter = %d, tol = %.1e, relax = %.2f\n", Curr, NlMaxiter, NlTol, NlRelax);
+	}
+	for (int nlit = 1; !ierr; nlit++) {
+	if (nlit > 1) assemble_eddy3d(&Kr, &Ki, omega, nuelem);
 	// 基準導体 0 を φ=0、ポート jc を φ=Volt にして順に励振する
 	for (int jc = 1; jc <= np; jc++) {
 		for (int i = 0; i < n; i++) xdr[i] = xdi[i] = 0;
@@ -574,7 +654,7 @@ int solve_eddy3d(FILE *fp_log)
 		char label[BUFSIZ];
 		sprintf(label, "port%d", jc);
 		const int iter = solver_cocg(&Kr, &Ki, 1.0, br, bi, ur, ui, fix,
-			Solver.maxiter, Solver.nout, Solver.converg, fp_log, label);
+			Solver.maxiter, Solver.nout, Solver.converg, (final ? fp_log : NULL), label);
 		if (iter < 0) {
 			fprintf(fp_log, "*** solver did not converge (port %d)\n", jc);
 			ierr = 1;
@@ -584,12 +664,47 @@ int solve_eddy3d(FILE *fp_log)
 			ui[i] += xdi[i];
 		}
 
+		// 電極上の反作用 -> 流れ込む電流
+		// 節点行は 1/(jω) 倍してあるので、元の残差は jω 倍して戻す
+		double qr[MAXPORT], qi[MAXPORT];
+		for (int p = 0; p < MAXPORT; p++) qr[p] = qi[p] = 0;
+		for (int i = 0; i < nn; i++) {
+			const int id = NodeConductor[i];
+			if ((id < 0) || !cond[i]) continue;
+			double rr, ri;
+			row_dot_c(&Kr, &Ki, (int32_t)ne + i, ur, ui, &rr, &ri);
+			// jω (rr + j ri) = -ω ri + j ω rr
+			qr[id] += -omega * ri;
+			qi[id] += omega * rr;
+		}
+		for (int kc = 1; kc <= np; kc++) {
+			yr[((kc - 1) * np) + (jc - 1)] = qr[kc] / Volt;
+			yi[((kc - 1) * np) + (jc - 1)] = qi[kc] / Volt;
+		}
+		if (final) {
+			fprintf(fp_log, "  port %d : I = %.6e %+.6e j [A] (V = %.6e [V])\n",
+				jc, qr[jc], qi[jc], Volt);
+		}
+
+		// 非線形 : 端子電流が current になるよう解を s = Curr / I 倍する (Y は倍率に
+		// 依らないので上で作った値のまま)。B と場の出力は与えた電流での値になる
+		if (nlf) {
+			const double ivr = yr[0] * Volt, ivi = yi[0] * Volt;	// V = Volt での端子電流
+			const double den = (ivr * ivr) + (ivi * ivi);
+			const double svr = Curr * ivr / den, svi = -Curr * ivi / den;
+			for (int i = 0; i < n; i++) {
+				const double xr = ur[i], xi = ui[i];
+				ur[i] = (svr * xr) - (svi * xi);
+				ui[i] = (svr * xi) + (svi * xr);
+			}
+		}
+
 		// 場の出力 : 要素毎に B = ∇×A と J = -σ(jωA + ∇φ) を作る。
 		// **要素の種別ごとに分岐する** (混在格子があるため)。四面体は
 		// Whitney 基底の閉形式 (∇×W_e = 2∇λ_a×∇λ_b、W_e は 1 次なので重心で
 		// 評価)、六面体・角柱は参照基底を Piola 変換した要素中心の値を使う。
 		// 純粋な格子では従来と同じ式を同じ順に通るので出力はバイト一致する
-		if (FieldOut && (jc == 1)) {
+		if (FieldOut && (jc == 1) && final) {
 			double *bv = (double *)malloc((size_t)nelem * 3 * sizeof(double));
 			double *jr = (double *)malloc((size_t)nelem * 3 * sizeof(double));
 			double *ji = (double *)malloc((size_t)nelem * 3 * sizeof(double));
@@ -678,26 +793,49 @@ int solve_eddy3d(FILE *fp_log)
 			free(bv); free(jr); free(ji);
 		}
 
-		// 電極上の反作用 -> 流れ込む電流
-		// 節点行は 1/(jω) 倍してあるので、元の残差は jω 倍して戻す
-		double qr[MAXPORT], qi[MAXPORT];
-		for (int p = 0; p < MAXPORT; p++) qr[p] = qi[p] = 0;
-		for (int i = 0; i < nn; i++) {
-			const int id = NodeConductor[i];
-			if ((id < 0) || !cond[i]) continue;
-			double rr, ri;
-			row_dot_c(&Kr, &Ki, (int32_t)ne + i, ur, ui, &rr, &ri);
-			// jω (rr + j ri) = -ω ri + j ω rr
-			qr[id] += -omega * ri;
-			qi[id] += omega * rr;
-		}
-		for (int kc = 1; kc <= np; kc++) {
-			yr[((kc - 1) * np) + (jc - 1)] = qr[kc] / Volt;
-			yi[((kc - 1) * np) + (jc - 1)] = qi[kc] / Volt;
-		}
-		fprintf(fp_log, "  port %d : I = %.6e %+.6e j [A] (V = %.6e [V])\n",
-			jc, qr[jc], qi[jc], Volt);
 	}
+	if (final || ierr) break;
+
+	// ν の更新 (H を独立変数にする) と Anderson 加速 (ln ν)
+	double dmax = 0;
+	for (int e = 0; e < nelem; e++) {
+		const material_t *mt = &Material[edge_elem_mat(e)];
+		if (mt->nbh[0] <= 0) {
+			aay[e] = aaf[e] = 0;
+			continue;
+		}
+		double bre[3], bim[3];
+		elem_bfield(e, ur, ui, bre, bim);
+		const double b2 = (bre[0] * bre[0]) + (bre[1] * bre[1]) + (bre[2] * bre[2])
+			+ (bim[0] * bim[0]) + (bim[1] * bim[1]) + (bim[2] * bim[2]);
+		const double hm = nuelem[e] * sqrt(b2);
+		const double nun = ((hm > 0) ? (hm / bh_b_of_h(mt, 0, hm)) : bh_nu(mt, 0, 0));
+		const double dn = fabs(nun - nuelem[e]) / nun;
+		if (dn > dmax) dmax = dn;
+		aay[e] = log(nuelem[e]);
+		aaf[e] = log(nun) - aay[e];
+	}
+	anderson_step(nelem, aay, aaf, aayp, aafp, aady, aadf, AAM3, &aan, NlRelax);
+	for (int e = 0; e < nelem; e++) {
+		if (Material[edge_elem_mat(e)].nbh[0] > 0) nuelem[e] = exp(aay[e]);
+	}
+	{
+		const double y2 = (yr[0] * yr[0]) + (yi[0] * yi[0]);
+		fprintf(fp_log, "  nl-it %4d : R = %.9e, L = %.9e, max dnu/nu = %.3e\n", nlit,
+			yr[0] / y2, (-yi[0] / y2) / omega, dmax);
+		fflush(fp_log);
+	}
+	if (dmax < NlTol) {
+		final = 1;
+	}
+	else if (nlit >= NlMaxiter) {
+		fprintf(fp_log, "*** nonlinear (B-H) eddy current : the effective reluctivity did not "
+			"converge in %d iterations (max dnu/nu = %.3e)\n", NlMaxiter, dmax);
+		ierr = 1;
+	}
+	}
+	if (nlf && !ierr) fprintf(fp_log, "  nonlinear (B-H) : converged\n");
+	free(nuelem); free(aay); free(aaf); free(aayp); free(aafp); free(aady); free(aadf);
 
 	// Z = inv(Y)
 	double *zr = (double *)malloc((size_t)np * np * sizeof(double));

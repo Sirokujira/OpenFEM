@@ -904,62 +904,9 @@ static int solve_eddy(FILE *fp_log)
 		aaf[c] = log(nun) - aay[c];		// 固定点写像の残差 (ln ν で)
 	}
 	// Anderson 加速 (深さ AAM)。ln ν を変数にする (ν は桁で動き、正でなければならない)。
-	// 残差の差分 ΔF の最小二乗 min |f - ΔF γ| で次の点を作る:
-	//   y_new = y + w f - Σ γ_j (ΔY_j + w ΔF_j)
 	// 線形収束の固定点反復 (2 次元の格子で 77 回、実測) を数回に縮める
-	if (aan > 0) {
-		const int slot = (aan - 1) % AAM;
-		for (int64_t c = 0; c < nelc; c++) {
-			aady[(slot * nelc) + c] = aay[c] - aayp[c];
-			aadf[(slot * nelc) + c] = aaf[c] - aafp[c];
-		}
-	}
-	for (int64_t c = 0; c < nelc; c++) {
-		aayp[c] = aay[c];
-		aafp[c] = aaf[c];
-	}
-	const int mh = ((aan < AAM) ? aan : AAM);
-	double gam[AAM];
-	for (int j = 0; j < AAM; j++) gam[j] = 0;
-	if (mh > 0) {
-		double am[AAM][AAM + 1];
-		double tr = 0;
-		for (int i = 0; i < mh; i++) {
-			for (int j = 0; j < mh; j++) {
-				double sum = 0;
-				for (int64_t c = 0; c < nelc; c++) sum += aadf[(i * nelc) + c] * aadf[(j * nelc) + c];
-				am[i][j] = sum;
-			}
-			double sum = 0;
-			for (int64_t c = 0; c < nelc; c++) sum += aadf[(i * nelc) + c] * aaf[c];
-			am[i][mh] = sum;
-			tr += am[i][i];
-		}
-		// 正則化 (履歴がほぼ線形従属のとき)。消去は部分ピボットなしで十分 (正定値)
-		for (int i = 0; i < mh; i++) am[i][i] += 1e-12 * tr + 1e-300;
-		int sing = 0;
-		for (int k = 0; k < mh; k++) {
-			if (am[k][k] <= 0) { sing = 1; break; }
-			for (int i = k + 1; i < mh; i++) {
-				const double r = am[i][k] / am[k][k];
-				for (int j = k; j <= mh; j++) am[i][j] -= r * am[k][j];
-			}
-		}
-		for (int k = mh - 1; !sing && (k >= 0); k--) {
-			double sum = am[k][mh];
-			for (int j = k + 1; j < mh; j++) sum -= am[k][j] * gam[j];
-			gam[k] = sum / am[k][k];
-		}
-		if (sing) for (int j = 0; j < AAM; j++) gam[j] = 0;
-	}
-	for (int64_t c = 0; c < nelc; c++) {
-		double y = aay[c] + (NlRelax * aaf[c]);
-		for (int j = 0; j < mh; j++) {
-			y -= gam[j] * (aady[(j * nelc) + c] + (NlRelax * aadf[(j * nelc) + c]));
-		}
-		nucell[c] = exp(y);
-	}
-	aan++;
+	anderson_step(nelc, aay, aaf, aayp, aafp, aady, aadf, AAM, &aan, NlRelax);
+	for (int64_t c = 0; c < nelc; c++) nucell[c] = exp(aay[c]);
 	{
 		// Z = 1 / Y (単一ポート) を反復の経過としてログに出す
 		const double y2 = (yr[0] * yr[0]) + (yi[0] * yi[0]);

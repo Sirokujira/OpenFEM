@@ -88,7 +88,7 @@ int tet_grad_pub(const int32_t [4], double [4][3], double *);
 
 // eddy3d.c
 void crs_alloc_edge_node(crs_t *);
-void assemble_eddy3d(crs_t *, crs_t *, double);
+void assemble_eddy3d(crs_t *, crs_t *, double, const double *);
 int solve_eddy3d(FILE *);
 
 // assemble.c (公開した材料係数)
@@ -192,5 +192,9 @@ void comline(int, char *[], int *, int *, char *);
 #ifdef __cplusplus
 }
 #endif
+
+// matutil.c : Anderson 加速 (非線形渦電流の実効磁気抵抗率の反復)
+#define ANDERSON_MAX (8)
+void anderson_step(int64_t, double *, const double *, double *, double *, double *, double *, int, int *, double);
 
 #endif		// _FEM_PROTOTYPE_H_

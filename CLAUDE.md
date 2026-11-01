@@ -61,6 +61,9 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
   電流駆動の問題で 2 値を往復する (実測)。2 次元は線形収束なので ln ν に Anderson
   加速。Newton は |B| が解析的でないので使えない。端子電流は `yr` そのもの
   (`tlen` で割り済み)。`F` は低周波ほど悪条件なので、`M` との比較は 100 Hz で行う。
+  `A` も同じ (eddy3d.c)。**A の入力検査は非構造格子の分岐の中に置く** (構造格子向けの
+  bh の検査は早期 return の後ろ)。Anderson の 1 段は `anderson_step()` (matutil.c) で
+  F と共有する。磁束で駆動される構成 (bar_air_bh) では H 基準の更新は遅い (18〜56 回)。
 - 収束判定は相対残差。`solver` キーの既定は `10000 100 1e-9`。
 - 直接解法 (`direct = 1`) は実対称なら Cholesky、複素対称 (`F` / `A`) なら
   **LDLᵀ** (√ が取れないので Cholesky は不可)。ピボット選択はしない
