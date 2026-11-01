@@ -356,8 +356,8 @@ static int uf_find(int *par, int x)
 
 
 // pri (awall) の辺を優先して全域木を作る。comp には pri の辺だけで作った
-// 連結成分の代表節点を返す。戻り値は木の辺数
-static int edge_tree_gauge(const unsigned char *pri, unsigned char *tree, int *comp)
+// 連結成分の代表節点を返す。戻り値は木の辺数 (2 次の A も使う。中間節点は孤立した点のまま)
+int edge_tree_gauge(const unsigned char *pri, unsigned char *tree, int *comp)
 {
 	int *par = (int *)malloc((size_t)NNode * sizeof(int));
 	for (int i = 0; i < NNode; i++) par[i] = i;

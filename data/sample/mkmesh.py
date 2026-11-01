@@ -1412,7 +1412,7 @@ def make_cavity_hex(split=0, nx=40, two=0, void=0):
 
 
 def make_bar_air(nx=24, ny=2, nz=24, nza=4,
-                 lx=2e-3, ly=0.25e-3, lz=1e-3, gz=0.5e-3):
+                 lx=2e-3, ly=0.25e-3, lz=1e-3, gz=0.5e-3, yawall=0):
     """導体棒 + 非導電層 (3 次元渦電流 A-φ で空気を含む系の検証)
 
     make_bar の上に厚さ gz の空気層を載せる。解は依然 1 次元で、空気層は
@@ -1429,6 +1429,9 @@ def make_bar_air(nx=24, ny=2, nz=24, nza=4,
 
     物理タグ : 1 = 導体、2 = 空気、10 = x=0 の導体断面 (電極 0)、
                11 = x=lx の導体断面 (電極 1)、20 = A_t = 0 の面
+
+    yawall = 1 : ゲージ固定の検査用。電極の面を A_t = 0 にせず (タグ 10/11 だけ)、代わりに
+    y 面を A_t = 0 にする。電極の辺が awall の辺でなくなる (1 次元の解ではなくなる)。
     """
     zs = [lz * k / nz for k in range(nz + 1)] \
        + [lz + gz * k / nza for k in range(1, nza + 1)]
@@ -1470,9 +1473,16 @@ def make_bar_air(nx=24, ny=2, nz=24, nza=4,
                 b = idx[(i, j + 1, k)]
                 c = idx[(i, j + 1, k + 1)]
                 d = idx[(i, j, k + 1)]
-                quad(a, b, c, d, 20)
+                if not (yawall and k < nz):
+                    quad(a, b, c, d, 20)
                 if k < nz:
                     quad(a, b, c, d, tag)
+    if yawall:
+        for i in range(nx):
+            for k in range(nzt):
+                for j in (0, ny):
+                    quad(idx[(i, j, k)], idx[(i + 1, j, k)],
+                         idx[(i + 1, j, k + 1)], idx[(i, j, k + 1)], 20)
     return nodes, tets, tris
 
 

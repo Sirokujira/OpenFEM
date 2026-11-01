@@ -104,6 +104,8 @@ void assemble_eddy3d(crs_t *, crs_t *, double, const double *);
 int solve_eddy3d(FILE *);
 int solve_eddy3d_transient(FILE *);
 int solve_eddy3d_p2(FILE *);
+int solve_edge_test_p2(FILE *);
+int edge_tree_gauge(const unsigned char *, unsigned char *, int *);
 int solve_eddy3d_p2_transient(FILE *);
 int eddy3d_p2_heat_open(FILE *);
 int eddy3d_p2_heat_solve(FILE *, const double *, double, double *, double *, double *, int);

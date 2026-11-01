@@ -24,7 +24,8 @@ eddy3d_p2.c
 未知数の並び : [Whitney (NEdge) | ∇(λλ) (NEdge) | 面 2 個ずつ (2 NFace) | φ 頂点 (NNode、中間節点の欄は
 固定) | φ 泡 (NEdge)]。
 
-対応するのは周波数領域の線形材料・ゲージなし・場の出力なし (それ以外は入力段で弾く)。
+対応するのは周波数領域 (線形・B-H 曲線の実効磁気抵抗率法)・過渡解析 (線形)・交流の発熱・場の出力で、
+ゲージなし・反復解法だけ (それ以外は入力段で弾く)。
 */
 
 #include "fem.h"
@@ -33,6 +34,8 @@ eddy3d_p2.c
 static const int P2_EDGE[6][2] = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};
 static const int P2_FACE[4][3] = {{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
 // gmsh の tet10 の中間節点 (局所 4..9) の辺 : (0,1) (1,2) (2,0) (3,0) (3,2) (3,1)
+#define P2_AAM (5)		// 非線形の Anderson 加速の深さ (1 次の AAM3 と同じ)
+
 static const int P2_MID[6][2] = {{0, 1}, {1, 2}, {2, 0}, {3, 0}, {3, 2}, {3, 1}};
 
 #define P2_NDOF (30)		// 20 (A) + 10 (φ)
@@ -347,7 +350,12 @@ static struct {
 	unsigned char *fix, *cond, *econd, *vert;
 	double *xdr, *xdi, *br, *bi, *ur, *ui, *w1, *w2;
 	double omega;
+	const double *nuq;		// NULL でなければ B-H 曲線の材料の積分点ごとの ν (要素 e の点 q は nuq[e * nq + q])
+	int nq;
 } P2;
+
+
+static void p2_close(void);
 
 
 static int p2_open(FILE *fp_log)
@@ -428,6 +436,50 @@ static int p2_open(FILE *fp_log)
 		}
 	}
 	fprintf(fp_log, "  fixed : %d wall faces (A_t = 0), %d electrode vertices\n", nwall, nelec);
+	// ゲージ固定 (gauge = 1) : 2 次の節点空間の勾配は ∇λv (Whitney の和) と ∇(λaλb) (辺の勾配の自由度
+	// そのもの) に分かれるので、**Whitney は 1 次と同じ awall 優先の全域木で、∇(λaλb) は全部 0 に**
+	// 固定すると零空間が消える (任意の A は ψ の泡の係数で勾配の自由度を、頂点の値で木の辺を 0 にできる)
+	if (GaugeTree) {
+		unsigned char *wall = (unsigned char *)malloc((size_t)ne * sizeof(unsigned char));
+		unsigned char *tree = (unsigned char *)malloc((size_t)ne * sizeof(unsigned char));
+		int *comp = (int *)malloc((size_t)nn * sizeof(int));
+		for (int i = 0; i < ne; i++) wall[i] = fix[i];
+		const int ntree = edge_tree_gauge(wall, tree, comp);
+		// **電極の上の辺 (φ の泡を 0 に固定した導体の辺) の ∇(λaλb) は固定しない**: そこでは ψ の泡も 0 に
+		// 縛られていてゲージの自由度が無く、その係数は本物の場 (電極の面の接線の A) になる。固定すると
+		// 電極の辺が awall でない格子で Z が黙って変わる (実測 R −5.2%、L +17%)。電極の面を awall にも
+		// した格子 (bar_air など) では該当する辺が 0 本なので、そこでは検出できない
+		int ngauge = 0, ngrad = 0, nelecg = 0;
+		for (int i = 0; i < ne; i++) {
+			if (tree[i] && !fix[i]) ngauge++;
+			fix[i] |= tree[i];
+			if (fix[oG + i]) continue;
+			if (econd[i] && fix[oB + i]) {
+				nelecg++;
+				continue;
+			}
+			ngrad++;
+			fix[oG + i] = 1;
+		}
+		// 木から決まる ψ が電極上で 0 になる条件 : 電極 (の頂点) が awall の辺だけで連結
+		int bad = 0, ref = -1;
+		for (int i = 0; i < nn; i++) {
+			if ((NodeConductor[i] < 0) || !vert[i]) continue;
+			if (ref < 0) ref = comp[i];
+			else if (comp[i] != ref) bad = 1;
+		}
+		fprintf(fp_log, "  gauge : %d tree edges (%d beyond the wall), %d edge gradients "
+			"(%d electrode edges left free)\n", ntree, ngauge, ngrad, nelecg);
+		free(wall); free(tree); free(comp);
+		if (bad) {
+			fprintf(fp_log, "*** the electrodes are not connected through awall edges, "
+				"so the tree gauge would shift the terminal voltage; "
+				"use gauge = 0 (the default), or extend awall so that all electrodes "
+				"share one A_t = 0 surface\n");
+			p2_close();
+			return 1;
+		}
+	}
 	if (nwall == 0) {
 		fprintf(fp_log, "*** warning : no awall surface; the outer boundary is a magnetic wall (dA/dn = 0)\n");
 	}
@@ -476,9 +528,14 @@ static int p2_assemble(FILE *fp_log, const double *sigelem)
 		memset(se, 0, sizeof(se)); memset(te, 0, sizeof(te));
 		memset(ce, 0, sizeof(ce)); memset(pe, 0, sizeof(pe));
 		const int nq = elem3d_nip(e);
+		const int nlm = ((P2.nuq != NULL) && (Material[m].nbh[0] > 0));
 		for (int q = 0; q < nq; q++) {
 			double wv[20][3], wc[20][3], pn[10], pg[10][3], w;
 			if (p2_basis(e, q, wv, wc, pn, pg, &w)) { bad = 1; break; }
+			if (nlm) {
+				nu[0] = nu[1] = nu[2] = P2.nuq[((int64_t)e * P2.nq) + q];
+				nu[3] = nu[4] = nu[5] = 0;
+			}
 			double nc[20][3];
 			for (int k = 0; k < 20; k++) nu_mul(nu, wc[k], nc[k]);
 			for (int k = 0; k < 20; k++) {
@@ -604,20 +661,52 @@ static void p2_fields(void)
 
 int solve_eddy3d_p2(FILE *fp_log)
 {
-	const int np = NPort;
+	const int np = NPort, nt = NTet;
 	int ierr = 0;
 	fprintf(fp_log, "\n=== 3D eddy current (A-phi, second-order Nedelec / nodal elements) ===\n");
 	if (p2_open(fp_log)) return 1;
 	const double omega = P2.omega;
+
+	// 非線形 (B-H) の材料があれば実効磁気抵抗率法 (1 次の eddy3d.c と同じ): ν を波高値 |B| で
+	// **積分点ごとに**評価し (2 次の要素では B が要素内で変わる)、H を独立変数にした更新
+	// ν = |H|/B(|H|) に ln ν の Anderson 加速を掛ける。単一ポート・電流振幅 current
+	int nlf = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh[0] > 0) nlf = 1;
+	}
+	const int nq = elem3d_nip(0);
+	const int64_t nqt = (int64_t)nt * nq;
+	double *nuq = NULL, *aay = NULL, *aaf = NULL, *aayp = NULL, *aafp = NULL, *aady = NULL, *aadf = NULL;
+	int aan = 0;
+	if (nlf) {
+		nuq  = (double *)malloc((size_t)nqt * sizeof(double));
+		aay  = (double *)malloc((size_t)nqt * sizeof(double));
+		aaf  = (double *)malloc((size_t)nqt * sizeof(double));
+		aayp = (double *)malloc((size_t)nqt * sizeof(double));
+		aafp = (double *)malloc((size_t)nqt * sizeof(double));
+		aady = (double *)malloc((size_t)nqt * P2_AAM * sizeof(double));
+		aadf = (double *)malloc((size_t)nqt * P2_AAM * sizeof(double));
+		for (int e = 0; e < nt; e++) {
+			const material_t *mt = &Material[elem3d_mat(e)];
+			for (int q = 0; q < nq; q++) nuq[((int64_t)e * nq) + q] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0) : 0);
+		}
+		P2.nuq = nuq;
+		P2.nq = nq;
+		fprintf(fp_log, "  nonlinear (B-H) : effective reluctivity at %d points per element, current amplitude "
+			"%.6e [A], maxiter = %d, tol = %.1e, relax = %.2f\n", nq, Curr, NlMaxiter, NlTol, NlRelax);
+	}
 	ierr = p2_assemble(fp_log, NULL);
 	double *yr = (double *)calloc((size_t)np * np, sizeof(double));
 	double *yi = (double *)calloc((size_t)np * np, sizeof(double));
-	fprintf(fp_log, "  %-10s %8s %13s\n", "excite", "iter", "residual");
+	int final = !nlf;
+	for (int nlit = 1; !ierr; nlit++) {
+	if (nlit > 1) ierr = p2_assemble(fp_log, NULL);
+	if (final) fprintf(fp_log, "  %-10s %8s %13s\n", "excite", "iter", "residual");
 	for (int jc = 1; (jc <= np) && !ierr; jc++) {
 		char label[64];
 		sprintf(label, "port%d", jc);
 		double qr[MAXPORT], qi[MAXPORT];
-		if (p2_solve_port(fp_log, jc, fp_log, label, qr, qi)) {
+		if (p2_solve_port(fp_log, jc, (final ? fp_log : NULL), label, qr, qi)) {
 			ierr = 1;
 			break;
 		}
@@ -625,9 +714,78 @@ int solve_eddy3d_p2(FILE *fp_log)
 			yr[((kc - 1) * np) + (jc - 1)] = qr[kc] / Volt;
 			yi[((kc - 1) * np) + (jc - 1)] = qi[kc] / Volt;
 		}
-		fprintf(fp_log, "  port %d : I = %.6e %+.6e j [A] (V = %.6e [V])\n", jc, qr[jc], qi[jc], Volt);
-		if (FieldOut && (jc == 1)) p2_fields();
+		if (final) fprintf(fp_log, "  port %d : I = %.6e %+.6e j [A] (V = %.6e [V])\n", jc, qr[jc], qi[jc], Volt);
+		// 非線形 : 端子電流が current になるよう解を s = Curr / I 倍する (Y は倍率に依らない)
+		if (nlf) {
+			const double ivr = qr[1], ivi = qi[1];
+			const double den = (ivr * ivr) + (ivi * ivi);
+			const double svr = Curr * ivr / den, svi = -Curr * ivi / den;
+			for (int i = 0; i < P2.n; i++) {
+				const double xr = P2.ur[i], xi = P2.ui[i];
+				P2.ur[i] = (svr * xr) - (svi * xi);
+				P2.ui[i] = (svr * xi) + (svi * xr);
+			}
+		}
+		if (FieldOut && (jc == 1) && final) p2_fields();
 	}
+	if (final || ierr) break;
+
+	// ν の更新 (H を独立変数にする) と Anderson 加速 (ln ν)。B は組み立てと同じ積分点で
+	double dmax = 0;
+	for (int e = 0; e < nt; e++) {
+		const material_t *mt = &Material[elem3d_mat(e)];
+		const int64_t o = (int64_t)e * nq;
+		if (mt->nbh[0] <= 0) {
+			for (int q = 0; q < nq; q++) aay[o + q] = aaf[o + q] = 0;
+			continue;
+		}
+		int32_t dof[P2_NDOF];
+		double sgn[P2_NDOF];
+		p2_dofs(e, P2.fe, P2.ne, P2.nf, P2.nn, dof, sgn);
+		for (int q = 0; q < nq; q++) {
+			double wv[20][3], wc[20][3], pn[10], pg[10][3], w;
+			double bre[3] = {0, 0, 0}, bim[3] = {0, 0, 0};
+			if (!p2_basis(e, q, wv, wc, pn, pg, &w)) {
+				for (int k = 0; k < 20; k++) {
+					const double ar = sgn[k] * P2.ur[dof[k]], ai = sgn[k] * P2.ui[dof[k]];
+					for (int c = 0; c < 3; c++) {
+						bre[c] += ar * wc[k][c];
+						bim[c] += ai * wc[k][c];
+					}
+				}
+			}
+			const double b2 = dot3(bre, bre) + dot3(bim, bim);
+			const double hm = nuq[o + q] * sqrt(b2);
+			const double nun = ((hm > 0) ? (hm / bh_b_of_h(mt, 0, hm)) : bh_nu(mt, 0, 0));
+			const double dn = fabs(nun - nuq[o + q]) / nun;
+			if (dn > dmax) dmax = dn;
+			aay[o + q] = log(nuq[o + q]);
+			aaf[o + q] = log(nun) - aay[o + q];
+		}
+	}
+	anderson_step(nqt, aay, aaf, aayp, aafp, aady, aadf, P2_AAM, &aan, NlRelax);
+	for (int e = 0; e < nt; e++) {
+		if (Material[elem3d_mat(e)].nbh[0] <= 0) continue;
+		for (int q = 0; q < nq; q++) nuq[((int64_t)e * nq) + q] = exp(aay[((int64_t)e * nq) + q]);
+	}
+	{
+		const double y2 = (yr[0] * yr[0]) + (yi[0] * yi[0]);
+		fprintf(fp_log, "  nl-it %4d : R = %.9e, L = %.9e, max dnu/nu = %.3e\n", nlit,
+			yr[0] / y2, (-yi[0] / y2) / omega, dmax);
+		fflush(fp_log);
+	}
+	if (dmax < NlTol) {
+		final = 1;
+	}
+	else if (nlit >= NlMaxiter) {
+		fprintf(fp_log, "*** nonlinear (B-H) eddy current : the effective reluctivity did not "
+			"converge in %d iterations (max dnu/nu = %.3e)\n", NlMaxiter, dmax);
+		ierr = 1;
+	}
+	}
+	if (nlf && !ierr) fprintf(fp_log, "  nonlinear (B-H) : converged\n");
+	free(nuq); free(aay); free(aaf); free(aayp); free(aafp); free(aady); free(aadf);
+	P2.nuq = NULL;
 
 	if (!ierr) {
 		double *zr = (double *)malloc((size_t)np * np * sizeof(double));
@@ -837,6 +995,176 @@ int solve_eddy3d_p2_transient(FILE *fp_log)
 		"(terminals - magnetic - joule = %.3e)\n", win, wmag, wjou, win - wmag - wjou);
 	free(x); free(xo); free(xd); free(rhs); free(b); free(w1); free(u); free(z);
 	p2_close();
+	return ierr;
+}
+
+
+/*
+辺要素の自己検証の 2 次版 (analysis = E、10 節点四面体)。2 次の Nedelec 空間 (第 1 種) は P1³ ⊕ S2
+(S2 = 2 次の同次式で p・r = 0) を含むので、そこに入る場を σ で重みをつけた L2 射影すると誤差が 0 になり、
+回転のエネルギーも厳密に合う:
+
+	T u = b,   b_k = ∫ σ W_k・E dV,   誤差² = ∫ σ|E|² − uᵀ b = 0,   uᵀ S u = ∫ (∇×E)ᵀ ν (∇×E) dV
+
+(P2a) 一般の 1 次の場 E = a + B r (B は対称部分と反対称部分の両方、軸に平行でない向き) は Whitney と
+∇(λaλb) の両方を使い、(P2b) それに S2 の 2 次の場 (yz, −xz, 0) を足すと面の関数が要る (1 次の空間には
+入らない)。厳密なのは直線の要素だけ (曲がった要素では共変 Piola で写した多項式になる)。
+*/
+int solve_edge_test_p2(FILE *fp_log)
+{
+	fprintf(fp_log, "\n=== edge element (second-order Nedelec) self test ===\n");
+	if (!MeshMode || (TetOrder != 2) || (NHex + NPrism + NPyr > 0)) {
+		fprintf(fp_log, "*** the second-order edge self test needs a pure 10-node tetrahedral mesh\n");
+		return 1;
+	}
+	// 恒等式が厳密なのは直線の要素だけ (曲がった要素では共変 Piola で写した多項式になり、射影の誤差が
+	// 0 にならない)。曲がった格子を誤りと区別できるよう、中間節点が辺の中点から外れていれば先に弾く
+	for (int e = 0; e < NTet; e++) {
+		for (int m = 0; m < 6; m++) {
+			const int32_t a = Tet[(e * 4) + P2_MID[m][0]], b = Tet[(e * 4) + P2_MID[m][1]];
+			const int32_t c = Tet2[(e * 6) + m];
+			const double d[3] = {Xp[c] - ((Xp[a] + Xp[b]) / 2), Yp[c] - ((Yp[a] + Yp[b]) / 2), Zp[c] - ((Zp[a] + Zp[b]) / 2)};
+			const double h[3] = {Xp[b] - Xp[a], Yp[b] - Yp[a], Zp[b] - Zp[a]};
+			if (dot3(d, d) > (1e-16 * dot3(h, h))) {
+				fprintf(fp_log, "*** the second-order edge self test needs straight-sided elements "
+					"(tetrahedron %d has a mid-edge node off the midpoint); the identities are exact "
+					"only for affine elements\n", e + 1);
+				return 1;
+			}
+		}
+	}
+	edge_build();
+	const int ne = NEdge, nn = NNode, nt = NTet;
+	int nf = 0;
+	int32_t *fvert = NULL;
+	int32_t *fe = p2_faces(&nf, &fvert);
+	const int oV = (2 * ne) + (2 * nf), n = oV + nn + ne;
+	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, edges = %d, faces = %d, edge unknowns = %d\n", nn, nt, ne, nf, oV);
+	crs_t S, T;
+	p2_crs(&S, n, fe, ne, nf, nn);
+	p2_crs(&T, n, fe, ne, nf, nn);
+	// 中心と大きさ (場の係数を格子の大きさにそろえる)
+	double c0[3] = {0, 0, 0}, lmax = 0;
+	{
+		double mn[3] = {1e300, 1e300, 1e300}, mx[3] = {-1e300, -1e300, -1e300};
+		for (int i = 0; i < nn; i++) {
+			const double r[3] = {Xp[i], Yp[i], Zp[i]};
+			for (int c = 0; c < 3; c++) {
+				if (r[c] < mn[c]) mn[c] = r[c];
+				if (r[c] > mx[c]) mx[c] = r[c];
+			}
+		}
+		for (int c = 0; c < 3; c++) {
+			c0[c] = (mn[c] + mx[c]) / 2;
+			if ((mx[c] - mn[c]) > lmax) lmax = mx[c] - mn[c];
+		}
+	}
+	if (!(lmax > 0)) lmax = 1;
+	const double av[3] = {1.0, 2.0, 3.0};
+	const double bm[3][3] = {{0.3, -1.2, 0.7}, {0.5, 0.2, -0.4}, {1.1, 0.6, -0.9}};
+	int ierr = 0;
+	for (int e = 0; e < nt; e++) {
+		if (!(Material[elem3d_mat(e)].sigma > 0)) {
+			fprintf(fp_log, "*** the second-order edge self test needs sigma > 0 in every element\n");
+			ierr = 1;
+			break;
+		}
+	}
+	double *b1 = (double *)calloc((size_t)n, sizeof(double));
+	double *b2 = (double *)calloc((size_t)n, sizeof(double));
+	double se1 = 0, se2 = 0, sc1 = 0, sc2 = 0;		// ∫σ|E|²、∫(∇×E)ᵀν(∇×E)
+	for (int e = 0; (e < nt) && !ierr; e++) {
+		const int m = elem3d_mat(e);
+		double nu[6];
+		material_coef_pub(m, 3, nu);
+		const double sig = Material[m].sigma;
+		int32_t dof[P2_NDOF];
+		double sgn[P2_NDOF];
+		p2_dofs(e, fe, ne, nf, nn, dof, sgn);
+		double sk[20][20], tk[20][20], f1[20], f2[20];
+		memset(sk, 0, sizeof(sk)); memset(tk, 0, sizeof(tk));
+		memset(f1, 0, sizeof(f1)); memset(f2, 0, sizeof(f2));
+		const int nq = elem3d_nip(e);
+		for (int q = 0; q < nq; q++) {
+			double wv[20][3], wc[20][3], pn[10], pg[10][3], w, nv[ELEM_NMAX], g[ELEM_NMAX][3], w2;
+			if (p2_basis(e, q, wv, wc, pn, pg, &w) || elem3d_ip(e, q, nv, g, &w2)) { ierr = 1; break; }
+			// 積分点の位置 (等パラメトリック : x = Σ x_a N_a)
+			int32_t nd[TET_NMAX];
+			tet_nodes(e, nd);
+			double r[3] = {0, 0, 0};
+			for (int a = 0; a < 10; a++) {
+				r[0] += nv[a] * (Xp[nd[a]] - c0[0]) / lmax;
+				r[1] += nv[a] * (Yp[nd[a]] - c0[1]) / lmax;
+				r[2] += nv[a] * (Zp[nd[a]] - c0[2]) / lmax;
+			}
+			// E1 = a + B r'、E2 = E1 + (y'z', −x'z', 0) (r' = (r − c0)/L)。回転は B の反対称部分 (/L) と
+			// 2 次の場の回転 (x', y', −2z')/L
+			double e1[3], c1[3], e2[3], c2[3];
+			for (int i = 0; i < 3; i++) e1[i] = av[i] + (bm[i][0] * r[0]) + (bm[i][1] * r[1]) + (bm[i][2] * r[2]);
+			c1[0] = (bm[2][1] - bm[1][2]) / lmax;
+			c1[1] = (bm[0][2] - bm[2][0]) / lmax;
+			c1[2] = (bm[1][0] - bm[0][1]) / lmax;
+			e2[0] = e1[0] + (r[1] * r[2]); e2[1] = e1[1] - (r[0] * r[2]); e2[2] = e1[2];
+			c2[0] = c1[0] + (r[0] / lmax); c2[1] = c1[1] + (r[1] / lmax); c2[2] = c1[2] - (2 * r[2] / lmax);
+			double n1[3], n2[3];
+			nu_mul(nu, c1, n1);
+			nu_mul(nu, c2, n2);
+			se1 += w * sig * dot3(e1, e1);
+			se2 += w * sig * dot3(e2, e2);
+			sc1 += w * dot3(n1, c1);
+			sc2 += w * dot3(n2, c2);
+			double nc[20][3];
+			for (int k = 0; k < 20; k++) nu_mul(nu, wc[k], nc[k]);
+			for (int k = 0; k < 20; k++) {
+				f1[k] += w * sig * dot3(wv[k], e1);
+				f2[k] += w * sig * dot3(wv[k], e2);
+				for (int l = 0; l < 20; l++) {
+					sk[k][l] += w * dot3(nc[k], wc[l]);
+					tk[k][l] += w * sig * dot3(wv[k], wv[l]);
+				}
+			}
+		}
+		for (int k = 0; k < 20; k++) {
+			b1[dof[k]] += sgn[k] * f1[k];
+			b2[dof[k]] += sgn[k] * f2[k];
+			for (int l = 0; l < 20; l++) {
+				const int64_t p = p2_find(&S, dof[k], dof[l]);
+				S.val[p] += sgn[k] * sgn[l] * sk[k][l];
+				T.val[p] += sgn[k] * sgn[l] * tk[k][l];
+			}
+		}
+	}
+	unsigned char *fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));
+	for (int i = oV; i < n; i++) fix[i] = 1;
+	double *u = (double *)calloc((size_t)n, sizeof(double));
+	double *w1 = (double *)malloc((size_t)n * sizeof(double));
+	const char *lab[2] = {"(P2a) linear field E = a + B r (general B)", "(P2b) a + B r + (yz, -xz, 0) (needs the face functions)"};
+	double *bb[2] = {b1, b2};
+	const double sev[2] = {se1, se2}, scv[2] = {sc1, sc2};
+	for (int t = 0; (t < 2) && !ierr; t++) {
+		for (int i = 0; i < n; i++) u[i] = 0;
+		if (solver_cg(&T, bb[t], u, fix, Solver.maxiter, Solver.nout, Solver.converg, NULL, "p2e") < 0) {
+			fprintf(fp_log, "*** the L2 projection did not converge\n");
+			ierr = 1;
+			break;
+		}
+		double ub = 0, us = 0;
+		for (int i = 0; i < oV; i++) ub += u[i] * bb[t][i];
+		crs_spmv(&S, u, w1, fix);
+		for (int i = 0; i < oV; i++) us += u[i] * w1[i];
+		const double ep = fabs(sev[t] - ub) / sev[t];
+		const double ec = fabs(us - scv[t]) / scv[t];
+		const int ok = ((ep <= 1e-10) && (ec <= 1e-9));
+		fprintf(fp_log, "  %s : projection error^2 / int sigma|E|^2 = %.3e, curl energy u^T S u = %.12e (exact %.12e, %.3e) %s\n",
+			lab[t], ep, us, scv[t], ec, (ok ? "passed" : "FAILED"));
+		if (!ok) ierr = 1;
+	}
+	fprintf(fp_log, "  second-order edge self test : %s\n", (ierr ? "FAILED" : "passed"));
+	free(b1); free(b2); free(u); free(w1); free(fix);
+	free(fe); free(fvert);
+	crs_free(&S);
+	crs_free(&T);
+	edge_free();
 	return ierr;
 }
 

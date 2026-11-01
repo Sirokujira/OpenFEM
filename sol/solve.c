@@ -1440,7 +1440,7 @@ static int solve_one(FILE *fp_log)
 
 	// 辺要素の自己検証 (3 次元渦電流の基盤。他の解析とは独立に走る)
 	if (Analysis & ANALYSIS_E) {
-		ierr |= solve_edge_test(fp_log);
+		ierr |= ((MeshMode && (TetOrder == 2)) ? solve_edge_test_p2(fp_log) : solve_edge_test(fp_log));
 		if (Analysis == ANALYSIS_E) return ierr;
 	}
 

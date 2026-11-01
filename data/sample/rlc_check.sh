@@ -501,16 +501,15 @@ mesh_reject() {	# mesh_reject <ラベル> <ofe ファイル>
 	fi
 }
 echo "[mesh order] inputs the solver must reject"
-# 辺要素の自己検証 (E) は 1 次四面体の Whitney 形状関数に基づくので 2 次格子は使えない
-# (A は 10 節点四面体を 2 次の Nedelec 要素で解くので、ここでは E を見る。A の 2 次は [A order 2])。
+# 辺要素 (E / A) は 1 次と 2 次 (10 節点四面体、[A order 2]) の格子だけ。3 次の格子は弾く。
 # 導電率と周波数を入れないと別の検査で弾かれてしまい、次数の検査が空回りする
 # (通っているように見えて何も見ていない状態になる)
-sed -e 's/^analysis = .*/analysis = E/' \
+sed -e 's/^analysis = .*/analysis = A/' \
     -e 's/^material = .*/material = 4.0 5.8e7/' \
     -e 's/^solver = .*/frequency = 1e4\nawall = 10/' \
-    "$SRC/box_p2.ofe" > "$WORK/p2_edge.ofe"
-mesh_reject "analysis E on an order-2 mesh" p2_edge.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 p2_edge.ofe 2>&1 | grep -q "need a first-order mesh"); then
+    "$SRC/box_p3.ofe" > "$WORK/p2_edge.ofe"
+mesh_reject "analysis A on an order-3 mesh" p2_edge.ofe
+if ! (cd "$WORK" && "$OFE" -n 2 p2_edge.ofe 2>&1 | grep -q "need a first-order or a second-order"); then
 	echo "  *** it was rejected for a different reason than the mesh order" >&2
 	status=1
 fi
@@ -5208,8 +5207,8 @@ sed 's/^mesh = .*/mesh = bar_tet2_fold.msh/' "$WORK/p2r.ofe" > "$WORK/p2x_fold.o
 th_reject "10-node mesh with folded elements" p2x_fold.ofe "is degenerate or inverted"
 # (e) 対応しない組み合わせ
 grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_tet2.msh"; next} {print}' > "$WORK/p2base.ofe"
-awk '/^analysis/{print "gauge = 1"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_g.ofe"
-th_reject "order-2 A with gauge = 1" p2x_g.ofe "second-order (10-node) mesh supports gauge = 0"
+awk '/^frequency/{next} /^analysis/{print "gauge = 1"; print "transient = 2e-4 5"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_g.ofe"
+th_reject "order-2 A with gauge = 1 in the time domain" p2x_g.ofe "second-order (10-node) mesh supports gauge = 0"
 # (f) 場の出力 (重心の B・J、ゲージ不変)。100 Hz では J が一様なので 1 次と同じ恒等式が使える :
 #     体積・|J| = σV/L・符号つきの平均・場の損失 Σ|J|²V/(2σ) = ½Re(V I)
 sed -e "s/^frequency = .*/frequency = 1e2/" -e "s/^analysis = A/fieldout = 1\nanalysis = A/" "$WORK/p2base.ofe" > "$WORK/p2_fld.ofe"
@@ -5223,9 +5222,93 @@ pt=$(awk '/port 1 : I =/{ printf "%.10e", 0.5 * $6 }' "$WORK/ofe.log")
 compare "order 2, field output : ohmic loss from the field == 1/2 Re(V I) [W]" "$pf" "$pt" 1e-6
 awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_t.ofe"
 th_reject "order-2 A with transient and ja" p2x_t.ofe "supports linear materials"
-awk '/^analysis/{print "analysis = E"; next} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_e.ofe"
-th_reject "analysis E on a 10-node mesh" p2x_e.ofe "need a first-order mesh"
+# (g) 辺要素の自己検証の 2 次版 (analysis = E、box_p2.msh) : 2 次の Nedelec 空間に入る場の L2 射影の誤差 0 と
+#     回転のエネルギー。(P2a) 一般の 1 次の場、(P2b) それに S2 の 2 次の場 (面の関数が要る)。等方・異方性の ν
+#     (anisomur) と剛体回転した格子で
+cp "$SRC/edge_test.ofe" "$SRC/edge_test_aniso.ofe" "$SRC/box_p2.msh" "$WORK/"
+awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+	{ print }' "$WORK/box_p2.msh" > "$WORK/box_p2_rot.msh"
+for c in "edge_test box_p2" "edge_test_aniso box_p2" "edge_test box_p2_rot"; do
+	set -- $c
+	sed "s/^mesh = .*/mesh = $2.msh/" "$WORK/$1.ofe" > "$WORK/p2e_$1_$2.ofe"
+	(cd "$WORK" && "$OFE" -n 2 "p2e_$1_$2.ofe" > /dev/null 2>&1) || true
+	np=$(grep -c "^  (P2[ab]) .* passed$" "$WORK/ofe.log" || true)
+	if [ "$np" = 2 ] && grep -q "second-order edge self test : passed" "$WORK/ofe.log"; then
+		echo "  second-order edge self test ($1 on $2) : (P2a) linear field, (P2b) + S2 quadratic : passed -> OK"
+	else
+		echo "  second-order edge self test ($1 on $2) : $np of 2 identities passed -> NG" >&2; status=1
+		grep "(P2" "$WORK/ofe.log" | cut -c1-160 >&2
+	fi
+done
+#     恒等式が厳密なのは直線の要素だけなので、曲がった格子 (coax_p2) は理由をつけて弾く (誤りと区別できるように)
+cp "$SRC/coax_p2.msh" "$WORK/"
+sed "s/^mesh = .*/mesh = coax_p2.msh/" "$WORK/edge_test.ofe" > "$WORK/p2x_ecurv.ofe"
+mesh_reject "second-order edge self test on a curved mesh" p2x_ecurv.ofe
+grep -q "needs straight-sided elements" "$WORK/ofe.log" || { echo "  *** it was rejected for a different reason than: needs straight-sided elements" >&2; status=1; }
 
+# (h) B-H 曲線 (周波数領域の実効磁気抵抗率法、ν は**積分点ごと**)。bar_air_bh を粗い格子 (bar_air_c.msh、
+#     mkmesh.py bar_air -nx 8 -ny 1 -nz 8 -nza 2) を gmsh が 2 次にした bar_air_p2.msh (gmsh_bar_p2.py) で解く:
+#     ・層が非線形 (H が一様) : 自己無撞着な閉形式 (bar_layer.awk) に 3 つの電流で 1e-7 (実測 4e-9。
+#       層の A は 1 次なので 2 次の空間に入る。同じ頂点の 1 次は L −0.25%)
+#     ・導体が非線形 (10 Hz、0.5 A。B が厚さ方向に変わり曲線の 3 区間を通る) : 独立な 1 次元の参照解
+#       (bar_cond_bh.awk、n = 4000 で h² の 1e-8) に R 2e-4・L 1e-3 (実測 −6.5e-5 / −3.6e-4。曲線の折れ目で ν が
+#       滑らかでないので h の 1 次でしか縮まない)、同じ頂点の 1 次 (+5.2e-3 / −7.1e-3) より 10 倍以上よい。
+#       **ν を要素の 1 点で代表させる誤り (R +1.8e-3) と B の虚部を落とす誤り (R +5.0e-4) はこちらでだけ落ちる**
+#       (層の B は一様なので層の検査は素通りする)
+cp "$SRC/bar_air_bh.ofe" "$SRC/bar_air_c.msh" "$SRC/bar_air_p2.msh" "$WORK/"
+for I in 150 200 250; do
+	grep -v '^#' "$WORK/bar_air_bh.ofe" | sed -e 's/^mesh = .*/mesh = bar_air_p2.msh/' -e "s/^current = .*/current = $I/" > "$WORK/p2bh.ofe"
+	set -- $(p2_rl p2bh.ofe) $(awk -v f=1e2 -v mode=nl -v I="$I" -f "$SRC/bar_layer.awk")
+	compare "order 2, nonlinear layer, I = $I A : R == self-consistent closed form [ohm]" "$1" "$3" 1e-7
+	compare "order 2, nonlinear layer, I = $I A : L == self-consistent closed form [H]" "$2" "$4" 1e-7
+done
+p2bhc() {	# p2bhc <格子> : 導体を非線形にした 10 Hz、0.5 A の "R L"
+	grep -v '^#' "$WORK/bar_air_bh.ofe" | awk -v m="$1" '/^mesh/{print "mesh = " m; next} /^bh = 3/{sub(/^bh = 3/, "bh = 2")}
+		/^frequency/{print "frequency = 10"; next} /^current/{print "current = 0.5"; next} {print}' > "$WORK/p2bhc.ofe"
+	p2_rl p2bhc.ofe
+}
+set -- $(p2bhc bar_air_p2.msh) $(p2bhc bar_air_c.msh) $(awk -v f=10 -v I=0.5 -v n=4000 -f "$SRC/bar_cond_bh.awk")
+res=$(awk -v r2="$1" -v l2="$2" -v r1="$3" -v l1="$4" -v re="$5" -v le="$6" 'function ab(x) { return (x < 0) ? -x : x }
+	BEGIN { if ((r2 == "x") || (r1 == "x")) { print "NG (a run failed)"; exit }
+	e2 = r2 / re - 1; f2 = l2 / le - 1; e1 = r1 / re - 1; f1 = l1 / le - 1
+	ok = (ab(e2) <= 2e-4) && (ab(f2) <= 1e-3) && (10 * ab(e2) < ab(e1)) && (10 * ab(f2) < ab(f1))
+	printf "%s (order 2 : R %+.2e, L %+.2e; order 1 : R %+.2e, L %+.2e)", ok ? "OK" : "NG", e2, f2, e1, f1 }')
+echo "  order 2, nonlinear conductor (10 Hz, 0.5 A) : R, L == 1-D reference (2e-4 / 1e-3) and 10x better than order 1 : $res"
+case "$res" in NG*) status=1 ;; esac
+awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"} {print}' "$WORK/p2base.ofe" > "$WORK/p2x_tbh.ofe"
+th_reject "order-2 A with transient and bh" p2x_tbh.ofe "supports linear materials"
+# (i) ゲージ固定 (gauge = 1) と直接解法 (direct = 1)。Whitney は awall 優先の全域木、∇(λaλb) の自由度は全部 0。
+#     Z はゲージ不変なので gauge = 0 と一致する (反復の打ち切りの範囲)。**直接解法 (ピボットなし LDLᵀ) が通ることが
+#     零空間が消えた検査**: 勾配の自由度か木のどちらかを固定し忘れると特異なピボットで落ちる (どちらも実測)。
+#     bar_air (空気の層つき) を粗い 2 次の格子で、100 kHz
+grep -v '^#' "$SRC/bar_air.ofe" | awk '/^mesh/{print "mesh = bar_air_p2.msh"; next} /^frequency/{print "frequency = 1e5"; next} {print}' > "$WORK/p2g0.ofe"
+awk '/^analysis/{print "gauge = 1"} {print}' "$WORK/p2g0.ofe" > "$WORK/p2g1.ofe"
+awk '/^analysis/{print "gauge = 1"; print "direct = 1"} {print}' "$WORK/p2g0.ofe" > "$WORK/p2g2.ofe"
+set -- $(p2_rl p2g0.ofe) $(p2_rl p2g1.ofe)
+compare "order 2, gauge = 1 (tree + edge gradients) == gauge = 0 : R [ohm]" "$3" "$1" 1e-7
+compare "order 2, gauge = 1 (tree + edge gradients) == gauge = 0 : L [H]" "$4" "$2" 1e-7
+r0=$1; l0=$2
+set -- $(p2_rl p2g2.ofe)
+compare "order 2, gauge = 1 + direct = 1 (LDL^T, no pivoting) == gauge = 0 : R [ohm]" "$1" "$r0" 1e-6
+compare "order 2, gauge = 1 + direct = 1 (LDL^T, no pivoting) == gauge = 0 : L [H]" "$2" "$l0" 1e-6
+awk '/^awall/{next} /^analysis/{print "gauge = 1"} {print}' "$WORK/p2g0.ofe" > "$WORK/p2x_gw.ofe"
+#     電極の面を awall にしない格子 (bar_air_yw_p2.msh、mkmesh.py bar_air -nx 4 -ny 1 -nz 4 -nza 2 -yawall 1 を
+#     gmsh が 2 次に) : 電極の辺の ∇(λaλb) は ψ の泡が 0 に縛られていてゲージの自由度でないので固定しない。
+#     固定すると Z が黙って変わる (この格子で R −2.7%、実測)。bar_air_p2 は電極の面も awall なので該当する辺が無い
+cp "$SRC/bar_air_yw_p2.msh" "$WORK/"
+for g in 0 1 2; do
+	awk -v g="$g" '/^mesh/{print "mesh = bar_air_yw_p2.msh"; next} /^analysis/{ if (g > 0) print "gauge = 1"; if (g > 1) print "direct = 1" } {print}' \
+		"$WORK/p2g0.ofe" > "$WORK/p2y$g.ofe"
+done
+set -- $(p2_rl p2y0.ofe) $(p2_rl p2y1.ofe) $(p2_rl p2y2.ofe)
+compare "order 2, electrodes off awall : gauge = 1 == gauge = 0 : R [ohm]" "$3" "$1" 1e-7
+compare "order 2, electrodes off awall : gauge = 1 == gauge = 0 : L [H]" "$4" "$2" 1e-7
+compare "order 2, electrodes off awall : gauge = 1 + direct = 1 == gauge = 0 : R [ohm]" "$5" "$1" 1e-6
+compare "order 2, electrodes off awall : gauge = 1 + direct = 1 == gauge = 0 : L [H]" "$6" "$2" 1e-6
+mesh_reject "order-2 A, gauge = 1 with electrodes not connected through awall" p2x_gw.ofe
+grep -q "not connected through awall" "$WORK/ofe.log" || { echo "  *** it was rejected for a different reason than: not connected through awall" >&2; status=1; }
 # ---- 3 次元渦電流の過渡解析 (analysis = A + transient、後退 Euler、電圧駆動) ----
 #
 # χ = Δt φ を未知数にすると係数行列が実対称・半正定値になる (eddy3d.c の solve_eddy3d_transient)。
