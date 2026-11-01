@@ -528,6 +528,9 @@ static int node_merge_check(void)
 
 
 // 全要素を読んだあとの整合性検査 (格子の次元と次数)
+static int hexp_order(int nen);
+static int prismp_order(int nen);
+
 static int elem_finish(void)
 {
 	if (node_merge_check()) return 1;
@@ -587,15 +590,51 @@ static int elem_finish(void)
 					"pyramids between them, or use one element type");
 				return 1;
 			}
-			if ((TetOrder >= 2) || (HexNen > 8) || (PrismNen > 6)) {
-				printf("%s\n", "*** mesh : mixed element types must be first order "
-					"(10-node tetrahedra and second-order hexahedra / prisms "
-					"cannot be mixed with other kinds)");
+			/*
+			**種別の混在は次数が揃っていれば高次でもよい** (四面体・六面体・角柱が同じ次数 p。ピラミッドは
+			1 次だけ)。面のトレースは三角形なら P_p、四角形なら Q_p (完全 Lagrange) で、隣の種別と同じ空間
+			になるので適合する。2 次の六面体・角柱は serendipity (20 / 15 節点) と完全 (27 / 18) を混ぜない
+			(四角形面が 8 節点と 9 節点で食い違う)。次数の違う要素が面を共有する格子は遷移要素が要るので弾く
+			*/
+			const int ot = ((NTet > 0) ? TetOrder : 0);
+			const int oh = ((NHex > 0) ? ((HexNen == 8) ? 1 : (HexNen <= 27) ? 2 : hexp_order(HexNen)) : 0);
+			const int op = ((NPrism > 0) ? ((PrismNen == 6) ? 1 : (PrismNen <= 18) ? 2 : prismp_order(PrismNen)) : 0);
+			const int oy = ((NPyr > 0) ? 1 : 0);
+			const int pmix = ((ot > 0) ? ot : (oh > 0) ? oh : (op > 0) ? op : 1);
+			if (((ot > 0) && (ot != pmix)) || ((oh > 0) && (oh != pmix)) || ((op > 0) && (op != pmix)) || ((oy > 0) && (oy != pmix))) {
+				printf("*** mesh : mixed element kinds must have the same order (tetrahedra %d, hexahedra %d, "
+					"prisms %d, pyramids %d; 0 = none). Elements of different orders cannot share a face "
+					"without transition elements (pyramids are first order only)\n", ot, oh, op, oy);
 				return 1;
+			}
+			if ((NHex > 0) && (NPrism > 0) && (((HexNen == 20) && (PrismNen != 15)) || ((HexNen == 27) && (PrismNen != 18))
+			                                   || ((PrismNen == 15) && (HexNen != 20)) || ((PrismNen == 18) && (HexNen != 27)))) {
+				printf("*** mesh : %d-node hexahedra and %d-node prisms do not share conforming quadrilateral faces "
+					"(serendipity 20 / 15 and complete 27 / 18 must not be mixed)\n", HexNen, PrismNen);
+				return 1;
+			}
+			// 高次の混在格子の電極面は同じ次数 (面の内部の節点まで固定する)
+			if (pmix >= 2) {
+				for (int t = 0; t < NTri; t++) {
+					const int o = ((Tri3[(t * TRI_HO_MAX) + 7] >= 0) ? 4 : (Tri3[t * TRI_HO_MAX] >= 0) ? 3
+					            : (Tri2[(t * 3)] != Tri[(t * 3)]) ? 2 : 1);
+					if (o != pmix) {
+						printf("*** mesh : the mixed mesh is order %d but a triangle is order %d\n", pmix, o);
+						return 1;
+					}
+				}
+				const int nqx = ((pmix == 2) ? (((HexNen == 20) || (PrismNen == 15)) ? 4 : 5) : (((pmix + 1) * (pmix + 1)) - 4));
+				for (int t = 0; t < NQuad; t++) {
+					if ((Quad2[(t * QUAD2_W) + nqx - 1] < 0) || ((nqx < QUAD2_W) && (Quad2[(t * QUAD2_W) + nqx] >= 0))) {
+						printf("*** mesh : the mixed mesh is order %d but a quadrilateral does not have %d nodes\n",
+							pmix, nqx + 4);
+						return 1;
+					}
+				}
 			}
 			MeshElem = MESHELEM_MIXED;
 			MeshDim = 3;
-			TetOrder = 1;
+			TetOrder = pmix;
 			if ((NTri < 1) && (NQuad < 1)) {
 				printf("%s\n", "*** mesh : a mixed mesh needs triangular or "
 					"quadrilateral boundary faces for the electrodes");
@@ -3690,6 +3729,88 @@ int pyr_grad_center(int e, double g[5][3])
 共有されていない (格子が割れている) と、この恒等式が破れる**ので、混在で
 一番危ない「面の不整合」がここで落ちる。
 */
+/*
+高次の混在格子 (同じ次数 p の四面体・六面体・角柱) の自己検証 : 種別ごとの要素の行列 (各種別の純粋な格子で
+p 次の場の恒等式を通したもの) を組み、線形場 φ = a・r で φᵀKφ = aᵀCa V (どんな形でも成立)。
+組み立ての振り分け (種別ごとの添字のずらし方・次数ごとの要素の関数) の検査。界面の適合は位相
+(elem_face_check) と曲がった同軸の収束で見る
+*/
+static int nodal_test_mixed_ho(FILE *fp_log)
+{
+	int ierr = 0;
+	fprintf(fp_log, "\n=== nodal element (mixed, order %d) self test ===\n", TetOrder);
+	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, hexahedra = %d (%d-node), prisms = %d (%d-node)\n",
+		NNode, NTet, NHex, HexNen, NPrism, PrismNen);
+	const double c[6] = {2.0, 3.0, 1.5, 0.4, 0.3, 0.2};
+	const double cm[3][3] = {{c[0], c[3], c[5]}, {c[3], c[1], c[4]}, {c[5], c[4], c[2]}};
+	const double av[3] = {0.7, -1.3, 0.9};
+	double aca = 0;
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) aca += av[i] * cm[i][j] * av[j];
+	}
+	crs_t A;
+	crs_alloc(&A);
+	crs_zero(&A);
+	double vol = 0, vk[3] = {0, 0, 0};
+	const int ne = elem3d_count();
+	static double ke[ELEM_NMAX][ELEM_NMAX];
+	static double kt[TET_NMAX][TET_NMAX], kt2[10][10], kh[HEXP_NMAX][HEXP_NMAX], kp[PRISMP_NMAX][PRISMP_NMAX];
+	for (int e = 0; e < ne; e++) {
+		const int kind = elem3d_kind(e);
+		int32_t nd[ELEM_NMAX];
+		const int nen = elem3d_nodes(e, nd);
+		double v = 0;
+		int bad = 0;
+		if (kind == MESHELEM_TET) {
+			if (TetOrder >= 3) {
+				bad = tet20_element(e, c, kt, &v);
+				for (int l = 0; l < nen; l++) for (int m = 0; m < nen; m++) ke[l][m] = kt[l][m];
+			}
+			else {
+				bad = tet10_element(e, c, kt2, &v);
+				for (int l = 0; l < nen; l++) for (int m = 0; m < nen; m++) ke[l][m] = kt2[l][m];
+			}
+		}
+		else if (kind == MESHELEM_HEX) {
+			bad = hex2_element(e - NTet, c, kh, &v);
+			for (int l = 0; l < nen; l++) for (int m = 0; m < nen; m++) ke[l][m] = kh[l][m];
+		}
+		else {
+			bad = prism2_element(e - NTet - NHex, c, kp, &v);
+			for (int l = 0; l < nen; l++) for (int m = 0; m < nen; m++) ke[l][m] = kp[l][m];
+		}
+		if (bad) {
+			fprintf(fp_log, "*** element %d is degenerate or inverted\n", e + 1);
+			ierr = 1;
+			continue;
+		}
+		vol += v;
+		vk[(kind == MESHELEM_TET) ? 0 : (kind == MESHELEM_HEX) ? 1 : 2] += v;
+		for (int l = 0; l < nen; l++) {
+			for (int m = 0; m < nen; m++) {
+				const int64_t p = crs_find(&A, nd[l], nd[m]);
+				if (p >= 0) A.val[p] += ke[l][m];
+			}
+		}
+	}
+	fprintf(fp_log, "  volume = %.10e (tetrahedra %.4e, hexahedra %.4e, prisms %.4e)\n", vol, vk[0], vk[1], vk[2]);
+	double *phi = (double *)malloc((size_t)NNode * sizeof(double));
+	for (int i = 0; i < NNode; i++) phi[i] = (av[0] * Xp[i]) + (av[1] * Yp[i]) + (av[2] * Zp[i]);
+	double q1 = 0;
+	for (int i = 0; i < NNode; i++) q1 += phi[i] * crs_row_dot(&A, i, phi);
+	const double want = aca * vol;
+	const double err = fabs(q1 - want) / fabs(want);
+	fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, rel. error = %.2e\n", q1, want, err);
+	if (!(err <= 1e-12)) {
+		fprintf(fp_log, "*** the linear-field identity failed\n");
+		ierr = 1;
+	}
+	free(phi);
+	crs_free(&A);
+	return ierr;
+}
+
+
 static int nodal_test_mixed(FILE *fp_log)
 {
 	int ierr = 0;
@@ -5167,7 +5288,7 @@ int solve_nodal_test(FILE *fp_log)
 		return ((PrismNen > 6) ? nodal_test_prism2(fp_log) : nodal_test_prism(fp_log));
 	}
 	if (MeshElem == MESHELEM_PYR)   return nodal_test_pyr(fp_log);
-	if (MeshElem == MESHELEM_MIXED) return nodal_test_mixed(fp_log);
+	if (MeshElem == MESHELEM_MIXED) return ((TetOrder >= 2) ? nodal_test_mixed_ho(fp_log) : nodal_test_mixed(fp_log));
 
 	fprintf(fp_log, "\n=== nodal element (P%d) self test ===\n", TetOrder);
 	fprintf(fp_log, "  nodes = %d, tetrahedra = %d, nodes per element = %d\n",

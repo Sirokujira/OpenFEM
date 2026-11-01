@@ -1045,13 +1045,13 @@ if ! (cd "$WORK" && "$OFE" -n 2 q8.ofe 2>&1 | grep -q "no centre node"); then
 	echo "  *** it was rejected for a different reason than the missing centre node" >&2
 	status=1
 fi
-# 2 次の六面体と他種別の混在 (混在は 1 次に限る)
+# 2 次の六面体と 1 次の角柱の混在 (種別の混在は次数が揃っていること。[mixed high order] も参照)
 awk '/^\$Elements/ { print; getline; print $1 + 1
                      print "9997 6 2 1 1 1 2 3 4 5 6"; next } { print }' \
     "$SRC/box_hex2.msh" > "$WORK/mix2.msh"
 sed 's/^mesh = .*/mesh = mix2.msh/' "$SRC/box_hex2.ofe" > "$WORK/mix2.ofe"
 mesh_reject "an order-2 hex mesh mixed with a prism" mix2.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 mix2.ofe 2>&1 | grep -q "must be first order"); then
+if ! (cd "$WORK" && "$OFE" -n 2 mix2.ofe 2>&1 | grep -q "must have the same order"); then
 	echo "  *** it was rejected for a different reason than the mixed-order rule" >&2
 	status=1
 fi
@@ -4064,6 +4064,63 @@ res=$(awk -v h3="$e_ann_hex3a" -v h4="$e_ann_hex4a" -v p3="$e_ann_prism3a" -v p4
 	printf "%s (hexa125 %.2e vs hexa64 %.2e, prism75 %.2e vs prism40 %.2e)", ok ? "OK" : "NG", h4, h3, p4, p3 }')
 echo "  annulus (coarse) : order 4 beats order 3 on the curved faces (geometry h^6 vs h^4) : $res"
 case "$res" in NG*) status=1 ;; esac
+
+# ---- 高次の種別混在 (同じ次数の四面体・六面体・角柱) ----
+#
+# 面のトレースは三角形なら P_p、四角形なら Q_p なので、同じ次数の種別どうしは面で適合する
+# (unstruct.c の elem_finish)。格子は gmsh 製 (gmsh_coaxmix_ho.py : 同軸の内側のリングを角柱、外側を
+# 六面体 / gmsh_boxmix_ho.py : 下半分を角柱、上半分を四面体)。
+#   (a) 角柱 + 六面体の曲がった同軸 : 2 次 h⁴ (比 15.5)、3 次 h⁴ 以上 (比 42、実測)
+#   (b) 角柱 + 四面体の箱 : C が全桁、analysis = P の線形場の恒等式 (種別ごとの要素の行列の振り分け)
+#   (c) 熱連成 : 三角形の露出面が四面体のものか角柱のものかで振り分ける (混在で初めて両方が出る)。
+#       恒等式と露出面の数
+#   (d) 弾く : 次数の違う種別、serendipity と完全 Lagrange の混在、四角形面を三角形で覆う界面
+echo "[mixed high order] tetrahedra / hexahedra / prisms of the same order in one mesh"
+for m in coaxmix2a coaxmix2b coaxmix3a coaxmix3b boxmix2 boxmix3 coaxmixt2a; do cp "$SRC/$m.msh" "$WORK/"; done
+for o in 2 3; do
+	for r in a b; do
+		sed -e "s/coax_hex2.msh/coaxmix$o$r.msh/" "$SRC/coax_hex2.ofe" | awk '/^analysis/{print "analysis = C"; next} {print}' > "$WORK/mxcx.ofe"
+		(cd "$WORK" && "$OFE" -n 2 mxcx.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  coaxmix$o$r : the run failed -> NG" >&2; status=1; }
+		eval "c_$r=\$(value_of C)"
+	done
+	tol=$( [ $o = 2 ] && echo 5e-4 || echo 2e-5 )
+	compare "prisms + hexahedra, curved coax (order $o, finer) : C' [F/m]" "$c_b" "$cex" "$tol"
+	res=$(awk -v a="$c_a" -v b="$c_b" -v e="$cex" 'BEGIN { ea = (a - e) / e; if (ea < 0) ea = -ea; eb = (b - e) / e; if (eb < 0) eb = -eb
+		printf "%s (%.2e -> %.2e, ratio %.1f)", (ea > 12 * eb) ? "OK" : "NG", ea, eb, (eb > 0) ? ea / eb : 0 }')
+	echo "  prisms + hexahedra, curved coax (order $o) : C' converges at h^4 or faster : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+for o in 2 3; do
+	h3_c "boxmix$o" C
+	compare "prisms + tetrahedra (order $o) : C (parallel plate) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+	h3_c "boxmix$o" P
+	if grep -q '^\*\*\*' "$WORK/ofe.log" || ! grep -q "mixed, order $o) self test" "$WORK/ofe.log" || ! grep -q "linear field : .*rel. error" "$WORK/ofe.log"; then
+		echo "  prisms + tetrahedra (order $o, analysis P) : the self test failed -> NG" >&2; status=1
+	else
+		echo "  prisms + tetrahedra (order $o, analysis P) : linear field identity ($(awk '/linear field : / { print $NF }' "$WORK/ofe.log")) -> OK"
+	fi
+done
+for m in boxmix2:36 boxmix3:36 coaxmix2a:48 coaxmix3a:48; do
+	g=${m%%:*}; nf=${m#*:}
+	printf 'OpenFEM 1 0\ntitle = mixed high-order thermal\nmesh = %s.msh\nmaterial = 1.0 1e6\ntempco = 2 4e-3 20\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\nheatsink = 0 20\nconvection = 3000 20\nradiation = 0.5 20\ntemperature = 20\nthermal = 5\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' "$g" > "$WORK/mxth.ofe"
+	th_run mxth.ofe
+	th_energy "$g : convection + radiation"
+	th_nface "$g : exposed faces (triangles of tetrahedra / prisms, quadrilaterals)" "$nf"
+done
+# (d)
+awk '/^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 }
+	e && ($2 == 13) { s = $1 " 6"; for (i = 3; i <= 3 + $3 + 6; i++) s = s " " $i; print s; next } { print }' "$SRC/coaxmix2a.msh" > "$WORK/mxx_ord.msh"
+sed -e "s/coax_hex2.msh/mxx_ord.msh/" "$SRC/coax_hex2.ofe" > "$WORK/mxx_ord.ofe"
+mesh_reject "hex27 + prism6 (different orders)" mxx_ord.ofe
+(cd "$WORK" && "$OFE" -n 2 mxx_ord.ofe 2>&1 | grep -q "must have the same order") || { echo "  *** rejected for a different reason" >&2; status=1; }
+awk '/^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 }
+	e && ($2 == 12) { s = $1 " 17"; for (i = 3; i <= 3 + $3 + 20; i++) s = s " " $i; print s; next } { print }' "$SRC/coaxmix2a.msh" > "$WORK/mxx_fam.msh"
+sed -e "s/coax_hex2.msh/mxx_fam.msh/" "$SRC/coax_hex2.ofe" > "$WORK/mxx_fam.ofe"
+mesh_reject "hex20 + prism18 (serendipity and complete)" mxx_fam.ofe
+(cd "$WORK" && "$OFE" -n 2 mxx_fam.ofe 2>&1 | grep -q "do not share conforming quadrilateral faces") || { echo "  *** rejected for a different reason" >&2; status=1; }
+sed -e "s/coax_hex2.msh/coaxmixt2a.msh/" "$SRC/coax_hex2.ofe" > "$WORK/mxx_nc.ofe"
+mesh_reject "prism quadrilaterals covered by tetrahedron triangles (order 2)" mxx_nc.ofe
+(cd "$WORK" && "$OFE" -n 2 mxx_nc.ofe 2>&1 | grep -q "covered by triangular faces") || { echo "  *** rejected for a different reason" >&2; status=1; }
 
 # ---- 交流の発熱 (thermal + analysis = A) ----
 #

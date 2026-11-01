@@ -921,8 +921,9 @@ static double surf_faces_tet(crs_t *B, double *g, const double *t, int rad, int 
 		if ((bc == NULL) || (bc->c <= 0)) continue;
 		nface++;
 		const double hc = bc->c, ta = bc->t;
-		if (PrismNen > 6) {
-			// 2 次の角柱の三角形の面 (TetOrder も 2 になるので四面体より先に見る)
+		if ((PrismNen > 6) && (elem3d_kind(TFaceEl[f]) == MESHELEM_PRISM)) {
+			// 高次の角柱の三角形の面 (TetOrder も 2 以上になるので四面体より先に見る。混在格子では
+			// 三角形の面を持つ要素が四面体のこともあるので、面を持つ要素の種別で振り分ける)
 			qsum += surf_face_ho(B, g, t, rad, f, hc, ta, &bad);
 			continue;
 		}
