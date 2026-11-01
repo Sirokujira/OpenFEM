@@ -3720,8 +3720,6 @@ t3_reject() {	# t3_reject <ラベル> <ofe> <理由の文字列>
 	fi
 }
 cp "$SRC/bar_hex.msh" "$SRC/box_hex2.msh" "$WORK/"
-awk '/^mesh/{print "mesh = bar_hex.msh"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/t3x_ac.ofe"
-t3_reject "AC heating (thermal + A) on a hexahedral mesh" t3x_ac.ofe "AC heating (thermal + analysis A) supports linear tetrahedra only"
 awk '/^material/{print "material = 1.0 1e6"; print "kthermal = 2 10"; next}
 	/^analysis/{print "heatsink = 0 20"; print "thermal = 1"; print "analysis = R"; next}
 	{print}' "$SRC/box_hex2.ofe" > "$WORK/t3x_hex2.ofe"
@@ -3792,6 +3790,62 @@ awk '/^kthermal/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; next} {
 th_reject "AC heating with a nonlinear (bh) material" tacx_bh.ofe "linear materials only"
 awk '/^analysis/{print "analysis = A"; print "frequency = 1e3"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/tacx_grid.ofe"
 th_reject "AC heating on the structured grid" tacx_grid.ofe "requires an unstructured mesh"
+# (5) 六面体・角柱 (辺要素の種別に依らない損失 ½ eᴴ T_e e)。awall の四角形面が要る
+#     (無いと非受動 R になる。edge.c の注釈)。σ = 1e6 の棒 (表皮深さ 50mm) なら 100 Hz の
+#     A は DC の熱連成と 7e-10 で一致 (許容 1e-8)。混在 (六面体 + 角柱) は界面で損失を要素で
+#     一様に配る近似が DC の積分点の重みと 2e-8 違うので恒等式だけ
+cp "$SRC/bar_hex.msh" "$SRC/bar_prism.msh" "$SRC/bar_hexprism.msh" "$SRC/bar_hex12.msh" "$SRC/ac_heat.awk" "$WORK/"
+for m in bar_hex bar_prism bar_hexprism; do
+	awk -v m="$m" '/^mesh/{print "mesh = " m ".msh"; next} /^region/{print; print "region = 2 2"; next}
+		/^thermal/{print "thermal = 3"; next} {print}' "$SRC/thermal_tet.ofe" > "$WORK/tach_dc.ofe"
+	th_run tach_dc.ofe
+	rdc=$(th_r); tdc=$(th_t)
+	awk '/^analysis/{print "frequency = 100"; print "awall = 20"; print "analysis = A"; next}
+		/^thermal/{print "thermal = 4.242640687119285"; next} {print}' "$WORK/tach_dc.ofe" > "$WORK/tach_lf.ofe"
+	th_run tach_lf.ofe
+	if [ "$m" != bar_hexprism ]; then
+		compare "$m : AC at 100 Hz (I = 3 sqrt 2 A peak) == DC thermal (3 A) : R [ohm]" "$(th_r)" "$rdc" 1e-8
+		compare "$m : AC at 100 Hz == DC thermal : T_max [degC]" "$(th_t)" "$tdc" 1e-8
+	fi
+	th_energy "$m : AC at 100 Hz"
+done
+#     100 kHz の銅の棒 (bar_hex.msh、thermal_ac.ofe と同じ形)、α = 0 : 表面と中心の温度差の
+#     Fourier 級数解との誤差が h² で縮む (12 -> 24 分割で比 4.04、24 で -1.1%、48 で -0.26%、
+#     実測。六面体は損失を 8 節点に一様に配るので四面体より定数が大きい)。体積平均の
+#     温度上昇は 0.3% で一致
+tach_dt() {	# tach_dt <格子> -> "表面と中心の温度差 Fourier の値 平均の上昇 閉形式"
+	awk -v m="$1" '/^mesh/{print "mesh = " m ".msh"; next} /^region/{print; print "region = 2 2"; next}
+		/^tempco/{print "tempco = 2 0 0"; next} /^thermal/{print "thermal = 100"; print "fieldout = 1"; next} {print}' \
+		"$SRC/thermal_ac.ofe" > "$WORK/tach_a0.ofe"
+	th_run tach_a0.ofe
+	fd=$(awk -v xc=1e-3 -v z1=0 -v z2=0.5e-3 '
+		/^POINTS/ { np = $2; pt = 1; n = 0; next }
+		pt { for (i = 1; i <= NF; i++) { c[n] = $i; n++ } if (n >= 3 * np) pt = 0; next }
+		/^SCALARS T / { st = 1; m = 0; next }
+		st && /^LOOKUP/ { next }
+		st && (NF != 1) { st = 0; next }
+		st { x = c[3 * m]; z = c[3 * m + 2]; m++; if (m >= np) st = 0 }
+		st && ((x - xc) ^ 2 < 1e-18) && ((z - z1) ^ 2 < 1e-18) { s1 += $1; n1++ }
+		st && ((x - xc) ^ 2 < 1e-18) && ((z - z2) ^ 2 < 1e-18) { s2 += $1; n2++ }
+		END { if ((n1 > 0) && (n2 > 0)) printf "%.12e", s1 / n1 - s2 / n2 }' "$WORK/ofe_field.vtk")
+	tm=$(awk '/T_mean/ { print $8; exit }' "$WORK/ofe.log")
+	set -- $(awk -v f=1e5 -v sig=5.8e7 -v k=400 -v I=100 -v R="$(th_r)" -f "$SRC/ac_heat.awk")
+	echo "$fd $1 $(awk -v t="$tm" 'BEGIN { printf "%.12e", t - 20 }') $2"
+}
+set -- $(tach_dt bar_hex12); d12=$1; f12=$2
+set -- $(tach_dt bar_hex); d24=$1; f24=$2
+compare "hexahedra, 100 kHz : volume-mean temperature rise == q L^2 / (12 k) [K]" "$3" "$4" 0.003
+res=$(awk -v a="$d12" -v fa="$f12" -v b="$d24" -v fb="$f24" 'BEGIN {
+	e1 = (a - fa) / fa; if (e1 < 0) e1 = -e1
+	e2 = (b - fb) / fb; if (e2 < 0) e2 = -e2
+	q = (e2 > 0) ? e1 / e2 : 0
+	printf "%s (err %.2e -> %.2e, ratio %.2f)", ((e2 < 0.02) && (q > 3.6) && (q < 4.6)) ? "OK" : "NG", e1, e2, q }')
+echo "  hexahedra, 100 kHz : surface - centre temperature vs Fourier series, h^2 (12 -> 24 cells) : $res"
+case "$res" in NG*) status=1 ;; esac
+#     ピラミッドは A が弾く (多項式の Nedelec 基底が無い)
+awk '/^mesh/{print "mesh = box_pyr.msh"; next} /^region/{print "region = 1 2"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_pyr.ofe"
+cp "$SRC/box_pyr.msh" "$WORK/"
+mesh_reject "AC heating on a pyramid mesh" tacx_pyr.ofe
 
 # ---- 交流の発熱 (thermal + analysis = F、断面 2 次元・単位長あたり) ----
 #

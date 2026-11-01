@@ -2404,9 +2404,11 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 			MeshDim, TetOrder, HexNen, PrismNen);
 		return 1;
 	}
-	if (MeshMode && th_ac() && ((NHex > 0) || (NPrism > 0) || (NPyr > 0))) {
-		fprintf(fp_log, "*** AC heating (thermal + analysis A) supports linear tetrahedra only "
-			"(this mesh has %d hexahedra, %d prisms, %d pyramids)\n", NHex, NPrism, NPyr);
+	// 交流の発熱 (A) は辺要素の種別 (四面体・六面体・角柱、混在可) ならどれでも。損失は
+	// edge_elem_matrices の T_e の上の ½ eᴴ T_e e なので種別に依らない。ピラミッドは A 自体が弾く
+	if (MeshMode && th_ac() && (MeshDim == 3) && (NPyr > 0)) {
+		fprintf(fp_log, "*** AC heating (thermal + analysis A) does not support pyramids "
+			"(no polynomial Nedelec basis; this mesh has %d pyramids)\n", NPyr);
 		return 1;
 	}
 	th_extent();
