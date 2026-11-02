@@ -1986,17 +1986,48 @@ V' は導体 1 で s (縮尺)、基準導体 0 で 0。被積分関数は λ の
 の実部と虚部。損失を組み立てと同じ質量行列の上で積分するのでそのまま成り立つ)。
 *zr, *zi = Z = R + jX [Ω/m]。
 */
+// 交流の発熱の非線形 (B-H) : 要素ごとの ν と Anderson の作業域。熱連成の回をまたいで持ち越す (最初の呼び出しで作る)
+static double *H2Nu, *H2Aay, *H2Aaf, *H2Aayp, *H2Aafp, *H2Aady, *H2Aadf, *H2Bvr, *H2Bvi;
+static int H2NlTotal;
+
+
 int eddy2d_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f,
 	double *zr, double *zi, int it)
 {
 	const int n = (int)num_node();
 	const double omega = 2 * PI * Freq;
 	int ierr = 0;
+	// 非線形 (B-H) : 3 次元の eddy3d_heat_solve と同じく、熱連成の各回の σ(T) で実効磁気抵抗率の反復 (solve_eddy の F と
+	// 同じ H を独立変数にした更新と ln ν の Anderson 加速) を収束するまで解く。ν は前の回の値から始める
+	int nlf = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh[0] > 0) nlf = 1;
+	}
+	const int64_t nelc = num_cell();
+	if (nlf && (H2Nu == NULL)) {
+		H2Nu  = (double *)malloc((size_t)nelc * sizeof(double));
+		H2Aay = (double *)malloc((size_t)nelc * sizeof(double));
+		H2Aaf = (double *)malloc((size_t)nelc * sizeof(double));
+		H2Aayp = (double *)malloc((size_t)nelc * sizeof(double));
+		H2Aafp = (double *)malloc((size_t)nelc * sizeof(double));
+		H2Aady = (double *)malloc((size_t)nelc * AAM * sizeof(double));
+		H2Aadf = (double *)malloc((size_t)nelc * AAM * sizeof(double));
+		H2Bvr = (double *)malloc((size_t)nelc * 3 * sizeof(double));
+		H2Bvi = (double *)malloc((size_t)nelc * 3 * sizeof(double));
+		for (int64_t c = 0; c < nelc; c++) {
+			elem_t el;
+			elem_get(c, &el);
+			const material_t *mt = &Material[el.mat];
+			H2Nu[c] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0) : (1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1))));
+		}
+		H2NlTotal = 0;
+		fprintf(fp_log, "  nonlinear (B-H) : effective reluctivity per element, solved to convergence in every thermal "
+			"iteration (maxiter = %d, tol = %.1e); the thermal tolerance is at least 10 x that\n", NlMaxiter, NlTol);
+	}
 
 	crs_t K, M;
 	crs_alloc(&K);
 	crs_alloc(&M);
-	assemble_nu_tri(&K, NULL);
 	assemble_mass_tri_sig(&M, sigelem);
 
 	unsigned char *fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));
@@ -2015,6 +2046,11 @@ int eddy2d_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f
 	}
 	char label[64];
 	sprintf(label, "eddy%d", it);
+	int aan = 0;		// Anderson の履歴は σ(T) が変わるたびに捨てる
+	double sr = 0, si = 0, ivr = 0, ivi = 0, den = 0;
+	for (int nlit = 1; !ierr; nlit++) {
+	assemble_nu_tri(&K, (nlf ? H2Nu : NULL));
+	for (int i = 0; i < n; i++) ar[i] = ai[i] = 0;
 	if (solver_cocg(&K, &M, omega, br, bi, ar, ai, fix,
 		Solver.maxiter, Solver.nout, Solver.converg, NULL, label) < 0) {
 		fprintf(fp_log, "*** thermal : the eddy-current solve did not converge (iteration %d)\n", it);
@@ -2031,22 +2067,64 @@ int eddy2d_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f
 			qi += w * ai[Tri[(e * 3) + l]];
 		}
 	}
-	const double ivr = s1 + (omega * qi), ivi = -omega * qr;
-	const double den = (ivr * ivr) + (ivi * ivi);
+	ivr = s1 + (omega * qi);
+	ivi = -omega * qr;
+	den = (ivr * ivr) + (ivi * ivi);
 	if (!ierr && (den <= 0)) {
 		fprintf(fp_log, "*** thermal : no current flows through the port\n");
 		ierr = 1;
 	}
+	if (ierr) break;
+	// s = cur / I_V (V' の縮尺)。Az も s 倍
+	sr = cur * ivr / den;
+	si = -cur * ivi / den;
+	for (int i = 0; i < n; i++) {
+		const double xr = ar[i], xi = ai[i];
+		ar[i] = (sr * xr) - (si * xi);
+		ai[i] = (sr * xi) + (si * xr);
+	}
+	if (!nlf) break;
+	// ν の更新 (solve_eddy の F と同じ式 : |B|² = |Re B|² + |Im B|²、H を独立変数にした ν = |H|/B(|H|))
+	field_cell_grad(ar, 1, H2Bvr);
+	field_cell_grad(ai, 1, H2Bvi);
+	double dmax = 0;
+	for (int64_t c = 0; c < nelc; c++) {
+		elem_t el;
+		elem_get(c, &el);
+		const material_t *mt = &Material[el.mat];
+		H2Aay[c] = log(H2Nu[c]);
+		if (mt->nbh[0] <= 0) {
+			H2Aaf[c] = 0;
+			continue;
+		}
+		double b2 = 0;
+		for (int d = 0; d < 3; d++) {
+			b2 += (H2Bvr[(c * 3) + d] * H2Bvr[(c * 3) + d]) + (H2Bvi[(c * 3) + d] * H2Bvi[(c * 3) + d]);
+		}
+		const double hm = H2Nu[c] * sqrt(b2);
+		const double nun = ((hm > 0) ? (hm / bh_b_of_h(mt, 0, hm)) : bh_nu(mt, 0, 0));
+		const double dn = fabs(nun - H2Nu[c]) / nun;
+		if (dn > dmax) dmax = dn;
+		H2Aaf[c] = log(nun) - H2Aay[c];
+	}
+	H2NlTotal++;
+	if (dmax < NlTol) break;
+	if (nlit >= NlMaxiter) {
+		fprintf(fp_log, "*** thermal : the effective reluctivity did not converge in %d iterations "
+			"(thermal iteration %d, max dnu/nu = %.3e)\n", NlMaxiter, it, dmax);
+		ierr = 1;
+		break;
+	}
+	anderson_step(nelc, H2Aay, H2Aaf, H2Aayp, H2Aafp, H2Aady, H2Aadf, AAM, &aan, NlRelax);
+	for (int64_t c = 0; c < nelc; c++) H2Nu[c] = exp(H2Aay[c]);
+	}
+	if (!ierr && nlf) {
+		fprintf(fp_log, "  thermal iteration %d : effective reluctivity converged (%d B-H iterations so far)\n",
+			it, H2NlTotal);
+	}
 	if (!ierr) {
 		*zr = ivr / den;						// Z = 1 / Y (V' = 1 のとき Y = I_V)
 		*zi = -ivi / den;
-		// s = cur / I_V (V' の縮尺)。Az も s 倍
-		const double sr = cur * ivr / den, si = -cur * ivi / den;
-		for (int i = 0; i < n; i++) {
-			const double xr = ar[i], xi = ai[i];
-			ar[i] = (sr * xr) - (si * xi);
-			ai[i] = (sr * xi) + (si * xr);
-		}
 		// 損失の節点荷重 : Duffy 変換 + 各方向 3 点 (9 点、λ の 5 次まで厳密)
 		const double gp[3] = {0.5 - (0.5 * 0.77459666924148337704), 0.5,
 		                      0.5 + (0.5 * 0.77459666924148337704)};

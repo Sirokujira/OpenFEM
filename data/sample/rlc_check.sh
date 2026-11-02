@@ -2189,6 +2189,24 @@ for f in 1e3 1e5; do
 		else echo "  f = $f, I = $1 : $it nonlinear iterations (expected <= 3) -> NG" >&2; status=1; fi
 	done
 done
+#   (a') 同じ板間を断面 2 次元の三角形の格子 (plate2d.msh、plate2d_ac.ofe と同じ形) で。要素ごとの ν を assemble_nu_tri に
+#        渡す同じ実効磁気抵抗率法で、L が同じ閉形式に 1e-6 (実測 4e-7。三角形の板間の H は 1 次元の一様から少しずれる)、R == R_air
+cp "$SRC/plate2d_ac.ofe" "$SRC/plate2d.msh" "$WORK/"
+mkdir -p "$WORK/nf2air"
+cp "$SRC/plate2d_ac.ofe" "$WORK/nf2air/x.ofe"; cp "$SRC/plate2d.msh" "$WORK/nf2air/"
+nf_run nf2air
+for pair in "1.0 1.0" "5.0 1.0888888888889"; do
+	set -- $pair
+	d="nf2-$1"
+	mkdir -p "$WORK/$d"; cp "$SRC/plate2d.msh" "$WORK/$d/"
+	awk -v cur="$1" '/^region = 1 2/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "bh = 2 10000 1.2"; next}
+		/^analysis/{print "current = " cur; print "nlsolver = 50 1e-10 1.0"} {print}' "$SRC/plate2d_ac.ofe" > "$WORK/$d/x.ofe"
+	nf_run "$d"
+	compare "2-D triangles, I = $1 : L = L_air + (B(I/W) - mu0 I/W) d/I [H/m]" "$(nf_val $d Lf)" \
+		"$(awk -v la="$(nf_val nf2air Lf)" -v I="$1" -v B="$2" 'BEGIN { pi = 3.14159265358979324; mu0 = 4 * pi * 1e-7
+			printf "%.12e", la + (B - mu0 * I / 1e-3) * 0.2e-3 / I }')" 1e-6
+	compare "2-D triangles, I = $1 : R == R_air [ohm/m]" "$(nf_val $d Rf)" "$(nf_val nf2air Rf)" 1e-8
+done
 #   (b) 直線の B-H 曲線 (初期透磁率と同じ傾きの 2 点) は線形の μr = 3979 と一致する
 mkdir -p "$WORK/nflin" "$WORK/nfmur"
 awk '/^bh = 2 10000 /{next} /^bh = 2 1000 /{print "bh = 2 1000 5.0"; next} {print}' "$SRC/plate_line_bh_ac.ofe" > "$WORK/nflin/x.ofe"
@@ -4809,8 +4827,29 @@ mesh_reject "AC heating on a pyramid mesh" tacx_pyr.ofe
 # 発熱は組み立てと同じ質量行列の上の ½∫σ|V' - jωAz|² なので Σf = ½|I|²R(f) が厳密。
 echo "[thermal F 2-D] AC heating on a 2-D cross-section (per unit length)"
 cp "$SRC/thermal_f2d.ofe" "$SRC/plate2d.msh" "$SRC/plate2d_p2.msh" "$SRC/plate_line_ac.ofe" "$WORK/"
-awk '/^analysis/{print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"} {print}' "$SRC/thermal_f2d.ofe" > "$WORK/f2x_bh.ofe"
-th_reject "AC heating on a 2-D cross-section with a bh material" f2x_bh.ofe "thermal with analysis F supports linear materials only"
+# (0) 非線形 (B-H) の磁性体 (3 次元の A と同じ入れ子、要素ごとの ν を回をまたいで持ち越す):
+#     ・板間が非線形、α = 0 : R・L が非連成の非線形の F (current = 4.5) と一致
+#     ・板が非線形 (1 kHz、板の中の B が表皮効果で変わる)、k = 1e5 で温度が一様 : R が非連成の非線形の F を temperature = T_mean で
+#       解いた値に 4e-7 (実測 7e-8)。**ν を熱連成の最初の回で凍らせる誤り (R +1.4e-6) はここでだけ落ちる**
+f2bh_r() { awk -F, -v k="$1" '$1 == k { a = 1; next } a == 1 && $1 == "1" { print $2; exit }' "$WORK/rlc.csv"; }
+awk '/^region = 1 2/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "bh = 2 10000 1.2"; next} /^conductortempco/{next}
+	/^analysis/{print "nlsolver = 100 1e-8 1.0"} {print}' "$SRC/thermal_f2d.ofe" > "$WORK/f2bh_a0.ofe"
+(cd "$WORK" && "$OFE" -n 2 f2bh_a0.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  f2bh_a0 : the run failed -> NG" >&2; status=1; }
+r0=$(f2bh_r Rf); l0=$(f2bh_r Lf)
+awk '/^kthermal|^convection|^conductortempco|^thermal/{next} /^analysis/{print "current = 4.5"} {print}' "$WORK/f2bh_a0.ofe" > "$WORK/f2bh_a0u.ofe"
+(cd "$WORK" && "$OFE" -n 2 f2bh_a0u.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  f2bh_a0u : the run failed -> NG" >&2; status=1; }
+compare "2-D, B-H gap, alpha = 0 : thermal R == the uncoupled nonlinear F [ohm/m]" "$r0" "$(f2bh_r Rf)" 1e-7
+compare "2-D, B-H gap, alpha = 0 : thermal L == the uncoupled nonlinear F [H/m]" "$l0" "$(f2bh_r Lf)" 1e-7
+awk '/^region = 10 3/{print; print "bh = 3 100 0.5"; print "bh = 3 1000 1.0"; print "bh = 3 10000 1.2"; next} /^kthermal/{print "kthermal = 3 1e5"; next}
+	/^frequency/{print "frequency = 1000"; next} /^thermal/{print "thermal = 4.5 200 1e-6"; next} /^analysis/{print "nlsolver = 100 1e-8 1.0"} {print}' \
+	"$SRC/thermal_f2d.ofe" > "$WORK/f2bh_c.ofe"
+th_run f2bh_c.ofe
+rc=$(th_r)
+tmc=$(awk '/T_mean/ { for (i = 1; i <= NF; i++) if ($i == "=") v = $(i + 1) } END { print v }' "$WORK/ofe.log")
+awk -v t="$tmc" '/^kthermal|^convection|^thermal/{next} /^temperature/{print "temperature = " t; next} /^analysis/{print "current = 4.5"} {print}' \
+	"$WORK/f2bh_c.ofe" > "$WORK/f2bh_cu.ofe"
+(cd "$WORK" && "$OFE" -n 2 f2bh_cu.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  f2bh_cu : the run failed -> NG" >&2; status=1; }
+compare "2-D, B-H plates, uniform temperature : thermal R == the uncoupled nonlinear F at T_mean [ohm/m]" "$rc" "$(f2bh_r Rf)" 4e-7
 f2_tm() { awk '/^  T_max = / { print $(NF-1); exit }' "$WORK/ofe.log"; }
 # (1) 100 Hz、h = 50 : 等温の板の閉形式 (thermal_f2d.ofe の注釈)。許容は板の中の温度差
 #     (Bi = ht/k = 6e-6 と端の効果、実測 2e-6) から ΔT に 1e-5、R に 1e-6
