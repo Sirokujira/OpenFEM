@@ -37,7 +37,10 @@ jobs:
 
       # 平行平板 / 抵抗 / 同軸 / マイクロストリップを解析解と比較する
       - name: Validation test — RLGC vs analytic
-        run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check
+        # 失敗した検査をログの末尾にまとめて出す (途中の NG の行はログの末尾からは見えない)
+        run: |
+          set -o pipefail
+          sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check 2>&1 | tee /tmp/rlc.log || { echo "---- failed checks (summary) ----"; grep -E "NG|FAIL|failed|not found|\*\*\*" /tmp/rlc.log | grep -v -E ": OK|-> OK" | cut -c1-300 | tail -40; exit 1; }
 
       - name: Upload binaries (artifact)
         uses: actions/upload-artifact@v4
@@ -111,7 +114,7 @@ jobs:
       - name: Validation test — RLGC vs analytic (+ the MPI byte-identity)
         run: |
           set -o pipefail
-          sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check 2>&1 | tee /tmp/mpi.log
+          sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check 2>&1 | tee /tmp/mpi.log || { cp /tmp/mpi.log /tmp/rlc.log; echo "---- failed checks (summary) ----"; grep -E "NG|FAIL|failed|not found|\*\*\*" /tmp/rlc.log | grep -v -E ": OK|-> OK" | cut -c1-300 | tail -40; exit 1; }
 
       # 「skip されずに実際に走ったこと」まで見る。mpirun が見つからないと
       # [mpi] 節は黙って skip するので、それだけでは検査にならない
@@ -159,7 +162,10 @@ jobs:
           h5ls -r ofe_series.h5
 
       - name: Validation test — RLGC vs analytic (+ the HDF5 series)
-        run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check
+        # 失敗した検査をログの末尾にまとめて出す (途中の NG の行はログの末尾からは見えない)
+        run: |
+          set -o pipefail
+          sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check 2>&1 | tee /tmp/rlc.log || { echo "---- failed checks (summary) ----"; grep -E "NG|FAIL|failed|not found|\*\*\*" /tmp/rlc.log | grep -v -E ": OK|-> OK" | cut -c1-300 | tail -40; exit 1; }
 
       - name: Upload logs on failure
         if: failure()
@@ -205,7 +211,10 @@ jobs:
           "$GITHUB_WORKSPACE/bin/ofe_post"
 
       - name: Validation test — RLGC vs analytic
-        run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check
+        # 失敗した検査をログの末尾にまとめて出す (途中の NG の行はログの末尾からは見えない)
+        run: |
+          set -o pipefail
+          sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe" "$GITHUB_WORKSPACE/bin/ofe_post" /tmp/rlc-check 2>&1 | tee /tmp/rlc.log || { echo "---- failed checks (summary) ----"; grep -E "NG|FAIL|failed|not found|\*\*\*" /tmp/rlc.log | grep -v -E ": OK|-> OK" | cut -c1-300 | tail -40; exit 1; }
 
       - name: Upload binaries (artifact)
         uses: actions/upload-artifact@v4
@@ -271,7 +280,10 @@ jobs:
 
       - name: Validation test — RLGC vs analytic
         shell: bash
-        run: sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe.exe" "$GITHUB_WORKSPACE/bin/ofe_post.exe" /tmp/rlc-check
+        # 失敗した検査をログの末尾にまとめて出す (途中の NG の行はログの末尾からは見えない)
+        run: |
+          set -o pipefail
+          sh data/sample/rlc_check.sh "$GITHUB_WORKSPACE/bin/ofe.exe" "$GITHUB_WORKSPACE/bin/ofe_post.exe" /tmp/rlc-check 2>&1 | tee /tmp/rlc.log || { echo "---- failed checks (summary) ----"; grep -E "NG|FAIL|failed|not found|\*\*\*" /tmp/rlc.log | grep -v -E ": OK|-> OK" | cut -c1-300 | tail -40; exit 1; }
 
       - name: Upload binaries (artifact)
         uses: actions/upload-artifact@v4
