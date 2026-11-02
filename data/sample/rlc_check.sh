@@ -6998,13 +6998,14 @@ case "$res" in NG*) status=1 ;; esac
 grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^analysis/{print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"} {print}' > "$WORK/ajax_fd.ofe"
 th_reject "ja with analysis A in the frequency domain" ajax_fd.ofe "needs transient"
 cp "$SRC/bar_prismtet.ofe" "$SRC/bar_prismtet.msh" "$WORK/"
+# (1 次の六面体・角柱だけの格子は [A + bh transient] の (g) で解く。四面体を含む 1 次の格子の角柱は弾く)
 grep -v '^#' "$SRC/bar_prismtet.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"} {print}' > "$WORK/ajax_pt.ofe"
 if (cd "$WORK" && "$OFE" -n 2 ajax_pt.ofe > /dev/null 2>&1); then
 	echo "  ja on prisms with A + transient : not rejected -> NG"; status=1
-elif grep -q "needs first-order tetrahedra" "$WORK/ofe.log"; then
-	echo "  ja on prisms with A + transient : rejected -> OK"
+elif grep -q "needs tetrahedra for the nonlinear material, or a mesh of hexahedra / prisms only" "$WORK/ofe.log"; then
+	echo "  ja on prisms of a first-order prism + tetrahedron mesh with A + transient : rejected -> OK"
 else
-	echo "  ja on prisms with A + transient : rejected for a different reason -> NG"; status=1
+	echo "  ja on prisms of a first-order prism + tetrahedron mesh with A + transient : rejected for a different reason -> NG"; status=1
 fi
 
 # ---- 3 次元渦電流の過渡解析 + B-H 曲線 (analysis = A + transient + bh、四面体) ----
@@ -7196,6 +7197,40 @@ a3_energy "order-3 hexahedra, J-A, quasi-static sine (16 steps per period)"
 wfem=$(awk -F, 'NR == 17 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/ofe_transient.csv")
 wref=$(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=16 -f "$SRC/ja_bar_loop.awk")
 compare "order-3 hexahedra, J-A, quasi-static hysteresis loss of the 2nd period == forward J-A along H_y(z) (awk) [J]" "$wfem" "$wref" 1e-2
+
+# (g) 1 次の六面体 (bar_hex.msh) と角柱 (bar_prism.msh) : 非線形の材料があると次数 1 の部分辺の Nedelec (eddy3d_pr.c の
+#     六面体 / 角柱の分岐、pr_p1_nonlinear) で積分点ごとの状態を持つ prnl_* を通る (1 次の ed_ja_* は ∇×W が要素内一定の
+#     四面体だけ)。**次数 1 の部分辺の空間は 1 次の六面体・角柱の辺要素 (eddy3d.c) と同じ**なので、直線の B-H 曲線 / ほぼ線形の
+#     J-A が eddy3d.c の線形の μr = 50 と I(t) で 1e-7 一致する (経路をまたぐ恒等式)。準静的な正弦波の B-H の和と J-A の損は
+#     awk の独立な積分に (f) と同じ許容、仕事の恒等式も
+for c in bar_hex:hexahedra bar_prism:prisms; do
+	m=${c%%:*}; lab="first-order ${c#*:}"
+	cp "$SRC/$m.msh" "$WORK/"
+	sed "s/^mesh = .*/mesh = $m.msh/" "$WORK/a2nl_lin.ofe" > "$WORK/a1p_lin.ofe"
+	(cd "$WORK" && "$OFE" -n 2 a1p_lin.ofe > /dev/null 2>&1 && cp ofe_transient.csv a1p_lin.csv) || { echo "  a1p_lin ($m) : the run failed -> NG" >&2; status=1; }
+	for k in bhl:"straight-line B-H curve" jal:"near-linear J-A"; do
+		sed "s/^mesh = .*/mesh = $m.msh/" "$WORK/a2nl_${k%%:*}.ofe" > "$WORK/a1p_nl.ofe"
+		(cd "$WORK" && "$OFE" -n 2 a1p_nl.ofe > /dev/null 2>&1) || { echo "  a1p_nl ($m) : the run failed -> NG" >&2; status=1; }
+		res=$(paste -d, "$WORK/a1p_lin.csv" "$WORK/ofe_transient.csv" | awk -F, -v nfp="$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")" '
+			NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
+			END { ok = "NG"; if ((n == 50) && (m < 1e-7) && (nfp + 0 >= 50) && (nfp + 0 <= 100)) ok = "OK"
+			      printf "%s (%d steps, max %.1e, %d fixed-point iterations)", ok, n, m + 0, nfp + 0 }')
+		echo "  $lab, ${k#*:} (order-1 sub-edge path) == linear mur = 50 (eddy3d.c) : I(t) : $res"
+		case "$res" in NG*) status=1 ;; esac
+	done
+	sed "s/^mesh = .*/mesh = $m.msh/" "$WORK/abh_qs.ofe" > "$WORK/a1p_bqs.ofe"
+	(cd "$WORK" && "$OFE" -n 2 a1p_bqs.ofe > /dev/null 2>&1) || { echo "  a1p_bqs ($m) : the run failed -> NG" >&2; status=1; }
+	a3_energy "$lab, B-H curve, quasi-static sine"
+	wfem=$(awk -F, 'NR == 33 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/ofe_transient.csv")
+	wref=$(awk -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=32 -v bh="100 0.5 1000 1.0 10000 1.2" -f "$SRC/ja_bar_loop.awk")
+	compare "$lab, B-H curve, quasi-static sine : 2nd-period sum of H dB == the same sum along H_y(z) (awk) [J]" "$wfem" "$wref" 5e-3
+	sed "s/^mesh = .*/mesh = $m.msh/" "$WORK/a2nl_jqs.ofe" > "$WORK/a1p_jqs.ofe"
+	(cd "$WORK" && "$OFE" -n 2 a1p_jqs.ofe > /dev/null 2>&1) || { echo "  a1p_jqs ($m) : the run failed -> NG" >&2; status=1; }
+	a3_energy "$lab, J-A, quasi-static sine (16 steps per period)"
+	wfem=$(awk -F, 'NR == 17 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/ofe_transient.csv")
+	wref=$(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=16 -f "$SRC/ja_bar_loop.awk")
+	compare "$lab, J-A, quasi-static hysteresis loss of the 2nd period == forward J-A along H_y(z) (awk) [J]" "$wfem" "$wref" 1e-2
+done
 
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。

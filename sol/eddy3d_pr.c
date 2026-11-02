@@ -83,7 +83,7 @@ static int pr_tpl(int r, int m, prtpl_t *t)
 
 static int pr_init(int r)
 {
-	if ((r < 2) || (r > PR_RMAX)) return 1;
+	if ((r < 1) || (r > PR_RMAX)) return 1;
 	if (TplR == r) return 0;
 	NtE = pr_tpl(r, 2, TplE);
 	NtF = pr_tpl(r, 3, TplF);
@@ -172,7 +172,7 @@ static int pr_hex_init(void)
 {
 	int ix[3];
 	const int p = hex_lattice(0, ix);
-	if (p < 2) return 1;
+	if (p < 1) return 1;
 	HXp = p;
 	HXnen = HexNen;
 	const int q = p + 1;
@@ -357,7 +357,7 @@ static int pr_prism_init(void)
 {
 	int al[4];
 	const int p = prism_lattice(0, al);
-	if (p < 2) return 1;
+	if (p < 1) return 1;
 	PXp = p;
 	PXnen = PrismNen;
 	PXnt = ((p + 1) * (p + 2)) / 2;
@@ -878,11 +878,30 @@ static void pr_close(void)
 }
 
 
+/*
+1 次の六面体・角柱 (と その混在) の格子で、過渡解析に非線形の材料 (J-A / B-H) があるとき。この経路の次数 1 の部分辺の
+Nedelec は 1 次の六面体・角柱の辺要素 (eddy3d.c) と同じ空間なので、積分点ごとの状態を持つ prnl_* の固定点反復をそのまま使う
+(eddy3d.c の ed_ja_* は要素内で ∇×W が一定の 1 次四面体だけ)。四面体を含む 1 次の格子は 1 点の積分では辺の質量行列が
+厳密でないので通さない (非線形の材料が四面体だけにあれば eddy3d.c で解ける)
+*/
+int pr_p1_nonlinear(void)
+{
+	if (!MeshMode || (TetOrder != 1) || (NTet > 0) || (NPyr > 0) || ((NHex + NPrism) < 1) || !TransientOn) return 0;
+	if ((NHex > 0) && (HexNen != 8)) return 0;
+	if ((NPrism > 0) && (PrismNen != 6)) return 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].ja.on || (Material[m].nbh[0] > 0)) return 1;
+	}
+	return 0;
+}
+
+
 // 実体と自由度の番号付け (A と E で共通)
 static int pr_number(FILE *fp_log, const char *what)
 {
+	const int pmin = (pr_p1_nonlinear() ? 1 : 2);
 	// 種別の混在した高次の格子 (四面体・六面体・角柱、同じ次数、完全 Lagrange)
-	if (MeshMode && (TetOrder >= 2) && (NPyr == 0) && ((((NTet > 0) + (NHex > 0) + (NPrism > 0)) >= 2))) {
+	if (MeshMode && (TetOrder >= pmin) && (NPyr == 0) && ((((NTet > 0) + (NHex > 0) + (NPrism > 0)) >= 2))) {
 		memset(&PR, 0, sizeof(PR));
 		const int p = TetOrder;
 		if ((p > 5) || pr_init(p) || ((NHex > 0) && pr_hex_init()) || ((NPrism > 0) && pr_prism_init())
@@ -914,7 +933,7 @@ static int pr_number(FILE *fp_log, const char *what)
 		return 0;
 	}
 	// 高次の六面体だけの格子 (完全 Lagrange) : A は部分辺の自由度
-	if (MeshMode && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (TetOrder >= 2)) {
+	if (MeshMode && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (TetOrder >= pmin)) {
 		memset(&PR, 0, sizeof(PR));
 		if (pr_hex_init()) {
 			fprintf(fp_log, "*** the %s needs hexahedra with the full Lagrange nodes (27 / 64 / 125 / 216, not the "
@@ -935,7 +954,7 @@ static int pr_number(FILE *fp_log, const char *what)
 		return 0;
 	}
 	// 高次の角柱だけの格子 (完全 Lagrange) : A は ζ 方向の部分辺と層ごとの三角形の AFW の関数
-	if (MeshMode && (NPrism > 0) && ((NTet + NHex + NPyr) == 0) && (TetOrder >= 2)) {
+	if (MeshMode && (NPrism > 0) && ((NTet + NHex + NPyr) == 0) && (TetOrder >= pmin)) {
 		memset(&PR, 0, sizeof(PR));
 		if (pr_prism_init() || pr_init(PXp)) {
 			fprintf(fp_log, "*** the %s needs prisms with the full Lagrange nodes (18 / 40 / 75 / 126, not the "

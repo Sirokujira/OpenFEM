@@ -72,6 +72,7 @@ int64_t crs_find_tri(const crs_t *, int32_t, int32_t);
 void crs_alloc_tri(crs_t *);
 void assemble_nu_tri(crs_t *, const double *);
 void assemble_newton_tri(crs_t *, const double *, double *);
+int pr_p1_nonlinear(void);
 void assemble_mass_tri(crs_t *);
 void assemble_mass_tri_sig(crs_t *, const double *);
 int eddy2d_heat_solve(FILE *, const double *, double, double *, double *, double *, int);

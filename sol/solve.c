@@ -1650,8 +1650,9 @@ static int solve_one(FILE *fp_log)
 		else if (TransientOn && MeshMode && (TetOrder == 2) && ((NHex + NPrism) == 0)) {
 			ierr |= solve_eddy3d_p2_transient(fp_log);
 		}
-		else if (TransientOn && MeshMode && (TetOrder >= 2)) {
-			// 3 次以上の四面体と、2 次以上の (完全 Lagrange の) 六面体・角柱
+		else if (TransientOn && MeshMode && ((TetOrder >= 2) || pr_p1_nonlinear())) {
+			// 3 次以上の四面体と、2 次以上の (完全 Lagrange の) 六面体・角柱。1 次の六面体・角柱の格子の非線形 (J-A / B-H) も
+			// 次数 1 の同じ経路 (積分点ごとの状態)
 			ierr |= solve_eddy3d_pr_transient(fp_log);
 		}
 		else if (TransientOn) {

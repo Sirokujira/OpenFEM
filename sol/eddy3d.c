@@ -1099,8 +1099,8 @@ static int ed_ja_open(ed_ja_t *J, FILE *fp_log)
 	for (int e = 0; e < nelem; e++) {
 		if (!ed_nonlin(edge_elem_mat(e))) continue;
 		if (edge_elem_kind(e) != MESHELEM_TET) {
-			fprintf(fp_log, "*** hysteresis (ja) / bh with analysis A + transient needs first-order tetrahedra "
-				"for the nonlinear material\n");
+			fprintf(fp_log, "*** hysteresis (ja) / bh with analysis A + transient on a first-order mesh needs tetrahedra "
+				"for the nonlinear material, or a mesh of hexahedra / prisms only (no tetrahedra)\n");
 			return 1;
 		}
 		nj++;
