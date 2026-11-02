@@ -772,6 +772,188 @@ void eddy3d_pr_heat_close(void)
 
 
 /*
+過渡解析 (analysis = A + transient、後退 Euler、電圧駆動、線形、3 次以上の四面体)。1 次・2 次と同じく
+χ = Δt φ を未知数にすると実対称・半正定値になる :
+
+	K = [S + T/Δt, C/Δt; Cᵀ/Δt, P/Δt],   M = K − [S, 0; 0, 0],   K x^{n+1} = M [A^n; 0]
+
+K を PR.Kr、M を PR.Ki に入れる (周波数領域と同じ非零パターン)。ポート 1 の電極の**全節点**を
+χ = Δt V(t^{n+1})、端子電流はその行の反作用 Kx − M[A^n; 0] (周波数領域と同じく φ は格子の節点そのもの)。
+*/
+static int pr_assemble_tr(FILE *fp_log, double dt)
+{
+	const int nt = PR.nt, nA = PR.nA, nP = PR.nP;
+	crs_zero(&PR.Kr);
+	crs_zero(&PR.Ki);
+	double *se = (double *)malloc((size_t)nA * nA * sizeof(double));
+	double *te = (double *)malloc((size_t)nA * nA * sizeof(double));
+	double *ce = (double *)malloc((size_t)nA * nP * sizeof(double));
+	double *pe = (double *)malloc((size_t)nP * nP * sizeof(double));
+	double (*wv)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+	double (*wc)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+	double (*nc)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+	int32_t *dof = (int32_t *)malloc(PR_NDMAX * sizeof(int32_t));
+	int bad = 0;
+	for (int e = 0; (e < nt) && !bad; e++) {
+		const int m = elem3d_mat(e);
+		double nu[6];
+		material_coef_pub(m, 3, nu);
+		pr_dofs(e, dof);
+		if (pr_element(e, nu, Material[m].sigma, se, te, ce, pe, wv, wc, nc)) { bad = 1; break; }
+		for (int k = 0; k < nA; k++) {
+			for (int l = 0; l < nA; l++) {
+				const int64_t p = pr_find(&PR.Kr, dof[k], dof[l]);
+				if (p < 0) continue;		// 分散した行列 (mpisolve = 2) の他の rank の行
+				const double t = te[(k * nA) + l] / dt;
+				PR.Kr.val[p] += se[(k * nA) + l] + t;
+				PR.Ki.val[p] += t;
+			}
+			for (int a = 0; a < nP; a++) {
+				const double v = ce[(k * nP) + a] / dt;
+				const int64_t p1 = pr_find(&PR.Kr, dof[k], dof[nA + a]);
+				const int64_t p2 = pr_find(&PR.Kr, dof[nA + a], dof[k]);
+				if (p1 >= 0) {
+					PR.Kr.val[p1] += v;
+					PR.Ki.val[p1] += v;
+				}
+				if (p2 >= 0) {
+					PR.Kr.val[p2] += v;
+					PR.Ki.val[p2] += v;
+				}
+			}
+		}
+		for (int a = 0; a < nP; a++) {
+			for (int b = 0; b < nP; b++) {
+				const int64_t p = pr_find(&PR.Kr, dof[nA + a], dof[nA + b]);
+				if (p < 0) continue;
+				PR.Kr.val[p] += pe[(a * nP) + b] / dt;
+				PR.Ki.val[p] += pe[(a * nP) + b] / dt;
+			}
+		}
+	}
+	free(se); free(te); free(ce); free(pe); free(wv); free(wc); free(nc); free(dof);
+	if (bad) {
+		fprintf(fp_log, "*** the high-order A-phi solver : a degenerate element\n");
+		return 1;
+	}
+	return 0;
+}
+
+
+// 刻みの終わり t の電圧の倍率 (waveform の折れ線の左極限、無ければ 1。1 次・2 次と同じ)
+static double pr_wave(double t)
+{
+	if (WaveN < 1) return 1;
+	int k = -1;
+	for (int m = 0; m < WaveN; m++) {
+		if (WaveT[m] < t) k = m;
+	}
+	if (k < 0) return WaveF[0];
+	if (k == (WaveN - 1)) return WaveF[k];
+	const double w = (t - WaveT[k]) / (WaveT[k + 1] - WaveT[k]);
+	return WaveF[k] + (w * (WaveF[k + 1] - WaveF[k]));
+}
+
+
+// 電極の節点 (ポート 1) : χ を固定して励振し、端子電流をその行から取る
+static int pr_port1_node(int i)
+{
+	return (PR.fix[PR.oV + i] && PR.cond[i] && PR.used[i] && (NodeConductor[i] == 1));
+}
+
+
+int solve_eddy3d_pr_transient(FILE *fp_log)
+{
+	int ierr = 0;
+	fprintf(fp_log, "\n=== 3D eddy current, transient (A-phi, order-%d Nedelec / nodal elements, backward Euler) ===\n", TetOrder);
+	if (NPort != 1) {
+		fprintf(fp_log, "*** analysis A + transient needs exactly one port\n");
+		return 1;
+	}
+	const double fsave = Freq;
+	if (Freq <= 0) Freq = 1;		// pr_open の検査を通すだけ (過渡解析は ω を使わない)
+	const int oe = pr_open(fp_log);
+	Freq = fsave;
+	if (oe) return 1;
+	const int n = PR.n, nn = PR.nn, oV = PR.oV;
+	const double dt = TransientTime / TransientSteps;
+	fprintf(fp_log, "  t_end = %.6e [s], %d steps (dt = %.6e [s]), voltage = %.6e [V]%s\n",
+		TransientTime, TransientSteps, dt, Volt, ((WaveN > 0) ? " x waveform" : " (step)"));
+	if (pr_assemble_tr(fp_log, dt)) {
+		pr_close();
+		return 1;
+	}
+	const crs_t *K = &PR.Kr, *M = &PR.Ki;
+	const unsigned char *fix = PR.fix;
+	double *x = (double *)calloc((size_t)n, sizeof(double));
+	double *xo = (double *)calloc((size_t)n, sizeof(double));
+	double *xd = (double *)calloc((size_t)n, sizeof(double));
+	double *rhs = (double *)malloc((size_t)n * sizeof(double));
+	double *b = (double *)malloc((size_t)n * sizeof(double));
+	double *w1 = (double *)malloc((size_t)n * sizeof(double));
+	double *u = (double *)calloc((size_t)n, sizeof(double));
+	double *z = (double *)malloc((size_t)n * sizeof(double));
+	FILE *fcsv = mpi_fopen_out("ofe_transient.csv", "w");
+	if (fcsv) fprintf(fcsv, "t [s],V [V],I [A],W_in [J],W_mag [J],W_joule [J],iter\n");
+	double win = 0, wmag = 0, wjou = 0;
+	long itotal = 0;
+	fprintf(fp_log, "  %6s %13s %13s %13s %6s\n", "step", "t [s]", "V [V]", "I [A]", "iter");
+	for (int st = 1; st <= TransientSteps; st++) {
+		const double t = st * dt;
+		const double v = Volt * pr_wave(t);
+		// A の自由度 (φ の欄より前) だけを残した [A^n; 0]
+		for (int i = 0; i < n; i++) xo[i] = ((i < oV) ? x[i] : 0);
+		crs_spmv(M, xo, rhs, NULL);
+		for (int i = 0; i < n; i++) xd[i] = 0;
+		for (int i = 0; i < nn; i++) {
+			if (pr_port1_node(i)) xd[oV + i] = dt * v;
+		}
+		crs_spmv(K, xd, w1, NULL);
+		for (int i = 0; i < n; i++) {
+			b[i] = (fix[i] ? 0 : (rhs[i] - w1[i]));
+			u[i] = (fix[i] ? 0 : x[i]);
+		}
+		const int it = solver_cg(K, b, u, fix, Solver.maxiter, Solver.nout, Solver.converg, NULL, "a3tr");
+		if (it < 0) {
+			fprintf(fp_log, "*** linear solver did not converge (step %d)\n", st);
+			ierr = 1;
+			break;
+		}
+		itotal += it;
+		for (int i = 0; i < n; i++) x[i] = u[i] + xd[i];
+		crs_spmv(K, x, w1, NULL);
+		double cur = 0;
+		for (int i = 0; i < nn; i++) {
+			if (pr_port1_node(i)) cur += w1[oV + i] - rhs[oV + i];
+		}
+		// 仕事 : 端子 V I Δt、Joule zᵀ M z、磁気 (ΔA)ᵀ S A^{n+1} = zᵀ (K − M) x の A の部分
+		for (int i = 0; i < n; i++) z[i] = x[i] - xo[i];
+		double zmz = 0, zkx = 0, zmx = 0;
+		crs_spmv(M, z, w1, NULL);
+		for (int i = 0; i < n; i++) zmz += z[i] * w1[i];
+		crs_spmv(M, x, w1, NULL);
+		for (int i = 0; i < oV; i++) zmx += z[i] * w1[i];
+		crs_spmv(K, x, w1, NULL);
+		for (int i = 0; i < oV; i++) zkx += z[i] * w1[i];
+		win += v * cur * dt;
+		wjou += zmz;
+		wmag += zkx - zmx;
+		if (fcsv) fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%.8e,%d\n", t, v, cur, win, wmag, wjou, it);
+		if ((st == TransientSteps) || ((st % ((TransientSteps >= 20) ? (TransientSteps / 20) : 1)) == 0)) {
+			fprintf(fp_log, "  %6d %13.6e %13.6e %13.6e %6d\n", st, t, v, cur, it);
+		}
+	}
+	if (fcsv) fclose(fcsv);
+	if (!ierr) fprintf(fp_log, "  CG iterations = %ld (%d steps)\n", itotal, TransientSteps);
+	fprintf(fp_log, "  energy : terminals = %.12e, magnetic work = %.12e, joule = %.12e [J] "
+		"(terminals - magnetic - joule = %.3e)\n", win, wmag, wjou, win - wmag - wjou);
+	free(x); free(xo); free(xd); free(rhs); free(b); free(w1); free(u); free(z);
+	pr_close();
+	return ierr;
+}
+
+
+/*
 辺要素の自己検証の高次版 (analysis = E、次数 r の四面体)。次数 r の Nedelec 空間 (第 1 種) は
 P_{r−1}³ ⊕ r × P̃_{r−1}³ (P̃ は同次式) なので、そこに入る場を σ で重みをつけた L2 射影すると誤差が 0 になり、
 回転のエネルギーも厳密に合う:

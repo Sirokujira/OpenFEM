@@ -228,7 +228,7 @@ static int setup_unstruct(void)
 		}
 	}
 	// 3 次以上の四面体 (20 / 35 / 56 / 84 / 120 節点) の A / E は次数 r の Nedelec 要素 (eddy3d_pr.c) で解く。
-	// 対応するのは周波数領域の線形材料・ゲージなし・反復解法・単体の四面体格子だけ
+	// 対応するのは線形材料 (周波数領域・過渡解析・交流の発熱)・ゲージなし・反復解法・単体の四面体格子だけ
 	else if ((TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
 		int nl = 0;
 		for (int m = 0; m < NMaterial; m++) {
@@ -236,7 +236,6 @@ static int setup_unstruct(void)
 		}
 		const char *why = NULL;
 		if (nl) why = "linear materials (no bh / ja)";
-		else if (TransientOn && !ThermalOn) why = "the frequency domain and thermal (no A transient)";
 		else if (GaugeTree || Direct) why = "gauge = 0 and the iterative solver";
 		else if (Hdf5Out) why = "no hdf5 series";
 		if (why != NULL) {

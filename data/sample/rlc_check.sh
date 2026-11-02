@@ -1485,13 +1485,14 @@ else
 				status=1
 			fi
 		done
-		# 2 次 (eddy3d_p2.c) と 3 次 (eddy3d_pr.c) の A、1 次の A の線形の過渡解析 (K と M を分散、ofe_transient.csv も一致)
+		# 2 次 (eddy3d_p2.c) と 3 次 (eddy3d_pr.c) の A、1 次と 3 次の A の線形の過渡解析 (K と M を分散、ofe_transient.csv も一致)
 		cp "$SRC/bar_tet2.msh" "$SRC/bar_ho3.msh" "$WORK/"
 		for m in bar_tet2 bar_ho3; do
 			grep -v '^#' "$WORK/bar_eddy.ofe" | awk -v m="$m.msh" '/^mesh/{print "mesh = " m; next} /^analysis/{print "mpisolve = 2"} {print}' > "$WORK/mu_$m.ofe"
 		done
 		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "mpisolve = 2"; print "transient = 2e-4 8"} {print}' > "$WORK/mu_tr.ofe"
-		for c in bar_tet2 bar_ho3 tr; do
+		awk '/^mesh/{print "mesh = bar_ho3.msh"; next} {print}' "$WORK/mu_tr.ofe" > "$WORK/mu_tr3.ofe"
+		for c in bar_tet2 bar_ho3 tr tr3; do
 			rm -f "$WORK/ofe.out" "$WORK/ofe_transient.csv" "$WORK/mu_ref.csv"
 			(cd "$WORK" && "$OFE" -n 2 "mu_$c.ofe" > /dev/null 2>&1) || { echo "  mpisolve = 2 $c : the serial run failed -> NG" >&2; status=1; }
 			cp "$WORK/ofe.out" "$WORK/mu_ref.out" 2> /dev/null || true
@@ -5987,8 +5988,6 @@ grep -q "needs straight-sided elements" "$WORK/ofe.log" || { echo "  *** it was 
 grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho3.msh"; next} {print}' > "$WORK/prbase.ofe"
 awk '/^analysis/{print "gauge = 1"} {print}' "$WORK/prbase.ofe" > "$WORK/prx_g.ofe"
 th_reject "order-3 A with gauge = 1" prx_g.ofe "supports gauge = 0 and the iterative solver only"
-awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 5"} {print}' "$WORK/prbase.ofe" > "$WORK/prx_tr.ofe"
-th_reject "order-3 A transient" prx_tr.ofe "supports the frequency domain and thermal (no A transient)"
 awk '/^region = 1 2/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "bh = 2 10000 1.2"; print "current = 1"; next} {print}' "$WORK/prbase.ofe" > "$WORK/prx_bh.ofe"
 th_reject "order-3 A with a B-H curve" prx_bh.ofe "supports linear materials"
 
@@ -6080,6 +6079,45 @@ res=$(awk -v gr="$yre" -v gi="$yim" -v a1="$br16" -v b1="$bi16" -v a2="$br32" -v
 	printf "%s (16 steps %.2e, 32 steps %.2e, ratio %.2f; Richardson %.2e)", ok, e1, e2, q, er }')
 echo "  order 2, sine at 10 kHz : steady state -> frequency-domain Y (backward Euler, first order) : $res"
 case "$res" in NG*) status=1 ;; esac
+# (f) 3 次の四面体 (bar_ho3.msh) : 次数 r の Nedelec の過渡解析 (eddy3d_pr.c の solve_eddy3d_pr_transient)。
+#     (e) と同じ 3 つの検査。電極の**全節点**を χ = Δt V にして端子電流もその行から取る (頂点だけだと
+#     DC の極限が崩れる)。10 kHz の正弦波は空間の誤差が時間の誤差よりずっと小さいので 2 次と同じ数字になる
+#     (実測 6.3e-2 -> 3.3e-2、比 1.93、Richardson 3.5e-3)。一時的に 2 次の格子をこの経路に通すと
+#     eddy3d_p2.c の I(t) と ofe_transient.csv の桁 (1.5e-10) で一致した (同じ空間)。変異: 右辺を引き忘れる・
+#     M の T/Δt や φ の行の結合を落とす・χ = V (Δt を掛け忘れ) は DC の極限で、電圧を刻みの始めで取る誤りは
+#     正弦波でだけ落ちる (2 次・1 次と同じ)
+cp "$SRC/bar_ho3.msh" "$WORK/"
+awk '/^mesh/{print "mesh = bar_ho3.msh"; next} {print}' "$WORK/a3t2_base.ofe" > "$WORK/a3t3_base.ofe"
+awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 50"} {print}' "$WORK/a3t3_base.ofe" > "$WORK/a3t3_step.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3t3_step.ofe > /dev/null 2>&1) || { echo "  a3t3_step : the run failed -> NG" >&2; status=1; }
+a3_energy "order 3, voltage step"
+compare "order 3, voltage step held : I(t_end) == G_dc V [A]" "$(awk -F, 'NR > 1 { i = $3 } END { print i }' "$WORK/ofe_transient.csv")" 7250 1e-9
+awk '/^frequency/{print "frequency = 1e4"; next} {print}' "$WORK/a3t3_base.ofe" > "$WORK/a3t3_fd.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3t3_fd.ofe > /dev/null 2>&1) || { echo "  a3t3_fd : the run failed -> NG" >&2; status=1; }
+set -- $(awk '/port 1 : I =/ { print $6, $7; exit }' "$WORK/ofe.log")
+yre=$1; yim=$2
+for N in 16 32; do
+	awk -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4; T = 1 / f; s = "waveform ="
+		for (k = 0; k <= 2 * N; k++) { t = k * T / N; s = s sprintf(" %.12e %.15g", t, sin(2 * pi * f * t)) } print s }' > "$WORK/a3t3_wf.txt"
+	awk -v wf="$WORK/a3t3_wf.txt" -v ns=$((2 * N)) '/^frequency/{next}
+		/^analysis/{ while ((getline l < wf) > 0) print l; print "transient = 2e-4 " ns } {print}' "$WORK/a3t3_base.ofe" > "$WORK/a3t3_sin.ofe"
+	(cd "$WORK" && "$OFE" -n 2 a3t3_sin.ofe > /dev/null 2>&1) || { echo "  a3t3_sin ($N) : the run failed -> NG" >&2; status=1; }
+	[ "$N" = 32 ] && a3_energy "order 3, sine, 32 steps per period"
+	set -- $(awk -F, -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4 } NR > 1 { k = NR - 1
+		if (k > N) { a += $3 * sin(2 * pi * f * $1); b += $3 * cos(2 * pi * f * $1) } } END { printf "%.12e %.12e", 2 * a / N, 2 * b / N }' "$WORK/ofe_transient.csv")
+	eval "cr$N=\$1; ci$N=\$2"
+done
+res=$(awk -v gr="$yre" -v gi="$yim" -v a1="$cr16" -v b1="$ci16" -v a2="$cr32" -v b2="$ci32" 'BEGIN {
+	y = sqrt(gr * gr + gi * gi)
+	e1 = sqrt((a1 - gr) ^ 2 + (b1 - gi) ^ 2) / y; e2 = sqrt((a2 - gr) ^ 2 + (b2 - gi) ^ 2) / y
+	ra = 2 * a2 - a1; rb = 2 * b2 - b1; er = sqrt((ra - gr) ^ 2 + (rb - gi) ^ 2) / y
+	q = (e2 > 0) ? e1 / e2 : 0; ok = "NG"; if ((q >= 1.7) && (q <= 2.3) && (er <= 1e-2)) ok = "OK"
+	printf "%s (16 steps %.2e, 32 steps %.2e, ratio %.2f; Richardson %.2e)", ok, e1, e2, q, er }')
+echo "  order 3, sine at 10 kHz : steady state -> frequency-domain Y (backward Euler, first order) : $res"
+case "$res" in NG*) status=1 ;; esac
+# 3 次の過渡解析は線形材料だけ (B-H / J-A は入力エラー)
+awk '/^region = 1 2/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "bh = 2 10000 1.2"; next} {print}' "$WORK/a3t3_step.ofe" > "$WORK/a3t3x_bh.ofe"
+th_reject "order-3 A transient with a B-H curve" a3t3x_bh.ofe "supports linear materials"
 
 # ---- 3 次元渦電流 + ヒステリシスの過渡解析 (analysis = A + transient + ja、ベクトル J-A、四面体) ----
 #

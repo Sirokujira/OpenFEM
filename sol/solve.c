@@ -1648,6 +1648,9 @@ static int solve_one(FILE *fp_log)
 		else if (TransientOn && MeshMode && (TetOrder == 2)) {
 			ierr |= solve_eddy3d_p2_transient(fp_log);
 		}
+		else if (TransientOn && MeshMode && (TetOrder >= 3)) {
+			ierr |= solve_eddy3d_pr_transient(fp_log);
+		}
 		else if (TransientOn) {
 			ierr |= solve_eddy3d_transient(fp_log);
 		}
