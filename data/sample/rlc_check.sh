@@ -6078,7 +6078,7 @@ echo "  order 3, nonlinear conductor (10 Hz, 0.5 A) : R, L == 1-D reference, clo
 case "$res" in NG*) status=1 ;; esac
 cp "$SRC/box_p3.msh" "$WORK/"
 awk '/^analysis/{print "bh = 2 100 0.5"} {print}' "$WORK/edge_test.ofe" | sed 's/^mesh = .*/mesh = box_p3.msh/' > "$WORK/prx_ebh.ofe"
-th_reject "order-3 edge self test (E) with a bh material" prx_ebh.ofe "supports linear materials with thermal or analysis E"
+th_reject "order-3 edge self test (E) with a bh material" prx_ebh.ofe "supports linear materials with analysis E"
 
 # ---- 3 次元渦電流の過渡解析 (analysis = A + transient、後退 Euler、電圧駆動) ----
 #
