@@ -4676,8 +4676,7 @@ compare "order-3 tets, AC, alpha = 0 : R == the uncoupled order-3 A [ohm]" "$ra0
 # (4) 弾くべき入力
 awk '/^frequency/{print "frequencysweep = 1e4 1e5"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_sw.ofe"
 th_reject "AC heating with frequencysweep" tacx_sw.ofe "cannot be combined with frequencysweep"
-awk '/^kthermal/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_bh.ofe"
-th_reject "AC heating with a nonlinear (bh) material" tacx_bh.ofe "linear materials only"
+# (非線形 (B-H) の磁性体は 1 次の辺要素なら解く : 下の (5)。2 次 / 3 次以上の辺要素と F は弾く)
 awk '/^analysis/{print "analysis = A"; print "frequency = 1e3"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/tacx_grid.ofe"
 th_reject "AC heating on the structured grid" tacx_grid.ofe "requires an unstructured mesh"
 # (5) 六面体・角柱 (辺要素の種別に依らない損失 ½ eᴴ T_e e)。awall の四角形面が要る
