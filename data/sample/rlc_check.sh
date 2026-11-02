@@ -5988,8 +5988,30 @@ grep -q "needs straight-sided elements" "$WORK/ofe.log" || { echo "  *** it was 
 grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho3.msh"; next} {print}' > "$WORK/prbase.ofe"
 awk '/^analysis/{print "gauge = 1"} {print}' "$WORK/prbase.ofe" > "$WORK/prx_g.ofe"
 th_reject "order-3 A with gauge = 1" prx_g.ofe "supports gauge = 0 and the iterative solver only"
-awk '/^region = 1 2/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "bh = 2 10000 1.2"; print "current = 1"; next} {print}' "$WORK/prbase.ofe" > "$WORK/prx_bh.ofe"
-th_reject "order-3 A with a B-H curve" prx_bh.ofe "supports linear materials"
+# (j) B-H 曲線 (周波数領域の実効磁気抵抗率法、ν は積分点ごと、2 次の (h) と同じ更新と Anderson 加速)。CI の時間のため
+#     gmsh が幾何から h = 0.5 mm で切った粗い格子 (bar_air_ho3c.msh と同じ頂点の 2 次 bar_air_ho2c.msh) で見る:
+#     ・層が非線形 (250 A、H が一様) : 自己無撞着な閉形式に 1e-7 (実測 1.4e-9 / 5.3e-9。層の A は 1 次なので空間に入る)
+#     ・導体が非線形 (10 Hz、0.5 A、B が厚さ方向に変わる) : 独立な 1 次元の参照解 (bar_cond_bh.awk) に R 1e-3・L 5e-3、
+#       同じ頂点の 2 次 (eddy3d_p2.c) より誤差が小さく、**同じ側から**近づく (実測 3 次 R −3.4e-4 / L −2.0e-3、2 次
+#       −4.2e-4 / −2.7e-3。h = 0.25 mm の 3 次 −1.8e-4 / −9.1e-4・2 次 −3.8e-4 / −2.1e-3 と bar_air_p2 −6.5e-5 / −3.6e-4 もすべて下から)。
+#       **B の虚部を落とす誤りは R +2.1e-4 / L +2.2e-3 と参照解の反対側に出るので向きでだけ落ちる** (大きさは許容に入る)。
+#       ν を要素の 1 点で代表させる誤りは非線形の反復が発散する (層の検査はどちらも素通りする)
+cp "$SRC/bar_air_ho3c.msh" "$SRC/bar_air_ho2c.msh" "$WORK/"
+grep -v '^#' "$WORK/bar_air_bh.ofe" | sed -e 's/^mesh = .*/mesh = bar_air_ho3c.msh/' -e "s/^current = .*/current = 250/" > "$WORK/prbh.ofe"
+set -- $(p2_rl prbh.ofe) $(awk -v f=1e2 -v mode=nl -v I=250 -f "$SRC/bar_layer.awk")
+compare "order 3, nonlinear layer, I = 250 A : R == self-consistent closed form [ohm]" "$1" "$3" 1e-7
+compare "order 3, nonlinear layer, I = 250 A : L == self-consistent closed form [H]" "$2" "$4" 1e-7
+set -- $(p2bhc bar_air_ho3c.msh) $(p2bhc bar_air_ho2c.msh) $(awk -v f=10 -v I=0.5 -v n=4000 -f "$SRC/bar_cond_bh.awk")
+res=$(awk -v r3="$1" -v l3="$2" -v r2="$3" -v l2="$4" -v re="$5" -v le="$6" 'function ab(x) { return (x < 0) ? -x : x }
+	BEGIN { if ((r3 == "x") || (r2 == "x")) { print "NG (a run failed)"; exit }
+	e3 = r3 / re - 1; f3 = l3 / le - 1; e2 = r2 / re - 1; f2 = l2 / le - 1
+	ok = (ab(e3) <= 1e-3) && (ab(f3) <= 5e-3) && (ab(e3) < ab(e2)) && (ab(f3) < ab(f2)) && (e3 * e2 > 0) && (f3 * f2 > 0)
+	printf "%s (order 3 : R %+.2e, L %+.2e; order 2 : R %+.2e, L %+.2e)", ok ? "OK" : "NG", e3, f3, e2, f2 }')
+echo "  order 3, nonlinear conductor (10 Hz, 0.5 A) : R, L == 1-D reference, closer than order 2 from the same side : $res"
+case "$res" in NG*) status=1 ;; esac
+cp "$SRC/box_p3.msh" "$WORK/"
+awk '/^analysis/{print "bh = 2 100 0.5"} {print}' "$WORK/edge_test.ofe" | sed 's/^mesh = .*/mesh = box_p3.msh/' > "$WORK/prx_ebh.ofe"
+th_reject "order-3 edge self test (E) with a bh material" prx_ebh.ofe "supports linear materials (bh : the frequency-domain A only"
 
 # ---- 3 次元渦電流の過渡解析 (analysis = A + transient、後退 Euler、電圧駆動) ----
 #

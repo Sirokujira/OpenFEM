@@ -8,6 +8,7 @@
 # 4 番目の引数 air で bar_air.ofe と同じ空気層 (z = t .. t + 0.5 mm、体積 2) を載せる (電極は導体の断面だけ、
 # awall は z = 0 / z = t + g と導体・空気の両方の x 面) :
 #   python gmsh_bar_ho.py bar_air_ho3.msh 3 0.25e-3 air
+#   python gmsh_bar_ho.py bar_air_ho3c.msh 3 0.5e-3 air   (粗い格子 : 3 次の B-H の検査、同じ頂点の 2 次は bar_air_ho2c.msh)
 import gmsh, sys
 dst, order, h = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 air = (len(sys.argv) > 4) and (sys.argv[4] == "air")

@@ -230,12 +230,14 @@ static int setup_unstruct(void)
 	// 3 次以上の四面体 (20 / 35 / 56 / 84 / 120 節点) の A / E は次数 r の Nedelec 要素 (eddy3d_pr.c) で解く。
 	// 対応するのは線形材料 (周波数領域・過渡解析・交流の発熱)・ゲージなし・反復解法・単体の四面体格子だけ
 	else if ((TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+		// B-H 曲線は A の周波数領域 (実効磁気抵抗率法) だけ。J-A・交流の発熱・過渡解析・E は線形のみ
 		int nl = 0;
 		for (int m = 0; m < NMaterial; m++) {
-			if (Material[m].ja.on || (Material[m].nbh[0] > 0)) nl = 1;
+			if (Material[m].ja.on) nl = 1;
+			if ((Material[m].nbh[0] > 0) && (ThermalOn || TransientOn || (Analysis & ANALYSIS_E))) nl = 1;
 		}
 		const char *why = NULL;
-		if (nl) why = "linear materials (no bh / ja)";
+		if (nl) why = "linear materials (bh : the frequency-domain A only, no ja)";
 		else if (GaugeTree || Direct) why = "gauge = 0 and the iterative solver";
 		else if (Hdf5Out) why = "no hdf5 series";
 		if (why != NULL) {

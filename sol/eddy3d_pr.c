@@ -134,7 +134,11 @@ static struct {
 	unsigned char *fix, *cond, *used;
 	double *xdr, *xdi, *br, *bi, *ur, *ui, *w1, *w2;
 	double omega;
+	double *nuq;		// 非線形 (B-H) の積分点ごとの ν [nt * nq] (NULL なら材料の ν)
+	int nq;
 } PR;
+
+#define PR_AAM (5)		// 非線形の Anderson 加速の深さ (2 次の P2_AAM と同じ)
 
 
 // 要素の自由度の全体番号 (A : 辺・面・内部、φ : 要素の節点)。戻り値は個数
@@ -345,8 +349,9 @@ static int pr_number(FILE *fp_log, const char *what)
 
 
 // 要素の行列 (A-A の回転 se・質量 te、A-φ の結合 ce、φ-φ の pe)。sig は要素の σ
-static int pr_element(int e, const double nu[6], double sig, double *se, double *te, double *ce, double *pe,
-	double (*wv)[3], double (*wc)[3], double (*nc)[3])
+// nuq が NULL でなければ積分点 q の ν を等方性の nuq[q] にする (B-H の実効磁気抵抗率法)
+static int pr_element(int e, const double nu0[6], const double *nuq, double sig, double *se, double *te, double *ce,
+	double *pe, double (*wv)[3], double (*wc)[3], double (*nc)[3])
 {
 	const int nA = PR.nA, nP = PR.nP;
 	memset(se, 0, (size_t)nA * nA * sizeof(double));
@@ -358,6 +363,12 @@ static int pr_element(int e, const double nu[6], double sig, double *se, double 
 		double nv[ELEM_NMAX], g[ELEM_NMAX][3], w;
 		if (elem3d_ip(e, q, nv, g, &w)) return 1;
 		pr_basis_core(e, nv, g, wv, wc);
+		double nu[6];
+		for (int c = 0; c < 6; c++) nu[c] = nu0[c];
+		if (nuq != NULL) {
+			nu[0] = nu[1] = nu[2] = nuq[q];
+			nu[3] = nu[4] = nu[5] = 0;
+		}
 		for (int k = 0; k < nA; k++) nu_mul(nu, wc[k], nc[k]);
 		for (int k = 0; k < nA; k++) {
 			for (int l = k; l < nA; l++) {
@@ -485,7 +496,8 @@ static int pr_assemble(FILE *fp_log, const double *sigelem)
 		material_coef_pub(m, 3, nu);
 		const double sig = ((sigelem != NULL) ? sigelem[e] : Material[m].sigma);		// 熱連成なら σ(T)
 		pr_dofs(e, dof);
-		if (pr_element(e, nu, sig, se, te, ce, pe, wv, wc, nc)) { bad = 1; break; }
+		const double *nuq = (((PR.nuq != NULL) && (Material[m].nbh[0] > 0)) ? &PR.nuq[(int64_t)e * PR.nq] : NULL);
+		if (pr_element(e, nu, nuq, sig, se, te, ce, pe, wv, wc, nc)) { bad = 1; break; }
 		for (int k = 0; k < nA; k++) {
 			for (int l = 0; l < nA; l++) {
 				// 行列を分散したとき (mpisolve = 2) は他の rank の行が空で -1 になるので飛ばす
@@ -632,25 +644,130 @@ int solve_eddy3d_pr(FILE *fp_log)
 	fprintf(fp_log, "\n=== 3D eddy current (A-phi, order-%d Nedelec / nodal elements) ===\n", TetOrder);
 	if (pr_open(fp_log)) return 1;
 	const double omega = PR.omega;
+	const int nt = PR.nt;
+
+	// 非線形 (B-H) の材料があれば実効磁気抵抗率法 (2 次の eddy3d_p2.c と同じ): ν を波高値 |B| で
+	// **積分点ごとに**評価し、H を独立変数にした更新 ν = |H|/B(|H|) に ln ν の Anderson 加速を掛ける。
+	// 単一ポート・電流振幅 current (入力段で検査済み)
+	int nlf = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh[0] > 0) nlf = 1;
+	}
+	const int nq = elem3d_nip(0);
+	const int64_t nqt = (int64_t)nt * nq;
+	double *nuq = NULL, *aay = NULL, *aaf = NULL, *aayp = NULL, *aafp = NULL, *aady = NULL, *aadf = NULL;
+	int aan = 0;
+	if (nlf) {
+		nuq  = (double *)malloc((size_t)nqt * sizeof(double));
+		aay  = (double *)malloc((size_t)nqt * sizeof(double));
+		aaf  = (double *)malloc((size_t)nqt * sizeof(double));
+		aayp = (double *)malloc((size_t)nqt * sizeof(double));
+		aafp = (double *)malloc((size_t)nqt * sizeof(double));
+		aady = (double *)malloc((size_t)nqt * PR_AAM * sizeof(double));
+		aadf = (double *)malloc((size_t)nqt * PR_AAM * sizeof(double));
+		for (int e = 0; e < nt; e++) {
+			const material_t *mt = &Material[elem3d_mat(e)];
+			for (int q = 0; q < nq; q++) nuq[((int64_t)e * nq) + q] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0) : 0);
+		}
+		PR.nuq = nuq;
+		PR.nq = nq;
+		fprintf(fp_log, "  nonlinear (B-H) : effective reluctivity at %d points per element, current amplitude "
+			"%.6e [A], maxiter = %d, tol = %.1e, relax = %.2f\n", nq, Curr, NlMaxiter, NlTol, NlRelax);
+	}
 	ierr = pr_assemble(fp_log, NULL);
 	double *yr = (double *)calloc((size_t)np * np, sizeof(double));
 	double *yi = (double *)calloc((size_t)np * np, sizeof(double));
-	if (!ierr) fprintf(fp_log, "  %-10s %8s %13s\n", "excite", "iter", "residual");
-	for (int jc = 1; (jc <= np) && !ierr; jc++) {
-		char label[64];
-		sprintf(label, "port%d", jc);
-		double qr[MAXPORT], qi[MAXPORT];
-		if (pr_solve_port(fp_log, jc, fp_log, label, qr, qi)) {
+	double (*wv)[3] = (double (*)[3])malloc((size_t)PR.nA * 3 * sizeof(double));
+	double (*wc)[3] = (double (*)[3])malloc((size_t)PR.nA * 3 * sizeof(double));
+	int32_t *dof = (int32_t *)malloc(PR_NDMAX * sizeof(int32_t));
+	int final = !nlf;
+	for (int nlit = 1; !ierr; nlit++) {
+		if (nlit > 1) ierr = pr_assemble(fp_log, NULL);
+		if (final && !ierr) fprintf(fp_log, "  %-10s %8s %13s\n", "excite", "iter", "residual");
+		for (int jc = 1; (jc <= np) && !ierr; jc++) {
+			char label[64];
+			sprintf(label, "port%d", jc);
+			double qr[MAXPORT], qi[MAXPORT];
+			if (pr_solve_port(fp_log, jc, (final ? fp_log : NULL), label, qr, qi)) {
+				ierr = 1;
+				break;
+			}
+			for (int kc = 1; kc <= np; kc++) {
+				yr[((kc - 1) * np) + (jc - 1)] = qr[kc] / Volt;
+				yi[((kc - 1) * np) + (jc - 1)] = qi[kc] / Volt;
+			}
+			if (final) fprintf(fp_log, "  port %d : I = %.6e %+.6e j [A] (V = %.6e [V])\n", jc, qr[jc], qi[jc], Volt);
+			// 非線形 : 端子電流が current になるよう解を s = Curr / I 倍する (Y は倍率に依らない)
+			if (nlf) {
+				const double ivr = qr[1], ivi = qi[1];
+				const double den = (ivr * ivr) + (ivi * ivi);
+				const double svr = Curr * ivr / den, svi = -Curr * ivi / den;
+				for (int i = 0; i < PR.n; i++) {
+					const double xr = PR.ur[i], xi = PR.ui[i];
+					PR.ur[i] = (svr * xr) - (svi * xi);
+					PR.ui[i] = (svr * xi) + (svi * xr);
+				}
+			}
+			if (FieldOut && (jc == 1) && final) pr_fields();
+		}
+		if (final || ierr) break;
+
+		// ν の更新 (H を独立変数にする) と Anderson 加速 (ln ν)。B は組み立てと同じ積分点で
+		double dmax = 0;
+		for (int e = 0; e < nt; e++) {
+			const material_t *mt = &Material[elem3d_mat(e)];
+			const int64_t o = (int64_t)e * nq;
+			if (mt->nbh[0] <= 0) {
+				for (int q = 0; q < nq; q++) aay[o + q] = aaf[o + q] = 0;
+				continue;
+			}
+			pr_dofs(e, dof);
+			for (int q = 0; q < nq; q++) {
+				double nv[ELEM_NMAX], g[ELEM_NMAX][3], w;
+				double bre[3] = {0, 0, 0}, bim[3] = {0, 0, 0};
+				if (!elem3d_ip(e, q, nv, g, &w)) {
+					pr_basis_core(e, nv, g, wv, wc);
+					for (int k = 0; k < PR.nA; k++) {
+						const double ar = PR.ur[dof[k]], ai = PR.ui[dof[k]];
+						for (int c = 0; c < 3; c++) {
+							bre[c] += ar * wc[k][c];
+							bim[c] += ai * wc[k][c];
+						}
+					}
+				}
+				const double b2 = dot3(bre, bre) + dot3(bim, bim);
+				const double hm = nuq[o + q] * sqrt(b2);
+				const double nun = ((hm > 0) ? (hm / bh_b_of_h(mt, 0, hm)) : bh_nu(mt, 0, 0));
+				const double dn = fabs(nun - nuq[o + q]) / nun;
+				if (dn > dmax) dmax = dn;
+				aay[o + q] = log(nuq[o + q]);
+				aaf[o + q] = log(nun) - aay[o + q];
+			}
+		}
+		anderson_step(nqt, aay, aaf, aayp, aafp, aady, aadf, PR_AAM, &aan, NlRelax);
+		for (int e = 0; e < nt; e++) {
+			if (Material[elem3d_mat(e)].nbh[0] <= 0) continue;
+			for (int q = 0; q < nq; q++) nuq[((int64_t)e * nq) + q] = exp(aay[((int64_t)e * nq) + q]);
+		}
+		{
+			const double y2 = (yr[0] * yr[0]) + (yi[0] * yi[0]);
+			fprintf(fp_log, "  nl-it %4d : R = %.9e, L = %.9e, max dnu/nu = %.3e\n", nlit,
+				yr[0] / y2, (-yi[0] / y2) / omega, dmax);
+			fflush(fp_log);
+		}
+		if (dmax < NlTol) {
+			final = 1;
+		}
+		else if (nlit >= NlMaxiter) {
+			fprintf(fp_log, "*** nonlinear (B-H) eddy current : the effective reluctivity did not "
+				"converge in %d iterations (max dnu/nu = %.3e)\n", NlMaxiter, dmax);
 			ierr = 1;
-			break;
 		}
-		for (int kc = 1; kc <= np; kc++) {
-			yr[((kc - 1) * np) + (jc - 1)] = qr[kc] / Volt;
-			yi[((kc - 1) * np) + (jc - 1)] = qi[kc] / Volt;
-		}
-		fprintf(fp_log, "  port %d : I = %.6e %+.6e j [A] (V = %.6e [V])\n", jc, qr[jc], qi[jc], Volt);
-		if (FieldOut && (jc == 1)) pr_fields();
 	}
+	if (nlf && !ierr) fprintf(fp_log, "  nonlinear (B-H) : converged\n");
+	free(nuq); free(aay); free(aaf); free(aayp); free(aafp); free(aady); free(aadf);
+	free(wv); free(wc); free(dof);
+	PR.nuq = NULL;
 	if (!ierr) {
 		double *zr = (double *)malloc((size_t)np * np * sizeof(double));
 		double *zi = (double *)malloc((size_t)np * np * sizeof(double));
@@ -799,7 +916,7 @@ static int pr_assemble_tr(FILE *fp_log, double dt)
 		double nu[6];
 		material_coef_pub(m, 3, nu);
 		pr_dofs(e, dof);
-		if (pr_element(e, nu, Material[m].sigma, se, te, ce, pe, wv, wc, nc)) { bad = 1; break; }
+		if (pr_element(e, nu, NULL, Material[m].sigma, se, te, ce, pe, wv, wc, nc)) { bad = 1; break; }
 		for (int k = 0; k < nA; k++) {
 			for (int l = 0; l < nA; l++) {
 				const int64_t p = pr_find(&PR.Kr, dof[k], dof[l]);
