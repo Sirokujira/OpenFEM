@@ -6011,7 +6011,7 @@ echo "  order 3, nonlinear conductor (10 Hz, 0.5 A) : R, L == 1-D reference, clo
 case "$res" in NG*) status=1 ;; esac
 cp "$SRC/box_p3.msh" "$WORK/"
 awk '/^analysis/{print "bh = 2 100 0.5"} {print}' "$WORK/edge_test.ofe" | sed 's/^mesh = .*/mesh = box_p3.msh/' > "$WORK/prx_ebh.ofe"
-th_reject "order-3 edge self test (E) with a bh material" prx_ebh.ofe "supports linear materials (bh : the frequency-domain A only"
+th_reject "order-3 edge self test (E) with a bh material" prx_ebh.ofe "supports linear materials with thermal or analysis E"
 
 # ---- 3 次元渦電流の過渡解析 (analysis = A + transient、後退 Euler、電圧駆動) ----
 #
@@ -6137,9 +6137,6 @@ res=$(awk -v gr="$yre" -v gi="$yim" -v a1="$cr16" -v b1="$ci16" -v a2="$cr32" -v
 	printf "%s (16 steps %.2e, 32 steps %.2e, ratio %.2f; Richardson %.2e)", ok, e1, e2, q, er }')
 echo "  order 3, sine at 10 kHz : steady state -> frequency-domain Y (backward Euler, first order) : $res"
 case "$res" in NG*) status=1 ;; esac
-# 3 次の過渡解析は線形材料だけ (B-H / J-A は入力エラー)
-awk '/^region = 1 2/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "bh = 2 10000 1.2"; next} {print}' "$WORK/a3t3_step.ofe" > "$WORK/a3t3x_bh.ofe"
-th_reject "order-3 A transient with a B-H curve" a3t3x_bh.ofe "supports linear materials"
 
 # ---- 3 次元渦電流 + ヒステリシスの過渡解析 (analysis = A + transient + ja、ベクトル J-A、四面体) ----
 #
@@ -6378,6 +6375,53 @@ a3_energy "order 2, J-A, quasi-static sine (16 steps per period)"
 wfem=$(awk -F, 'NR == 17 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/ofe_transient.csv")
 wref=$(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=16 -f "$SRC/ja_bar_loop.awk")
 compare "order 2, J-A, quasi-static hysteresis loss of the 2nd period == forward J-A along H_y(z) (awk) [J]" "$wfem" "$wref" 5e-3
+# (e) 3 次の四面体 (bar_ho3c.msh = gmsh_bar_ho.py が幾何から h = 0.5 mm で切った 3 次の棒) : 次数 r の Nedelec で
+#     積分点ごとの状態 (eddy3d_pr.c の prnl_*、2 次の p2nl_* と同じ固定点反復)。(d) と同じ検査:
+#     直線の B-H 曲線 / ほぼ線形の J-A == 線形の μr = 50 (1 刻み 2 回)、準静的な正弦波の B-H の和と J-A の損が awk の
+#     独立な積分に近い (この粗い格子で −0.24% / −0.63%、h = 0.25 mm の bar_ho3.msh では −0.09% / −0.02% に縮む。
+#     J-A は格子の誤差の分だけ許容を 1% にした)、仕事の恒等式、剛体回転した格子で I(t) と回数が不変
+cp "$SRC/bar_ho3c.msh" "$WORK/"
+sed 's/^mesh = .*/mesh = bar_ho3c.msh/' "$WORK/a2nl_lin.ofe" > "$WORK/a3nl_lin.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3nl_lin.ofe > /dev/null 2>&1 && cp ofe_transient.csv a3nl_lin.csv) || { echo "  a3nl_lin : the run failed -> NG" >&2; status=1; }
+a3nl_same() {	# a3nl_same <ラベル> <ofe> : a3nl_lin と I(t) が 1e-7、固定点は 1 刻み 2 回まで
+	(cd "$WORK" && "$OFE" -n 2 "$2" > /dev/null 2>&1) || { echo "  $2 : the run failed -> NG" >&2; status=1; }
+	res=$(paste -d, "$WORK/a3nl_lin.csv" "$WORK/ofe_transient.csv" | awk -F, -v nfp="$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")" '
+		NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
+		END { ok = "NG"; if ((n == 50) && (m < 1e-7) && (nfp + 0 >= 50) && (nfp + 0 <= 100)) ok = "OK"
+		      printf "%s (%d steps, max %.1e, %d fixed-point iterations)", ok, n, m + 0, nfp + 0 }')
+	echo "  order 3, $1 == linear mur = 50 : I(t) : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+sed 's/^mesh = .*/mesh = bar_ho3c.msh/' "$WORK/a2nl_bhl.ofe" > "$WORK/a3nl_bhl.ofe"
+a3nl_same "straight-line B-H curve" a3nl_bhl.ofe
+sed 's/^mesh = .*/mesh = bar_ho3c.msh/' "$WORK/a2nl_jal.ofe" > "$WORK/a3nl_jal.ofe"
+a3nl_same "near-linear J-A" a3nl_jal.ofe
+sed 's/^mesh = .*/mesh = bar_ho3c.msh/' "$WORK/abh_qs.ofe" > "$WORK/a3nl_bqs.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3nl_bqs.ofe > /dev/null 2>&1 && cp ofe_transient.csv a3nl_bqs.csv && cp ofe.log a3nl_bqs.log) || { echo "  a3nl_bqs : the run failed -> NG" >&2; status=1; }
+a3_energy "order 3, B-H curve, quasi-static sine"
+wfem=$(awk -F, 'NR == 33 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/a3nl_bqs.csv")
+wref=$(awk -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=32 -v bh="100 0.5 1000 1.0 10000 1.2" -f "$SRC/ja_bar_loop.awk")
+compare "order 3, B-H curve, quasi-static sine : 2nd-period sum of H dB == the same sum along H_y(z) (awk) [J]" "$wfem" "$wref" 5e-3
+awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+	{ print }' "$WORK/bar_ho3c.msh" > "$WORK/bar_ho3c_rot.msh"
+sed 's/^mesh = .*/mesh = bar_ho3c_rot.msh/' "$WORK/a3nl_bqs.ofe" > "$WORK/a3nl_bqsr.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3nl_bqsr.ofe > /dev/null 2>&1) || { echo "  a3nl_bqsr : the run failed -> NG" >&2; status=1; }
+nfa=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/a3nl_bqs.log")
+nfr=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
+res=$(paste -d, "$WORK/a3nl_bqs.csv" "$WORK/ofe_transient.csv" | awk -F, -v a="${nfa:-0}" -v b="${nfr:-0}" '
+	NR > 1 { d = ($3 - $10) / 0.5; if (d < 0) d = -d; if (d > m) m = d; n++ }
+	END { ok = "NG"; if ((n == 64) && (m < 1e-6) && (a > 0) && (b > 0) && (b <= 1.2 * a + 5)) ok = "OK"
+	      printf "%s (%d steps, max %.1e of the peak; iterations %d vs %d)", ok, n, m + 0, b, a }')
+echo "  order 3, B-H curve, rigidly rotated mesh : I(t) and fixed-point iterations == axis-aligned mesh : $res"
+case "$res" in NG*) status=1 ;; esac
+sed 's/^mesh = .*/mesh = bar_ho3c.msh/' "$WORK/a2nl_jqs.ofe" > "$WORK/a3nl_jqs.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3nl_jqs.ofe > /dev/null 2>&1) || { echo "  a3nl_jqs : the run failed -> NG" >&2; status=1; }
+a3_energy "order 3, J-A, quasi-static sine (16 steps per period)"
+wfem=$(awk -F, 'NR == 17 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/ofe_transient.csv")
+wref=$(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=16 -f "$SRC/ja_bar_loop.awk")
+compare "order 3, J-A, quasi-static hysteresis loss of the 2nd period == forward J-A along H_y(z) (awk) [J]" "$wfem" "$wref" 1e-2
 
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。

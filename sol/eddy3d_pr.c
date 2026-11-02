@@ -897,7 +897,14 @@ void eddy3d_pr_heat_close(void)
 K を PR.Kr、M を PR.Ki に入れる (周波数領域と同じ非零パターン)。ポート 1 の電極の**全節点**を
 χ = Δt V(t^{n+1})、端子電流はその行の反作用 Kx − M[A^n; 0] (周波数領域と同じく φ は格子の節点そのもの)。
 */
-static int pr_assemble_tr(FILE *fp_log, double dt)
+static int pr_nonlin(int m)
+{
+	return (Material[m].ja.on || (Material[m].nbh[0] > 0));
+}
+
+
+// skipnl = 1 : 非線形 (J-A / B-H) の材料の要素の S を入れない (固定点反復が積分点の H から足す)
+static int pr_assemble_tr(FILE *fp_log, double dt, int skipnl)
 {
 	const int nt = PR.nt, nA = PR.nA, nP = PR.nP;
 	crs_zero(&PR.Kr);
@@ -922,7 +929,7 @@ static int pr_assemble_tr(FILE *fp_log, double dt)
 				const int64_t p = pr_find(&PR.Kr, dof[k], dof[l]);
 				if (p < 0) continue;		// 分散した行列 (mpisolve = 2) の他の rank の行
 				const double t = te[(k * nA) + l] / dt;
-				PR.Kr.val[p] += se[(k * nA) + l] + t;
+				PR.Kr.val[p] += ((skipnl && pr_nonlin(m)) ? 0 : se[(k * nA) + l]) + t;
 				PR.Ki.val[p] += t;
 			}
 			for (int a = 0; a < nP; a++) {
@@ -954,6 +961,352 @@ static int pr_assemble_tr(FILE *fp_log, double dt)
 		return 1;
 	}
 	return 0;
+}
+
+
+/*
+過渡解析の非線形 (J-A / B-H)。2 次 (eddy3d_p2.c の p2nl_*) と同じ固定点反復を**積分点ごとの状態**で解く:
+
+	F(x) = K_l x − M [A^n; 0] + Σ_e Σ_q w_q H_q・∇×W_k   (K_l は非線形の要素の S を除いた行列)
+	(K_l + Σ w_q (∇×W)ᵀ N_q (∇×W)) δ = −F,   N_q = dH/dB の対称部分 (J-A) / ν I + 2 (dν/dB²) B Bᵀ (B-H)
+
+∇×W は積分点あたり 3 nA 個。合計が PRNL_CACHE_MAX 個以内なら記憶し、越えたら毎回作り直す (答えは同じ)。
+接線の要素行列 (nA² 個) は要素の塊ごとに並列に作って直列に足す (塊の大きさは PRNL_LOC_MAX で決める)。
+*/
+typedef struct {
+	int nj, nq, nA;
+	int *el;			// [nj] 要素番号
+	int32_t *dof;		// [nj*nA] A の自由度
+	double *w;			// [nj*nq] 積分の重み
+	double *b, *h, *m, *d;		// [nj*nq*3] 確定済みの状態
+	double *bn, *hn, *mn, *dn;	// [nj*nq*3] 反復中
+	double *nu6;		// [nj*nq*6] 行列の傾き
+	double *lv;			// [nj*nA] 残差の要素の作業域
+	double *loc;		// [nb*nA*nA] 接線の要素行列の作業域 (塊 nb 要素分)
+	int nb;
+	double *cv;			// [nj*nq*nA*3] ∇×W (記憶するときだけ、しないなら NULL)
+} prnl_t;
+
+#define PRNL_CACHE_MAX ((int64_t)32 * 1024 * 1024)	// ∇×W を記憶する上限 (double の個数、256 MB)
+#define PRNL_LOC_MAX ((int64_t)4 * 1024 * 1024)	// 接線の要素行列の塊の上限 (double の個数、32 MB)
+
+
+// 要素 j の積分点 q の ∇×W_k (wc は nA x 3、wv は作り直すときの作業域)
+static void prnl_curl(const prnl_t *J, int j, int q, double (*wc)[3], double (*wv)[3])
+{
+	const int nA = J->nA;
+	if (J->cv != NULL) {
+		const double *cv = &J->cv[(((int64_t)j * J->nq) + q) * nA * 3];
+		for (int k = 0; k < nA; k++) {
+			for (int c = 0; c < 3; c++) wc[k][c] = cv[(k * 3) + c];
+		}
+		return;
+	}
+	double nv[ELEM_NMAX], g[ELEM_NMAX][3], w;
+	if (elem3d_ip(J->el[j], q, nv, g, &w)) {
+		memset(wc, 0, (size_t)nA * 3 * sizeof(double));
+		return;
+	}
+	pr_basis_core(J->el[j], nv, g, wv, wc);
+}
+
+
+static void prnl_close(prnl_t *J)
+{
+	free(J->el); free(J->dof); free(J->w);
+	free(J->b); free(J->h); free(J->m); free(J->d);
+	free(J->bn); free(J->hn); free(J->mn); free(J->dn);
+	free(J->nu6); free(J->lv); free(J->loc); free(J->cv);
+	memset(J, 0, sizeof(*J));
+}
+
+
+static int prnl_open(prnl_t *J, FILE *fp_log)
+{
+	const int nt = PR.nt, nA = PR.nA;
+	int nj = 0;
+	for (int e = 0; e < nt; e++) {
+		if (pr_nonlin(elem3d_mat(e))) nj++;
+	}
+	const int nq = elem3d_nip(0);
+	J->nj = nj;
+	J->nq = nq;
+	J->nA = nA;
+	const size_t s1 = (size_t)((nj > 0) ? nj : 1), sq = s1 * (size_t)nq;
+	J->el = (int *)malloc(s1 * sizeof(int));
+	J->dof = (int32_t *)malloc(s1 * nA * sizeof(int32_t));
+	J->w = (double *)calloc(sq, sizeof(double));
+	double **v3[8] = {&J->b, &J->h, &J->m, &J->d, &J->bn, &J->hn, &J->mn, &J->dn};
+	for (int q = 0; q < 8; q++) *v3[q] = (double *)calloc(sq * 3, sizeof(double));
+	J->nu6 = (double *)calloc(sq * 6, sizeof(double));
+	J->lv = (double *)calloc(s1 * nA, sizeof(double));
+	int64_t nb = PRNL_LOC_MAX / ((int64_t)nA * nA);
+	if (nb < 1) nb = 1;
+	if (nb > nj) nb = ((nj > 0) ? nj : 1);
+	J->nb = (int)nb;
+	J->loc = (double *)calloc((size_t)nb * nA * nA, sizeof(double));
+	J->cv = ((((int64_t)nj * nq * nA * 3) <= PRNL_CACHE_MAX) ? (double *)malloc(sq * nA * 3 * sizeof(double)) : NULL);
+	double (*wv)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+	double (*wc)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+	int32_t *dof = (int32_t *)malloc(PR_NDMAX * sizeof(int32_t));
+	int j = 0, bad = 0;
+	for (int e = 0; (e < nt) && !bad; e++) {
+		if (!pr_nonlin(elem3d_mat(e))) continue;
+		pr_dofs(e, dof);
+		J->el[j] = e;
+		for (int k = 0; k < nA; k++) J->dof[((int64_t)j * nA) + k] = dof[k];
+		for (int q = 0; q < nq; q++) {
+			double nv[ELEM_NMAX], g[ELEM_NMAX][3], w;
+			if (elem3d_ip(e, q, nv, g, &w)) { bad = 1; break; }
+			J->w[((int64_t)j * nq) + q] = w;
+			if (J->cv != NULL) {
+				pr_basis_core(e, nv, g, wv, wc);
+				double *cv = &J->cv[(((int64_t)j * nq) + q) * nA * 3];
+				for (int k = 0; k < nA; k++) {
+					for (int c = 0; c < 3; c++) cv[(k * 3) + c] = wc[k][c];
+				}
+			}
+		}
+		j++;
+	}
+	free(wv); free(wc); free(dof);
+	if (bad) {
+		fprintf(fp_log, "*** the high-order A-phi solver : a degenerate element\n");
+		return 1;
+	}
+	fprintf(fp_log, "  nonlinear : %d tetrahedra x %d points with J-A (vector) / bh (nlsolver = %d %.3e %.3f)%s\n",
+		nj, nq, NlMaxiter, NlTol, NlRelax, ((J->cv != NULL) ? "" : ", curl W recomputed"));
+	for (int m = 0; m < NMaterial; m++) {
+		if (!Material[m].ja.on) continue;
+		fprintf(fp_log, "  J-A model check (material %d) : 3-D vector J-A along a fixed direction == scalar J-A : "
+			"max |dH| / max |H| = %.3e\n", m, ja_vec3_selftest(&Material[m].ja));
+	}
+	return 0;
+}
+
+
+// x の A から各積分点の B を作り、確定済みの状態から H と行列の傾きを求める (2 次の p2nl_eval と同じ式)
+static void prnl_eval(prnl_t *J, const double *x)
+{
+	const int nj = J->nj, nq = J->nq, nA = J->nA;
+	int j;
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+	{
+	double (*wc)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+	double (*wv)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+#ifdef _OPENMP
+#pragma omp for
+#endif
+	for (j = 0; j < nj; j++) {
+		const material_t *mt = &Material[elem3d_mat(J->el[j])];
+		const ja_t *ja = &mt->ja;
+		for (int q = 0; q < nq; q++) {
+			const int64_t p = ((int64_t)j * nq) + q;
+			prnl_curl(J, j, q, wc, wv);
+			double bv[3] = {0, 0, 0};
+			for (int k = 0; k < nA; k++) {
+				const double a = x[J->dof[((int64_t)j * nA) + k]];
+				for (int c = 0; c < 3; c++) bv[c] += a * wc[k][c];
+			}
+			const double bmag = sqrt(dot3(bv, bv));
+			const double *dir = &J->d[p * 3];
+			double *dn = &J->dn[p * 3];
+			const int haved = ((dir[0] != 0) || (dir[1] != 0) || (dir[2] != 0));
+			for (int c = 0; c < 3; c++) dn[c] = ((bmag > 1e-12) ? (bv[c] / bmag) : 0);
+			double *nu6 = &J->nu6[p * 6];
+			double *hv = &J->hn[p * 3];
+			if (!ja->on) {
+				double nu, dnu;
+				bh_nu_dnu_pub(mt, bmag, &nu, &dnu);
+				for (int c = 0; c < 3; c++) {
+					hv[c] = nu * bv[c];
+					J->mn[(p * 3) + c] = (bv[c] / MU0) - hv[c];
+					J->bn[(p * 3) + c] = bv[c];
+				}
+				nu6[0] = nu + (2 * dnu * bv[0] * bv[0]);
+				nu6[1] = nu + (2 * dnu * bv[1] * bv[1]);
+				nu6[2] = nu + (2 * dnu * bv[2] * bv[2]);
+				nu6[3] = 2 * dnu * bv[0] * bv[1];
+				nu6[4] = 2 * dnu * bv[1] * bv[2];
+				nu6[5] = 2 * dnu * bv[2] * bv[0];
+				continue;
+			}
+			double dref[3] = {1, 0, 0};
+			if (haved) { dref[0] = dir[0]; dref[1] = dir[1]; dref[2] = dir[2]; }
+			else if (bmag > 1e-12) { dref[0] = dn[0]; dref[1] = dn[1]; dref[2] = dn[2]; }
+			ja_eval_vec3(ja, &J->b[p * 3], &J->h[p * 3], &J->m[p * 3], bv, dref, hv, &J->mn[p * 3], nu6);
+			for (int c = 0; c < 3; c++) J->bn[(p * 3) + c] = bv[c];
+		}
+	}
+	free(wc); free(wv);
+	}
+}
+
+
+// 刻みの磁気の仕事 Σ w_q H_q・(B_q − B_q^n)
+static double prnl_work(const prnl_t *J)
+{
+	double wsum = 0;
+	const int64_t np = (int64_t)J->nj * J->nq;
+	for (int64_t p = 0; p < np; p++) {
+		double s = 0;
+		for (int c = 0; c < 3; c++) s += J->hn[(p * 3) + c] * (J->bn[(p * 3) + c] - J->b[(p * 3) + c]);
+		wsum += J->w[p] * s;
+	}
+	return wsum;
+}
+
+
+static void prnl_commit(prnl_t *J)
+{
+	const int64_t np = (int64_t)J->nj * J->nq;
+	memcpy(J->b, J->bn, (size_t)np * 3 * sizeof(double));
+	memcpy(J->h, J->hn, (size_t)np * 3 * sizeof(double));
+	memcpy(J->m, J->mn, (size_t)np * 3 * sizeof(double));
+	for (int64_t p = 0; p < np; p++) {
+		double *d = &J->d[p * 3];
+		if ((d[0] == 0) && (d[1] == 0) && (d[2] == 0)) {
+			for (int c = 0; c < 3; c++) d[c] = J->dn[(p * 3) + c];
+		}
+	}
+}
+
+
+// 残差 r = −F(x) (固定の行は 0) と、その相対ノルム
+static double prnl_resid(prnl_t *J, const crs_t *Kl, const double *rhs, const unsigned char *fix,
+	const double *x, double *r, double bref)
+{
+	const int n = (int)Kl->n, nj = J->nj, nq = J->nq, nA = J->nA;
+	crs_spmv(Kl, x, r, NULL);
+	for (int i = 0; i < n; i++) r[i] = rhs[i] - r[i];
+	int j;
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+	{
+	double (*wc)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+	double (*wv)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+#ifdef _OPENMP
+#pragma omp for
+#endif
+	for (j = 0; j < nj; j++) {
+		double *lv = &J->lv[(int64_t)j * nA];
+		for (int k = 0; k < nA; k++) lv[k] = 0;
+		for (int q = 0; q < nq; q++) {
+			const int64_t p = ((int64_t)j * nq) + q;
+			prnl_curl(J, j, q, wc, wv);
+			for (int k = 0; k < nA; k++) lv[k] += J->w[p] * dot3(&J->hn[p * 3], wc[k]);
+		}
+	}
+	free(wc); free(wv);
+	}
+	for (j = 0; j < nj; j++) {
+		for (int k = 0; k < nA; k++) r[J->dof[((int64_t)j * nA) + k]] -= J->lv[((int64_t)j * nA) + k];
+	}
+	double s = 0;
+	for (int i = 0; i < n; i++) {
+		if (fix[i]) r[i] = 0;
+		s += r[i] * r[i];
+	}
+	return ((bref > 0) ? (sqrt(s) / bref) : sqrt(s));
+}
+
+
+// 接線の行列 Kt = K_l + Σ w_q (∇×W)ᵀ N_q (∇×W)。要素の塊ごとに並列に作って直列に足す
+static void prnl_tangent(prnl_t *J, const crs_t *Kl, crs_t *Kt)
+{
+	const int nj = J->nj, nq = J->nq, nA = J->nA, nb = J->nb;
+	memcpy(Kt->val, Kl->val, (size_t)Kl->rowptr[Kl->n] * sizeof(double));
+	for (int j0 = 0; j0 < nj; j0 += nb) {
+		const int j1 = (((j0 + nb) < nj) ? (j0 + nb) : nj);
+		int j;
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+		{
+		double (*wc)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+		double (*wv)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+		double (*nc)[3] = (double (*)[3])malloc((size_t)nA * 3 * sizeof(double));
+#ifdef _OPENMP
+#pragma omp for
+#endif
+		for (j = j0; j < j1; j++) {
+			double *ke = &J->loc[(int64_t)(j - j0) * nA * nA];
+			for (int k = 0; k < nA * nA; k++) ke[k] = 0;
+			for (int q = 0; q < nq; q++) {
+				const int64_t p = ((int64_t)j * nq) + q;
+				prnl_curl(J, j, q, wc, wv);
+				for (int k = 0; k < nA; k++) nu_mul(&J->nu6[p * 6], wc[k], nc[k]);
+				for (int k = 0; k < nA; k++) {
+					for (int l = 0; l < nA; l++) ke[(k * nA) + l] += J->w[p] * dot3(nc[k], wc[l]);
+				}
+			}
+		}
+		free(wc); free(wv); free(nc);
+		}
+		for (j = j0; j < j1; j++) {
+			const double *ke = &J->loc[(int64_t)(j - j0) * nA * nA];
+			const int32_t *dj = &J->dof[(int64_t)j * nA];
+			for (int k = 0; k < nA; k++) {
+				for (int l = 0; l < nA; l++) {
+					const int64_t p = pr_find(Kt, dj[k], dj[l]);
+					if (p >= 0) Kt->val[p] += ke[(k * nA) + l];		// 分散した行列の他の rank の行は飛ばす
+				}
+			}
+		}
+	}
+}
+
+
+// 1 刻みの固定点反復 (2 次の p2nl_step と同じ安定化)。x は前の刻みの解で入り、収束した解で出る
+static int prnl_step(prnl_t *J, const crs_t *Kl, crs_t *Kt, const double *rhs, const unsigned char *fix,
+	const double *xd, double *x, double *r, double *del, double *xbest, double bref, int st, FILE *fp_log)
+{
+	const int n = (int)Kl->n;
+	for (int i = 0; i < n; i++) {
+		if (fix[i]) x[i] = xd[i];
+	}
+	int it, conv = 0, nback = 0;
+	double rnorm = 0, rbest = 0, lrel = NlRelax;
+	for (it = 1; it <= NlMaxiter; it++) {
+		prnl_eval(J, x);
+		rnorm = prnl_resid(J, Kl, rhs, fix, x, r, bref);
+		if (rnorm < NlTol) {
+			conv = 1;
+			break;
+		}
+		if ((it == 1) || (rnorm < rbest)) {
+			rbest = rnorm;
+			memcpy(xbest, x, (size_t)n * sizeof(double));
+		}
+		else if ((!JaSafeSlope || (rnorm > (10 * rbest))) && (nback < 30)) {
+			memcpy(x, xbest, (size_t)n * sizeof(double));
+			if (!JaSafeSlope) JaSafeSlope = 1;
+			else lrel /= 2;
+			nback++;
+			continue;
+		}
+		prnl_tangent(J, Kl, Kt);
+		double tol = ((rnorm > 0) ? (Solver.converg / rnorm) : Solver.converg);
+		if (tol > 0.1) tol = 0.1;
+		if (tol < Solver.converg) tol = Solver.converg;
+		for (int i = 0; i < n; i++) del[i] = 0;
+		const int li = solver_cg(Kt, r, del, fix, Solver.maxiter, Solver.nout, tol, NULL, "a3jr");
+		if (li < 0) {
+			fprintf(fp_log, "*** linear solver did not converge (step %d)\n", st);
+			JaSafeSlope = 0;
+			return -1;
+		}
+		for (int i = 0; i < n; i++) x[i] += lrel * del[i];
+	}
+	JaSafeSlope = 0;
+	if (!conv) {
+		fprintf(fp_log, "*** transient : the iteration did not converge at step %d (residual = %.3e)\n", st, rnorm);
+		return -1;
+	}
+	return it;
 }
 
 
@@ -994,13 +1347,27 @@ int solve_eddy3d_pr_transient(FILE *fp_log)
 	if (oe) return 1;
 	const int n = PR.n, nn = PR.nn, oV = PR.oV;
 	const double dt = TransientTime / TransientSteps;
+	int hyst = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (pr_nonlin(m)) hyst = 1;
+	}
 	fprintf(fp_log, "  t_end = %.6e [s], %d steps (dt = %.6e [s]), voltage = %.6e [V]%s\n",
 		TransientTime, TransientSteps, dt, Volt, ((WaveN > 0) ? " x waveform" : " (step)"));
-	if (pr_assemble_tr(fp_log, dt)) {
+	if (pr_assemble_tr(fp_log, dt, hyst)) {
 		pr_close();
 		return 1;
 	}
 	const crs_t *K = &PR.Kr, *M = &PR.Ki;
+	prnl_t J;
+	memset(&J, 0, sizeof(J));
+	crs_t Kt;
+	memset(&Kt, 0, sizeof(Kt));
+	if (hyst) {
+		if (prnl_open(&J, fp_log)) ierr = 1;
+		pr_crs(&Kt);
+		crs_distribute(&Kt);		// mpisolve = 2 : K と同じ分け方 (Kt = K の値の写し + 接線)
+	}
+	double bref = 0;
 	const unsigned char *fix = PR.fix;
 	double *x = (double *)calloc((size_t)n, sizeof(double));
 	double *xo = (double *)calloc((size_t)n, sizeof(double));
@@ -1015,7 +1382,7 @@ int solve_eddy3d_pr_transient(FILE *fp_log)
 	double win = 0, wmag = 0, wjou = 0;
 	long itotal = 0;
 	fprintf(fp_log, "  %6s %13s %13s %13s %6s\n", "step", "t [s]", "V [V]", "I [A]", "iter");
-	for (int st = 1; st <= TransientSteps; st++) {
+	for (int st = 1; (st <= TransientSteps) && !ierr; st++) {
 		const double t = st * dt;
 		const double v = Volt * pr_wave(t);
 		// A の自由度 (φ の欄より前) だけを残した [A^n; 0]
@@ -1026,18 +1393,30 @@ int solve_eddy3d_pr_transient(FILE *fp_log)
 			if (pr_port1_node(i)) xd[oV + i] = dt * v;
 		}
 		crs_spmv(K, xd, w1, NULL);
-		for (int i = 0; i < n; i++) {
-			b[i] = (fix[i] ? 0 : (rhs[i] - w1[i]));
-			u[i] = (fix[i] ? 0 : x[i]);
+		for (int i = 0; i < n; i++) b[i] = (fix[i] ? 0 : (rhs[i] - w1[i]));
+		int it;
+		if (!hyst) {
+			for (int i = 0; i < n; i++) u[i] = (fix[i] ? 0 : x[i]);
+			it = solver_cg(K, b, u, fix, Solver.maxiter, Solver.nout, Solver.converg, NULL, "a3tr");
+			if (it < 0) {
+				fprintf(fp_log, "*** linear solver did not converge (step %d)\n", st);
+				ierr = 1;
+				break;
+			}
+			for (int i = 0; i < n; i++) x[i] = u[i] + xd[i];
 		}
-		const int it = solver_cg(K, b, u, fix, Solver.maxiter, Solver.nout, Solver.converg, NULL, "a3tr");
-		if (it < 0) {
-			fprintf(fp_log, "*** linear solver did not converge (step %d)\n", st);
-			ierr = 1;
-			break;
+		else {
+			double bn = 0;
+			for (int i = 0; i < n; i++) bn += b[i] * b[i];
+			bn = sqrt(bn);
+			if (bn > bref) bref = bn;
+			it = prnl_step(&J, K, &Kt, rhs, fix, xd, x, b, u, z, bref, st, fp_log);
+			if (it < 0) {
+				ierr = 1;
+				break;
+			}
 		}
 		itotal += it;
-		for (int i = 0; i < n; i++) x[i] = u[i] + xd[i];
 		crs_spmv(K, x, w1, NULL);
 		double cur = 0;
 		for (int i = 0; i < nn; i++) {
@@ -1052,16 +1431,26 @@ int solve_eddy3d_pr_transient(FILE *fp_log)
 		for (int i = 0; i < oV; i++) zmx += z[i] * w1[i];
 		crs_spmv(K, x, w1, NULL);
 		for (int i = 0; i < oV; i++) zkx += z[i] * w1[i];
+		if (hyst) zkx += prnl_work(&J);
 		win += v * cur * dt;
 		wjou += zmz;
 		wmag += zkx - zmx;
+		if (hyst) prnl_commit(&J);
 		if (fcsv) fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%.8e,%d\n", t, v, cur, win, wmag, wjou, it);
 		if ((st == TransientSteps) || ((st % ((TransientSteps >= 20) ? (TransientSteps / 20) : 1)) == 0)) {
 			fprintf(fp_log, "  %6d %13.6e %13.6e %13.6e %6d\n", st, t, v, cur, it);
 		}
 	}
 	if (fcsv) fclose(fcsv);
-	if (!ierr) fprintf(fp_log, "  CG iterations = %ld (%d steps)\n", itotal, TransientSteps);
+	if (!ierr && !hyst) fprintf(fp_log, "  CG iterations = %ld (%d steps)\n", itotal, TransientSteps);
+	if (!ierr && hyst) {
+		fprintf(fp_log, "  nonlinear (%d tetrahedra) : fixed-point iterations = %ld (%d steps)\n",
+			J.nj, itotal, TransientSteps);
+	}
+	if (hyst) {
+		prnl_close(&J);
+		crs_free(&Kt);
+	}
 	fprintf(fp_log, "  energy : terminals = %.12e, magnetic work = %.12e, joule = %.12e [J] "
 		"(terminals - magnetic - joule = %.3e)\n", win, wmag, wjou, win - wmag - wjou);
 	free(x); free(xo); free(xd); free(rhs); free(b); free(w1); free(u); free(z);
