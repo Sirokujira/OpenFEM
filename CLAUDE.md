@@ -420,7 +420,7 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
   **B-H の磁性体の交流の発熱 (`A`、1 次の辺要素と 2 次 / 3〜7 次の四面体) は熱連成の各回で実効磁気抵抗率の反復を収束するまで解く**
   (入れ子、ν は回をまたいで持ち越す、`EH.nuelem` / 高次は積分点ごとの `HNuq`、ν の更新は周波数領域と共有の `p2_nu_update` /
   `pr_nu_update`)。断面 2 次元の `F` の交流の発熱も同じ (`eddy2d_heat_solve`、要素ごとの ν `H2Nu`)。`F` の `bh` は三角形の格子でも
-  解く (`setup_tri2d` は `M` の `bh` と `ja` だけを弾く)。J-A の材料は交流の発熱では入力エラー (以前は黙って線形として解かれていた)。外側の許容は自動で 10 NlTol 以上 (`th_tol`)。**層の H は σ に依らないので
+  解く (`setup_tri2d` は `ja` だけを弾く。`M` の `bh` は `assemble_newton_tri` の Newton で三角形でも解く — 構造格子と同じ残差・ヤコビアンを積分点で。検査は面内に回した格子で反復回数まで一致すること)。J-A の材料は交流の発熱では入力エラー (以前は黙って線形として解かれていた)。外側の許容は自動で 10 NlTol 以上 (`th_tol`)。**層の H は σ に依らないので
   bar_air_bh の層の検査は「ν を最初の回で凍らせる」誤りを素通りする** — 導体が非線形で温度が一様 (k 大・対流だけ) の
   棒を `temperature = T_mean` の非連成の A と比べる検査でだけ落ちる (R +9.5e-5)。
 - **静磁場の過渡解析 (`M` + `transient`) は solve.c の `mag_transient`** (後退 Euler、

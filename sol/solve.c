@@ -681,7 +681,7 @@ static int solve_magnetostatic(FILE *fp_log)
 	}
 	// 2 次元格子では異方性テンソルを面内 2x2 で使えるので nucell は渡さない
 	// 線形なら異方性テンソルを使う (nucell は等方性なので非線形反復専用)
-	if (tri2d)          assemble_nu_tri(&A, NULL);
+	if (tri2d)          assemble_nu_tri(&A, nonlinear ? nucell : NULL);
 	else if (nonlinear) assemble_nu(&A, nucell);
 	else                assemble(&A, 4);
 
@@ -988,7 +988,8 @@ static int solve_magnetostatic(FILE *fp_log)
 		double rnorm = 0;
 		int converged = 0;
 		for (nlit = 1; nlit <= NlMaxiter; nlit++) {
-			assemble_newton(&J, az, res);
+			if (tri2d) assemble_newton_tri(&J, az, res);
+			else       assemble_newton(&J, az, res);
 
 			// R = K(ν)A - b (固定節点は 0)
 			rnorm = 0;

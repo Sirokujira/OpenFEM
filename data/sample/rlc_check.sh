@@ -1971,9 +1971,64 @@ sed 's/^analysis = M/analysis = C/' "$SRC/plate2d_dc.ofe" > "$WORK/t2d_c.ofe"
 mesh_reject "analysis C on a 2-D mesh" t2d_c.ofe
 sed 's/^tline = X/tline = Y/' "$SRC/plate2d_dc.ofe" > "$WORK/t2d_plane.ofe"
 mesh_reject "2-D mesh not normal to tline" t2d_plane.ofe
-sed 's/^region = 1 2/region = 1 2\nbh = 2 100 0.5\nbh = 2 1000 1.5/' \
-    "$SRC/plate2d_dc.ofe" > "$WORK/t2d_bh.ofe"
-mesh_reject "nonlinear (bh) on a 2-D mesh" t2d_bh.ofe
+# B-H 曲線は 2 次元格子でも解く ([M bh 2-D])。ヒステリシス (J-A) は構造格子だけ (理由まで見る)
+cp "$SRC/plate2d.msh" "$WORK/"
+awk '/^region = 1 2/{print; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"; next} {print}' "$SRC/plate2d_dc.ofe" > "$WORK/t2d_ja.ofe"
+th_reject "hysteresis (ja) on a 2-D mesh" t2d_ja.ofe "hysteresis (ja) materials are available only on a structured mesh"
+
+# ---- 断面 2 次元の三角形の格子の非線形静磁場 (analysis = M + bh、Newton) ----
+#
+# assemble_newton_tri : 構造格子の assemble_newton と同じ残差とヤコビアン (ν(|B|) と rank-1 項 2 dν/dB² (∇N・∇A)(∇N・∇A)) を
+# 三角形の積分点で組む (1 次は ∇A が要素内一定なので 1 点で厳密、高次は assemble_nu_tri と同じ積分則)。軸ごとの曲線 (bhaniso) は
+# B_p = ∂A/∂q, B_q = −∂A/∂p で軸ごとに分離する。plate2d (W = 1 mm の板の間隙 d = 0.2 mm に磁性体) の閉形式は F の (a') と同じ
+#   L = L_air + (B(I/W) − μ0 I/W) d / I   (L_air は同じ格子の線形の M)
+#   (a) 1 次 : 1e-6 (実測 −4.0e-7 / 1.8e-9。三角形の間隙の H は 1 次元の一様から少しずれる)
+#   (b) 2 次 / 3 次 : 1e-8 (間隙の B は一様、板の Az は 2 次なので P2 の空間で厳密)
+#   (c) 面内に 30 度回した格子 (plate2d_r30、位相は同じ) で L と Newton の反復回数が一致 (B が軸に沿わないので rank-1 項の
+#       面内 2 成分がどちらも効く)。反復回数の上限 (1 A で 8 回) — 接線の誤りは答えを変えず回数だけを変える
+#   (d) 軸ごとの曲線 : B は Y 向きなので Y に等方性と同じ曲線、Z / X に硬い曲線を与えると等方性に 1e-5 (Y と Z を入れ替えると
+#       桁違いにずれる)
+echo "[M bh 2-D] nonlinear magnetostatics (B-H, Newton) on a 2-D triangular mesh"
+cp "$SRC/plate2d.msh" "$SRC/plate2d_p2.msh" "$SRC/plate2d_p3.msh" "$SRC/plate2d_r30.msh" "$SRC/plate2d_dc.ofe" "$SRC/plate2d_r30.ofe" "$WORK/"
+mb_run() {	# mb_run <.ofe> <電流> <格子 (空なら .ofe のまま)> <材料の行 ("|" 区切り、空なら等方性の曲線)> : "L 反復回数"
+	awk -v cur="$2" -v m="$3" -v ex="$4" '/^mesh/{ if (m != "") print "mesh = " m; else print; next }
+		/^region = 1 2/{ print; if (ex == "") { print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; print "bh = 2 10000 1.2" }
+			else { n = split(ex, a, "|"); for (i = 1; i <= n; i++) print a[i] } next }
+		/^current/{ print "current = " cur; print "nlsolver = 50 1e-8 1.0"; next } {print}' "$WORK/$1" > "$WORK/mb.ofe"
+	rm -f "$WORK/rlc.csv"
+	(cd "$WORK" && "$OFE" -n 2 mb.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "x 0"; return; }
+	if grep -q "did not converge" "$WORK/ofe.log"; then echo "x 0"; return; fi
+	echo "$(value_of Ldc) $(grep -cE '^  B-H +[0-9]+ ' "$WORK/ofe.log")"
+}
+mb_lin() {	# mb_lin <格子> : 同じ格子の線形の L
+	sed "s/^mesh = .*/mesh = $1/" "$WORK/plate2d_dc.ofe" > "$WORK/mbl.ofe"
+	(cd "$WORK" && "$OFE" -n 2 mbl.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1)
+	value_of Ldc
+}
+mb_exp() { awk -v la="$1" -v I="$2" -v B="$3" 'BEGIN { pi = 3.14159265358979324; mu0 = 4 * pi * 1e-7; printf "%.12e", la + (B - mu0 * I / 1e-3) * 0.2e-3 / I }'; }
+for o in 1:plate2d.msh:1e-6 2:plate2d_p2.msh:1e-8 3:plate2d_p3.msh:1e-8; do
+	ord=${o%%:*}; r=${o#*:}; msh=${r%%:*}; tol=${r#*:}
+	la=$(mb_lin "$msh")
+	for pair in "1.0 1.0" "5.0 1.0888888888889"; do
+		set -- $pair
+		set -- "$1" "$2" $(mb_run plate2d_dc.ofe "$1" "$msh" "")
+		compare "order $ord, I = $1 A : L = L_air + (B(I/W) - mu0 I/W) d/I [H/m]" "$3" "$(mb_exp "$la" "$1" "$2")" "$tol"
+		[ "$ord" = 1 ] && [ "$1" = 1.0 ] && { l1=$3; n1=$4; }
+	done
+done
+set -- $(mb_run plate2d_r30.ofe 1.0 "" "")
+compare "mesh rotated 30 degrees in the plane, I = 1 A : L == unrotated [H/m]" "$1" "$l1" 1e-9
+res=$(awk -v a="$2" -v b="$n1" 'BEGIN { printf "%s (%d / %d)", ((a == b) && (b > 0) && (b <= 8)) ? "OK" : "NG", a, b }')
+echo "  mesh rotated 30 degrees, I = 1 A : Newton iterations equal and <= 8 (rotated / unrotated) : $res"
+case "$res" in NG*) status=1 ;; esac
+H="2000 0.1 20000 0.2 200000 0.24"; S="100 0.5 1000 1.0 10000 1.2"
+mb_ax() { awk -v soft="$1" -v H="$H" -v S="$S" 'BEGIN { n = split("X Y Z", ax, " "); for (k = 1; k <= 3; k++) { split((ax[k] == soft) ? S : H, c, " ")
+	for (i = 1; i <= 6; i += 2) s = s ((s == "") ? "" : "|") "bh = 2 " ax[k] " " c[i] " " c[i + 1] } print s }'; }
+set -- $(mb_run plate2d_dc.ofe 1.0 "" "$(mb_ax Y)") $(mb_run plate2d_dc.ofe 1.0 "" "$(mb_ax Z)")
+compare "per-axis curves (the Y curve along B), I = 1 A : L == isotropic [H/m]" "$1" "$l1" 1e-5
+res=$(awk -v a="$3" -v b="$l1" 'BEGIN { d = a / b - 1; if (d < 0) d = -d; printf "%s (%.2e)", (d > 0.5) ? "OK" : "NG", d }')
+echo "  per-axis curves with the stiff curve along B (Y <-> Z swapped) : L moves by more than 50% : $res"
+case "$res" in NG*) status=1 ;; esac
 
 # ofe_post が掃引を認識すること。rlc.csv は掃引の**最後の 1 点**しか持たないので、
 # 黙って出すと「掃引の結果」と誤読される。点数・範囲・注記を出すこと。

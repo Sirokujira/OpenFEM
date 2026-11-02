@@ -7560,6 +7560,99 @@ void assemble_nu_tri(crs_t *A, const double *nucell)
 }
 
 
+/*
+非線形静磁場 (M + bh) の Newton 反復の三角形版 : ヤコビアン J と内力 res = K(ν(|∇A|)) A を作る (assemble_newton と同じ式)
+  R_i  = Σ_g w ν(B) (∇N_i・∇A) |det J|
+  J_ij = Σ_g w [ ν (∇N_i・∇N_j) + 2 (dν/dB²) (∇N_i・∇A)(∇N_j・∇A) ] |det J|
+ν は積分点ごと (高次の三角形は assemble_nu_tri と同じ積分則、1 次は ∇A が要素内一定なので 1 点で厳密)。軸ごとの曲線
+(bhaniso) は構造格子と同じく B_p = ∂A/∂q, B_q = −∂A/∂p で軸ごとに分離する (rank-1 項は出ない)。線形の材料は
+dν/dB² = 0 で J = K(ν)、R = K(ν)A に退化する
+*/
+void assemble_newton_tri(crs_t *J, const double *az, double *res)
+{
+	int p, q;
+	tri_axes(&p, &q);
+	crs_zero(J);
+	memset(res, 0, (size_t)NNode * sizeof(double));
+
+	const int p2 = (TetOrder >= 2);
+	double lam[NQTRI3][3], wq[NQTRI3];
+	const int nq = (p2 ? tri_quad_ord(lam, wq) : 1);
+	double *je = (double *)malloc((size_t)TRI_NMAX * TRI_NMAX * sizeof(double));
+
+	for (int e = 0; e < NTri; e++) {
+		int32_t nd[TRI_NMAX];
+		const int nen = tri_nodes(e, nd);
+		const material_t *mt = &Material[TriMat[e]];
+		const int aniso = (mt->bhaniso && (mt->nbh[0] > 0));
+		double re[TRI_NMAX];
+		for (int l = 0; l < nen; l++) {
+			re[l] = 0;
+			for (int m = 0; m < nen; m++) je[(l * TRI_NMAX) + m] = 0;
+		}
+		int bad = 0;
+		for (int g = 0; g < nq; g++) {
+			double gn[TRI_NMAX][2], dw;
+			if (p2) {
+				double det;
+				if (tri6_grad(nd, nen, lam[g], gn, &det)) { bad = 1; break; }
+				dw = wq[g] * fabs(det);
+			}
+			else {
+				double g1[3][2], area;
+				if (tri_grad(nd, g1, &area)) { bad = 1; break; }
+				for (int l = 0; l < 3; l++) { gn[l][0] = g1[l][0]; gn[l][1] = g1[l][1]; }
+				dw = area;
+			}
+			double gr[2] = {0, 0};
+			for (int l = 0; l < nen; l++) {
+				gr[0] += az[nd[l]] * gn[l][0];
+				gr[1] += az[nd[l]] * gn[l][1];
+			}
+			if (aniso) {
+				//   R_i  = ∫ [ H_p(B_p) ∂N_i/∂q - H_q(B_q) ∂N_i/∂p ] dS
+				//   J_ij = ∫ [ (dH_p/dB) ∂N_i/∂q ∂N_j/∂q + (dH_q/dB) ∂N_i/∂p ∂N_j/∂p ] dS
+				const double bp = gr[1], bq = -gr[0];
+				double hp, dhp, hq, dhq;
+				bh_h_dh_pub(mt, p, fabs(bp), &hp, &dhp);
+				bh_h_dh_pub(mt, q, fabs(bq), &hq, &dhq);
+				if (bp < 0) hp = -hp;
+				if (bq < 0) hq = -hq;
+				for (int l = 0; l < nen; l++) {
+					re[l] += ((hp * gn[l][1]) - (hq * gn[l][0])) * dw;
+					for (int m = 0; m < nen; m++) {
+						je[(l * TRI_NMAX) + m] += ((dhp * gn[l][1] * gn[m][1]) + (dhq * gn[l][0] * gn[m][0])) * dw;
+					}
+				}
+				continue;
+			}
+			double nu, dnudb2;
+			bh_nu_dnu_pub(mt, sqrt((gr[0] * gr[0]) + (gr[1] * gr[1])), &nu, &dnudb2);
+			double u[TRI_NMAX];
+			for (int l = 0; l < nen; l++) {
+				u[l] = (gn[l][0] * gr[0]) + (gn[l][1] * gr[1]);
+				re[l] += nu * u[l] * dw;
+			}
+			for (int l = 0; l < nen; l++) {
+				for (int m = 0; m < nen; m++) {
+					const double kk = (gn[l][0] * gn[m][0]) + (gn[l][1] * gn[m][1]);
+					je[(l * TRI_NMAX) + m] += ((nu * kk) + (2 * dnudb2 * u[l] * u[m])) * dw;
+				}
+			}
+		}
+		if (bad) continue;		// 退化した三角形は setup で弾いてある (assemble_nu_tri と同じ扱い)
+		for (int l = 0; l < nen; l++) {
+			res[nd[l]] += re[l];
+			for (int m = 0; m < nen; m++) {
+				const int64_t s = crs_find(J, nd[l], nd[m]);	// mpisolve = 2 : 他の rank の行は -1
+				if (s >= 0) J->val[s] += je[(l * TRI_NMAX) + m];
+			}
+		}
+	}
+	free(je);
+}
+
+
 // 質量行列 M_ij = ∫ σ λ_i λ_j dS = σ S (1 + δ_ij)/12 (導体要素のみ)
 void assemble_mass_tri(crs_t *A)
 {

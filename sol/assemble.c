@@ -374,6 +374,12 @@ void bh_nu_dnu_pub(const material_t *mt, double b, double *nu, double *dnudb2)
 	bh_nu_dnu(mt, b, nu, dnudb2);
 }
 
+// 公開版 (断面 2 次元の三角形の格子の Newton が軸ごとの曲線に使う)
+void bh_h_dh_pub(const material_t *mt, int ax, double b, double *h, double *dh)
+{
+	bh_h_dh(mt, ax, b, h, dh);
+}
+
 
 // ---- Jiles-Atherton ヒステリシス ----
 

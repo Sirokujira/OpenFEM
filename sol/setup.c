@@ -72,13 +72,13 @@ static int setup_tri2d(void)
 		printf("%s\n", "*** a 2-D (cross-section) mesh needs the tline key");
 		return 1;
 	}
-	// 非線形 (B-H) の M (Newton) とヒステリシス (J-A) は Gauss 点毎の状態を構造格子の
-	// セル配列で持っているので、2 次元格子では使えない。F の B-H (実効磁気抵抗率法、要素ごとの ν) は
-	// 三角形の 1 次 / 高次でも解く (assemble_nu_tri が要素の ν を受け取り、ν の更新は場の要素の勾配から)
+	// ヒステリシス (J-A) は Gauss 点毎の状態を構造格子のセル配列で持っているので、2 次元格子では使えない。
+	// B-H 曲線は M (Newton、積分点ごとの ν、assemble_newton_tri) も F (実効磁気抵抗率法、要素ごとの ν) も三角形の
+	// 1 次 / 高次で解く
 	for (int m = 0; m < NMaterial; m++) {
-		if (((Material[m].nbh[0] > 0) && (Analysis & ANALYSIS_M)) || Material[m].ja.on) {
-			printf("%s\n", "*** nonlinear (bh) magnetostatics (M) and hysteresis (ja) materials are "
-				"available only on a structured mesh (bh with analysis F works on a 2-D mesh)");
+		if (Material[m].ja.on) {
+			printf("%s\n", "*** hysteresis (ja) materials are available only on a structured mesh "
+				"(bh curves work on a 2-D mesh with analysis M and F)");
 			return 1;
 		}
 	}
