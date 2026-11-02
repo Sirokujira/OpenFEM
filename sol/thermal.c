@@ -2367,6 +2367,8 @@ static int th_pr_mesh(void)
 	if (!MeshMode || (MeshDim != 3)) return 0;
 	if ((TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0)) return 1;
 	if ((TetOrder >= 2) && (NPrism > 0) && ((NTet + NHex + NPyr) == 0) && (PrismNen != 15)) return 1;
+	if ((TetOrder >= 2) && (TetOrder <= 5) && (NPyr == 0) && (((NTet > 0) + (NHex > 0) + (NPrism > 0)) >= 2)
+		&& ((NHex == 0) || (HexNen != 20)) && ((NPrism == 0) || (PrismNen != 15))) return 1;
 	return ((TetOrder >= 2) && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (HexNen != 20));
 }
 

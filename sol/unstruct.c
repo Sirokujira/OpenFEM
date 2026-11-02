@@ -627,8 +627,10 @@ static int elem_finish(void)
 			  四面体 - 角柱 : 三角形の面どうし (どちらも 1 次) -> 適合
 			  六面体 - 角柱 : 四角形の面どうし (どちらも双 1 次) -> 適合
 			境界層を角柱で切って内部を四面体にする、という一番よくある形は通る。
+			角柱があれば六面体 - 角柱 (側面) - 四面体 (上下の面) の 3 種別もつながるので弾かない
+			(六面体と四面体が直接接していないかは同じく elem_face_check() が位相で見る)。
 			*/
-			if ((NTet > 0) && (NHex > 0) && (NPyr < 1)) {
+			if ((NTet > 0) && (NHex > 0) && (NPyr < 1) && (NPrism < 1)) {
 				printf("%s\n", "*** mesh : hexahedra and tetrahedra cannot share a "
 					"face conformingly (the quadrilateral face carries a bilinear "
 					"trace, the triangular face a linear one); put prisms or "

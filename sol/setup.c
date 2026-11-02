@@ -296,11 +296,34 @@ static int setup_unstruct(void)
 			return 1;
 		}
 	}
+	// 種別の混在した高次の格子 (四面体・六面体・角柱、同じ次数 2〜5、完全 Lagrange) も eddy3d_pr.c (辺の自由度をすべて部分辺にそろえる)
+	else if ((TetOrder >= 2) && (TetOrder <= 5) && (NPyr == 0) && (((NTet > 0) + (NHex > 0) + (NPrism > 0)) >= 2)
+		&& ((NHex == 0) || (HexNen != 20)) && ((NPrism == 0) || (PrismNen != 15)) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+		int ja = 0, nl = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.on) ja = 1;
+			if (Material[m].ja.on || (Material[m].nbh[0] > 0)) nl = 1;
+		}
+		if (nl && (Analysis & ANALYSIS_E)) {
+			printf("*** analysis E (edge self test) on a mixed high-order mesh supports linear materials only\n");
+			return 1;
+		}
+		if (ja && (ThermalOn || !TransientOn)) {
+			printf("*** analysis A on a mixed high-order mesh supports ja (hysteresis) materials only in the time domain "
+				"without thermal\n");
+			return 1;
+		}
+		if ((GaugeTree || Direct) && (TransientOn || ThermalOn)) {
+			printf("*** analysis A on a mixed high-order mesh supports gauge = 0 and the iterative solver only in the time "
+				"domain / with thermal\n");
+			return 1;
+		}
+	}
 	else if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
 		// "need a first-order mesh" は rlc_check.sh が理由として grep する (3 次 / 4 次 / 2 次の六面体)
 		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh "
-			"(or, for a high order, a mesh of tetrahedra only, or of full Lagrange hexahedra / prisms only: "
-			"not 20-node / 15-node serendipity elements or mixed kinds)");
+			"(or, for a high order, tetrahedra / full Lagrange hexahedra / prisms of one order, mixed kinds allowed: "
+			"not 20-node / 15-node serendipity elements or pyramids)");
 		return 1;
 	}
 	// 10 節点の四面体も組み立てで積分点の det J の符号が揃わない要素を飛ばす (tet10_element が 1 を
