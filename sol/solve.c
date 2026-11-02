@@ -1645,16 +1645,18 @@ static int solve_one(FILE *fp_log)
 				HaveF = 1;
 			}
 		}
-		else if (TransientOn && MeshMode && (TetOrder == 2)) {
+		else if (TransientOn && MeshMode && (TetOrder == 2) && (NHex == 0)) {
 			ierr |= solve_eddy3d_p2_transient(fp_log);
 		}
-		else if (TransientOn && MeshMode && (TetOrder >= 3)) {
+		else if (TransientOn && MeshMode && (TetOrder >= 2)) {
+			// 3 次以上の四面体と、2 次以上の (完全 Lagrange の) 六面体
 			ierr |= solve_eddy3d_pr_transient(fp_log);
 		}
 		else if (TransientOn) {
 			ierr |= solve_eddy3d_transient(fp_log);
 		}
-		else if (MeshMode && (TetOrder >= 3)) {
+		else if (MeshMode && ((TetOrder >= 3) || ((TetOrder >= 2) && (NHex > 0)))) {
+			// 3 次以上の四面体と、2 次以上の (完全 Lagrange の) 六面体
 			ierr |= solve_eddy3d_pr(fp_log);
 		}
 		else if (MeshMode && (TetOrder == 2)) {

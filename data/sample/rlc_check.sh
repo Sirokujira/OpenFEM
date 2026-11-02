@@ -501,7 +501,8 @@ mesh_reject() {	# mesh_reject <ラベル> <ofe ファイル>
 	fi
 }
 echo "[mesh order] inputs the solver must reject"
-# 辺要素 (E / A) は四面体ならどの次数でも解ける ([A order 2] / [A order 3+])。高次の六面体・角柱は弾く (h3x_e)
+# 辺要素 (E / A) は四面体ならどの次数でも解ける ([A order 2] / [A order 3+])。高次の六面体は A だけ ([A hex order 2+])、
+# 高次の六面体の E と高次の角柱は弾く (h3x_e)
 # 次数の混在 (四面体を 1 個だけ 1 次に落とす)
 awk '/^[0-9]+ 11 2 / && !done { print $1, 4, 2, $4, $5, $6, $7, $8, $9; done = 1; next } { print }' \
     "$SRC/box_p2.msh" > "$WORK/mixed.msh"
@@ -4691,6 +4692,29 @@ grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho3.msh"; next
 th_run tac3_unc.ofe
 compare "order-3 tets, AC, alpha = 0 : R == the uncoupled order-3 A [ohm]" "$ra03" \
 	"$(awk '/Z\(1,1\)/ { print $3; exit }' "$WORK/ofe.log")" 1e-6
+# (2d) 3 次の六面体 (bar_hex3.msh) の交流の発熱 : 部分辺の Nedelec (eddy3d_pr.c の六面体の分岐)。(2c) と同じ 4 つの検査
+cp "$SRC/bar_hex3.msh" "$WORK/"
+sed 's/^mesh = .*/mesh = bar_hex3.msh/' "$SRC/thermal_ac.ofe" > "$WORK/tach.ofe"
+awk '/^frequency/{next} /^awall/{next} /^analysis/{print "analysis = R"; next} /^thermal/{print "thermal = 7.5"; next} {print}' "$WORK/tach.ofe" > "$WORK/tach_dc.ofe"
+th_run tach_dc.ofe
+rdch=$(th_r); tdch=$(th_t)
+awk '/^frequency/{print "frequency = 1"; next} /^thermal/{print "thermal = 10.606601717798213"; next} {print}' "$WORK/tach.ofe" > "$WORK/tach_lf.ofe"
+th_run tach_lf.ofe
+compare "order-3 hexahedra : AC at 1 Hz (7.5 sqrt 2 A peak) == DC thermal (7.5 A) : R [ohm]" "$(th_r)" "$rdch" 1e-8
+compare "order-3 hexahedra : AC at 1 Hz == DC thermal : T_max [degC]" "$(th_t)" "$tdch" 1e-8
+th_energy "order-3 hexahedra, AC at 1 Hz"
+awk '/^tempco/{print "tempco = 2 0 0"; next} /^thermal/{print "thermal = 100"; next} {print}' "$WORK/tach.ofe" > "$WORK/tach_a0.ofe"
+th_run tach_a0.ofe
+ra0h=$(th_r)
+tma0h=$(awk '/T_mean/ { print $8; exit }' "$WORK/ofe.log")
+th_energy "order-3 hexahedra, AC, 100 kHz, alpha = 0"
+set -- $(awk -v f=1e5 -v sig=5.8e7 -v k=400 -v I=100 -v R="$ra0h" -f "$SRC/ac_heat.awk")
+compare "order-3 hexahedra, AC, 100 kHz : volume-mean temperature rise == q L^2 / (12 k) [K]" \
+	"$(awk -v t="$tma0h" 'BEGIN { printf "%.12e", t - 20 }')" "$2" 1e-6
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_hex3.msh"; next} {print}' > "$WORK/tach_unc.ofe"
+th_run tach_unc.ofe
+compare "order-3 hexahedra, AC, alpha = 0 : R == the uncoupled order-3 A [ohm]" "$ra0h" \
+	"$(awk '/Z\(1,1\)/ { print $3; exit }' "$WORK/ofe.log")" 1e-6
 # (4) 弾くべき入力
 awk '/^frequency/{print "frequencysweep = 1e4 1e5"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_sw.ofe"
 th_reject "AC heating with frequencysweep" tacx_sw.ofe "cannot be combined with frequencysweep"
@@ -6158,6 +6182,125 @@ cp "$SRC/box_p3.msh" "$WORK/"
 awk '/^analysis/{print "bh = 2 100 0.5"} {print}' "$WORK/edge_test.ofe" | sed 's/^mesh = .*/mesh = box_p3.msh/' > "$WORK/prx_ebh.ofe"
 th_reject "order-3 edge self test (E) with a bh material" prx_ebh.ofe "supports linear materials with analysis E"
 
+# ---- 高次の六面体の辺要素 (analysis = A、27 / 64 / 125 / 216 節点、eddy3d_pr.c の部分辺の Nedelec) ----
+#
+# A を次数 p の Nedelec (第 1 種、Q_{p−1,p,p} x ...)、φ を六面体の節点で解く。自由度は格子の隣り合う節点を結ぶ部分辺で、基底は
+# histopolation の e_i = −Σ_{m≤i} ℓ_m' と Lagrange の積 (∇N が接続行列に厳密に一致)。格子は bar_eddy と同じ棒を gmsh が幾何から
+# 4 x 1 x 4 の六面体で切ったもの (gmsh_bar_hex.py、空気層つきは z に 2 区間足す)。
+#   (a) 100 Hz : DC の場は空間に入るので R・L が 1e-7
+#   (b) 100 kHz : 2 次は 1e-2、3 次は 2e-4 以内で 2 次より 30 倍、4 次は 1e-5 以内で 3 次より 10 倍よい (実測 +7.8e-3 / −7.0e-5 / −1.9e-6)
+#   (c) 剛体回転した格子 (J が対角でない) で R・L が 8 桁一致。(c') 要素ごとに局所の座標系を回した格子 (隣と向きが違う) も 8 桁一致
+#   (d) 滑らかに曲げた要素 : 100 Hz が 2e-4、h/2 で 100 倍よい (収束)、100 kHz が 5e-4、analysis R が閉形式に 1e-8
+#   (e) 空気層 (2 材料、bar_air の閉形式) : 3 次が 2e-4 以内で 2 次より 30 倍よい
+#   (f) ゲージ固定と直接解法 : gauge = 0 と一致、LDLᵀ のピボットに零空間が残らない (2 次は反復解法の gauge = 1 も)。電極の面が awall でない格子
+#       (bar_air_yw_hex3、yawall) でも通る (電極の節点を木の根にするので、1 次と違い awall でつながっている必要は無い)
+#   (g) 場の出力 (100 Hz、中心の B・J) : 四面体と同じ恒等式
+#   (h) B-H 曲線 (周波数領域の実効磁気抵抗率法、層が非線形で H が一様) : 自己無撞着な閉形式に 1e-7
+#   (i) 対応しない組み合わせ (時間領域・熱連成のゲージ固定) は理由をつけて弾く。E は「1 次の格子」の理由で ([order-3 hex/prism] の h3x_e)。
+#       過渡解析は [A transient] の (g)、交流の発熱は [thermal_ac] の (2d)
+echo "[A hex order 2+] 3-D eddy current on hexahedra of order 2 and up (sub-edge Nedelec / nodal elements)"
+for m in bar_hex2 bar_hex3 bar_hex4 bar_air_hex2 bar_air_hex3 bar_air_yw_hex3; do cp "$SRC/$m.msh" "$WORK/"; done
+set -- $(awk -v f=1e5 -f "$SRC/bar_eddy_z.awk"); hbre=$1; hble=$2
+# (a) (b)
+p2_case "hexahedra order 3, 100 Hz" bar_hex3.msh 1e2 1e-7
+p2_case "hexahedra order 2, 100 kHz" bar_hex2.msh 1e5 1e-2
+set -- $(pr_err "$P2R" "$P2L" "$hbre" "$hble"); h2r=$1; h2l=$2
+p2_case "hexahedra order 3, 100 kHz" bar_hex3.msh 1e5 2e-4
+hr3=$P2R; hl3=$P2L
+set -- $(pr_err "$P2R" "$P2L" "$hbre" "$hble"); h3r=$1; h3l=$2
+pr_ratio "hexahedra : order 3 beats order 2 at 100 kHz" "$h2r" "$h2l" "$h3r" "$h3l" 30
+p2_case "hexahedra order 4, 100 kHz" bar_hex4.msh 1e5 1e-5
+set -- $(pr_err "$P2R" "$P2L" "$hbre" "$hble"); h4r=$1; h4l=$2
+pr_ratio "hexahedra : order 4 beats order 3 at 100 kHz" "$h3r" "$h3l" "$h4r" "$h4l" 10
+# (c)
+awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+	{ print }' "$WORK/bar_hex3.msh" > "$WORK/bar_hex3_rot.msh"
+p2_case "hexahedra order 3, rigidly rotated mesh, 100 kHz" bar_hex3_rot.msh 1e5 2e-4
+res=$(awk -v a="$P2R" -v b="$hr3" -v c="$P2L" -v d="$hl3" 'BEGIN { x = a / b - 1; y = c / d - 1; if (x < 0) x = -x; if (y < 0) y = -y
+	printf "%s (%.1e, %.1e)", ((x < 1e-8) && (y < 1e-8)) ? "OK" : "NG", x, y }')
+echo "  hexahedra order 3, rigidly rotated mesh : R, L == axis-aligned mesh : $res"
+case "$res" in NG*) status=1 ;; esac
+# (c') 要素ごとに局所の座標系を参照立方体の 90° 回転で振り直した格子 (gmsh_bar_hex.py の twist、gmsh の API で節点の並びを
+#      付け替える)。transfinite の格子は全要素の局所の向きが揃っていて**辺の向きの符号を全部 +1 にする誤りが等価**になるので
+#      (実測、全検査が通った)、隣と向きが食い違うこの格子で同じ答え (8 桁) を見る
+cp "$SRC/bar_hex3t.msh" "$WORK/"
+p2_case "hexahedra order 3, local frames rotated per element, 100 kHz" bar_hex3t.msh 1e5 2e-4
+res=$(awk -v a="$P2R" -v b="$hr3" -v c="$P2L" -v d="$hl3" 'BEGIN { x = a / b - 1; y = c / d - 1; if (x < 0) x = -x; if (y < 0) y = -y
+	printf "%s (%.1e, %.1e)", ((x < 1e-8) && (y < 1e-8)) ? "OK" : "NG", x, y }')
+echo "  hexahedra order 3, local frames rotated per element : R, L == the original numbering : $res"
+case "$res" in NG*) status=1 ;; esac
+# (d) 曲がった要素 : 境界を動かさない滑らかな変形 x += d (L, 0.7 W, 0.5 t) sin(πx/L) sin(πy/W) sin(πz/t) (d = 0.05) を全節点に掛け、
+#     4 x 1 x 4 と 8 x 2 x 8 (bar_hex3f.msh) で解く。100 Hz の L が 2e-4 以内で、細かい方が 100 倍よい (実測 −6.2e-5 → −1.2e-7)。
+#     **節点を要素ごとにばらばらに (h に比例して) ずらした格子は細かくしても収束しない** (細かくしても要素がアフィンに
+#     近づかず、引き戻した空間に物理空間の 1 次の場が入らないため。実測 L −1.4e-3 のまま。四面体も振幅の 2 乗で同じ)
+cp "$SRC/bar_hex3f.msh" "$WORK/"
+for m in bar_hex3 bar_hex3f; do
+	awk -v d=0.05 'BEGIN { pi = 3.141592653589793; L = 2e-3; W = 0.25e-3; T = 1e-3 }
+		/^\$Nodes/ { f = 1; print; getline; print; next } /^\$EndNodes/ { f = 0 }
+		f && NF == 4 { x = $2; y = $3; z = $4; s = sin(pi * x / L) * sin(pi * y / W) * sin(pi * z / T); printf "%s %.17g %.17g %.17g\n", $1, x + d * L * s, y + d * W * s * 0.7, z + d * T * s * 0.5; next }
+		{ print }' "$WORK/$m.msh" > "$WORK/${m}_sm.msh"
+done
+p2_case "hexahedra order 3, smoothly curved elements (4 x 1 x 4), 100 Hz" bar_hex3_sm.msh 1e2 2e-4
+set -- $(pr_err "$P2R" "$P2L" $(awk -v f=1e2 -f "$SRC/bar_eddy_z.awk")); hc1r=$1; hc1l=$2
+p2_case "hexahedra order 3, smoothly curved elements (8 x 2 x 8), 100 Hz" bar_hex3f_sm.msh 1e2 1e-6
+set -- $(pr_err "$P2R" "$P2L" $(awk -v f=1e2 -f "$SRC/bar_eddy_z.awk")); hc2r=$1; hc2l=$2
+res=$(awk -v a="$hc1l" -v b="$hc2l" 'BEGIN { if (a < 0) a = -a; if (b < 0) b = -b; printf "%s (%.0fx)", (b * 100 < a) ? "OK" : "NG", a / b }')
+echo "  hexahedra order 3, smoothly curved elements : L converges (h/2 better by more than 100x) : $res"
+case "$res" in NG*) status=1 ;; esac
+p2_case "hexahedra order 3, smoothly curved elements (4 x 1 x 4), 100 kHz" bar_hex3_sm.msh 1e5 5e-4
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_hex3_sm.msh"; next} /^frequency/{next} /^awall/{next} /^analysis/{print "analysis = R"; next} {print}' > "$WORK/hx3r.ofe"
+(cd "$WORK" && "$OFE" -n 2 hx3r.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  hx3r : the run failed -> NG" >&2; status=1; }
+compare "hexahedra order 3, smoothly curved elements : analysis R == L / (sigma W t) [ohm]" \
+	"$(awk -F, '$1 == "R" { a = 1; next } a && $1 == "1" { print $2; exit }' "$WORK/rlc.csv")" 1.3793103448e-04 1e-8
+# (e) 空気層 (bar_air.ofe の閉形式、100 kHz : R = 4.7930357804e-04, L = 9.7419014024e-10)
+for o in 2 3; do
+	grep -v '^#' "$SRC/bar_air.ofe" | awk -v m="bar_air_hex$o.msh" '/^mesh/{print "mesh = " m; next} /^frequency/{print "frequency = 1e5"; next} {print}' > "$WORK/hxa$o.ofe"
+	set -- $(p2_rl "hxa$o.ofe")
+	eval "har$o=\$1; hal$o=\$2"
+done
+set -- $(pr_err "$har2" "$hal2" 4.7930357804e-04 9.7419014024e-10) $(pr_err "$har3" "$hal3" 4.7930357804e-04 9.7419014024e-10)
+compare "hexahedra order 3, air layer (2 materials), 100 kHz : R [ohm]" "$har3" 4.7930357804e-04 2e-4
+compare "hexahedra order 3, air layer (2 materials), 100 kHz : L [H]" "$hal3" 9.7419014024e-10 2e-4
+pr_ratio "hexahedra : air layer, order 3 beats order 2" "$1" "$2" "$3" "$4" 30
+# (f) 2 次は反復解法の gauge = 1 も (反復は 4 倍、実測 151 -> 637)。**3 次以上の gauge = 1 の反復解法は部分辺の木の
+#     悪条件で 20000 回でも収束しない** (細かい格子の全域木と同じ。実測) ので直接解法で見る
+grep -v '^#' "$SRC/bar_air.ofe" | awk '/^mesh/{print "mesh = bar_air_hex2.msh"; next} /^frequency/{print "frequency = 1e5"; next} /^analysis/{print "gauge = 1"} {print}' > "$WORK/hxg2_1.ofe"
+set -- $(p2_rl hxg2_1.ofe)
+compare "hexahedra order 2 : gauge = 1 (sub-edge tree, iterative) == gauge = 0 : R [ohm]" "$1" "$har2" 1e-7
+compare "hexahedra order 2 : gauge = 1 (sub-edge tree, iterative) == gauge = 0 : L [H]" "$2" "$hal2" 1e-7
+for m in bar_air_hex2 bar_air_hex3 bar_air_yw_hex3; do
+	for g in 0 2; do
+		awk -v m="$m" -v g="$g" '/^mesh/{print "mesh = " m ".msh"; next} /^analysis/{ if (g > 0) { print "gauge = 1"; print "direct = 1" } } {print}' \
+			"$WORK/hxa3.ofe" > "$WORK/hxg_${m}_$g.ofe"
+	done
+	set -- $(p2_rl "hxg_${m}_0.ofe")
+	r0=$1; l0=$2
+	set -- $(p2_rl "hxg_${m}_2.ofe")
+	pv_check "hexahedra, $m : gauge = 1 + direct = 1"
+	compare "hexahedra, $m : gauge = 1 + direct = 1 == gauge = 0 : R [ohm]" "$1" "$r0" 1e-6
+	compare "hexahedra, $m : gauge = 1 + direct = 1 == gauge = 0 : L [H]" "$2" "$l0" 1e-6
+done
+# (g)
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_hex3.msh"; next} /^frequency/{print "frequency = 1e2"; next} /^analysis = A/{print "fieldout = 1"} {print}' > "$WORK/hx_fld.ofe"
+(cd "$WORK" && "$OFE" -n 2 hx_fld.ofe > /dev/null 2>&1) || { echo "  hx_fld : the run failed -> NG" >&2; status=1; }
+compare "hexahedra order 3, field output : volume of the cells [m^3]" "$(vtk vol J_A_re)" 5.0e-10 1e-9
+compare "hexahedra order 3, field output : |J| max (sigma V / L) [A/m^2]" "$(vtk vmax J_A_re)" 2.9e10 1e-4
+compare "hexahedra order 3, field output : |J| min [A/m^2]" "$(vtk vmin J_A_re)" 2.9e10 1e-4
+compare "hexahedra order 3, field output : mean J_x (signed) [A/m^2]" "$(vtk mean0 J_A_re)" -2.9e10 1e-4
+pf=$(awk -v r="$(vtk int2 J_A_re)" -v m="$(vtk int2 J_A_im)" 'BEGIN{ printf "%.10e", (r + m) / (2 * 5.8e7) }')
+pt=$(awk '/port 1 : I =/{ printf "%.10e", 0.5 * $6 }' "$WORK/ofe.log")
+compare "hexahedra order 3, field output : ohmic loss from the field == 1/2 Re(V I) [W]" "$pf" "$pt" 1e-6
+# (h)
+grep -v '^#' "$WORK/bar_air_bh.ofe" | sed -e 's/^mesh = .*/mesh = bar_air_hex3.msh/' -e "s/^current = .*/current = 250/" > "$WORK/hxbh.ofe"
+set -- $(p2_rl hxbh.ofe) $(awk -v f=1e2 -v mode=nl -v I=250 -f "$SRC/bar_layer.awk")
+compare "hexahedra order 3, nonlinear layer, I = 250 A : R == self-consistent closed form [ohm]" "$1" "$3" 1e-7
+compare "hexahedra order 3, nonlinear layer, I = 250 A : L == self-consistent closed form [H]" "$2" "$4" 1e-7
+# (i)
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_hex3.msh"; next} /^frequency/{next} /^analysis/{print "gauge = 1"; print "transient = 1e-6 4"} {print}' > "$WORK/hxx_tr.ofe"
+th_reject "order-3 hexahedra, A transient with gauge = 1" hxx_tr.ofe "supports gauge = 0 and the iterative solver only in the time domain"
+
 # ---- 3 次元渦電流の過渡解析 (analysis = A + transient、後退 Euler、電圧駆動) ----
 #
 # χ = Δt φ を未知数にすると係数行列が実対称・半正定値になる (eddy3d.c の solve_eddy3d_transient)。
@@ -6281,6 +6424,36 @@ res=$(awk -v gr="$yre" -v gi="$yim" -v a1="$cr16" -v b1="$ci16" -v a2="$cr32" -v
 	q = (e2 > 0) ? e1 / e2 : 0; ok = "NG"; if ((q >= 1.7) && (q <= 2.3) && (er <= 1e-2)) ok = "OK"
 	printf "%s (16 steps %.2e, 32 steps %.2e, ratio %.2f; Richardson %.2e)", ok, e1, e2, q, er }')
 echo "  order 3, sine at 10 kHz : steady state -> frequency-domain Y (backward Euler, first order) : $res"
+case "$res" in NG*) status=1 ;; esac
+# (g) 3 次の六面体 (bar_hex3.msh) : 部分辺の Nedelec の過渡解析 (同じ solve_eddy3d_pr_transient)。(f) と同じ 3 つの検査
+cp "$SRC/bar_hex3.msh" "$WORK/"
+awk '/^mesh/{print "mesh = bar_hex3.msh"; next} {print}' "$WORK/a3t2_base.ofe" > "$WORK/a3th_base.ofe"
+awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 50"} {print}' "$WORK/a3th_base.ofe" > "$WORK/a3th_step.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3th_step.ofe > /dev/null 2>&1) || { echo "  a3th_step : the run failed -> NG" >&2; status=1; }
+a3_energy "order-3 hexahedra, voltage step"
+compare "order-3 hexahedra, voltage step held : I(t_end) == G_dc V [A]" "$(awk -F, 'NR > 1 { i = $3 } END { print i }' "$WORK/ofe_transient.csv")" 7250 1e-9
+awk '/^frequency/{print "frequency = 1e4"; next} {print}' "$WORK/a3th_base.ofe" > "$WORK/a3th_fd.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3th_fd.ofe > /dev/null 2>&1) || { echo "  a3th_fd : the run failed -> NG" >&2; status=1; }
+set -- $(awk '/port 1 : I =/ { print $6, $7; exit }' "$WORK/ofe.log")
+yre=$1; yim=$2
+for N in 16 32; do
+	awk -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4; T = 1 / f; s = "waveform ="
+		for (k = 0; k <= 2 * N; k++) { t = k * T / N; s = s sprintf(" %.12e %.15g", t, sin(2 * pi * f * t)) } print s }' > "$WORK/a3th_wf.txt"
+	awk -v wf="$WORK/a3th_wf.txt" -v ns=$((2 * N)) '/^frequency/{next}
+		/^analysis/{ while ((getline l < wf) > 0) print l; print "transient = 2e-4 " ns } {print}' "$WORK/a3th_base.ofe" > "$WORK/a3th_sin.ofe"
+	(cd "$WORK" && "$OFE" -n 2 a3th_sin.ofe > /dev/null 2>&1) || { echo "  a3th_sin ($N) : the run failed -> NG" >&2; status=1; }
+	[ "$N" = 32 ] && a3_energy "order-3 hexahedra, sine, 32 steps per period"
+	set -- $(awk -F, -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4 } NR > 1 { k = NR - 1
+		if (k > N) { a += $3 * sin(2 * pi * f * $1); b += $3 * cos(2 * pi * f * $1) } } END { printf "%.12e %.12e", 2 * a / N, 2 * b / N }' "$WORK/ofe_transient.csv")
+	eval "hr$N=\$1; hi$N=\$2"
+done
+res=$(awk -v gr="$yre" -v gi="$yim" -v a1="$hr16" -v b1="$hi16" -v a2="$hr32" -v b2="$hi32" 'BEGIN {
+	y = sqrt(gr * gr + gi * gi)
+	e1 = sqrt((a1 - gr) ^ 2 + (b1 - gi) ^ 2) / y; e2 = sqrt((a2 - gr) ^ 2 + (b2 - gi) ^ 2) / y
+	ra = 2 * a2 - a1; rb = 2 * b2 - b1; er = sqrt((ra - gr) ^ 2 + (rb - gi) ^ 2) / y
+	q = (e2 > 0) ? e1 / e2 : 0; ok = "NG"; if ((q >= 1.7) && (q <= 2.3) && (er <= 1e-2)) ok = "OK"
+	printf "%s (16 steps %.2e, 32 steps %.2e, ratio %.2f; Richardson %.2e)", ok, e1, e2, q, er }')
+echo "  order-3 hexahedra, sine at 10 kHz : steady state -> frequency-domain Y (backward Euler, first order) : $res"
 case "$res" in NG*) status=1 ;; esac
 
 # ---- 3 次元渦電流 + ヒステリシスの過渡解析 (analysis = A + transient + ja、ベクトル J-A、四面体) ----
@@ -6567,6 +6740,52 @@ a3_energy "order 3, J-A, quasi-static sine (16 steps per period)"
 wfem=$(awk -F, 'NR == 17 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/ofe_transient.csv")
 wref=$(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=16 -f "$SRC/ja_bar_loop.awk")
 compare "order 3, J-A, quasi-static hysteresis loss of the 2nd period == forward J-A along H_y(z) (awk) [J]" "$wfem" "$wref" 1e-2
+# (f) 3 次の六面体 (bar_hex3.msh、4 x 1 x 4) : 部分辺の Nedelec (eddy3d_pr.c の六面体の分岐) で同じ prnl_*。(e) と同じ検査:
+#     直線の B-H 曲線 / ほぼ線形の J-A == 線形の μr = 50 (1 刻み 2 回)、準静的な正弦波の B-H の和と J-A の損が awk の
+#     独立な積分に近い (この粗い格子で −0.24% / −0.63%、h = 0.25 mm の bar_ho3.msh では −0.09% / −0.02% に縮む。
+#     J-A は格子の誤差の分だけ許容を 1% にした)、仕事の恒等式、剛体回転した格子で I(t) と回数が不変
+cp "$SRC/bar_hex3.msh" "$WORK/"
+sed 's/^mesh = .*/mesh = bar_hex3.msh/' "$WORK/a2nl_lin.ofe" > "$WORK/a3hx_lin.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3hx_lin.ofe > /dev/null 2>&1 && cp ofe_transient.csv a3hx_lin.csv) || { echo "  a3hx_lin : the run failed -> NG" >&2; status=1; }
+a3hx_same() {	# a3hx_same <ラベル> <ofe> : a3hx_lin と I(t) が 1e-7、固定点は 1 刻み 2 回まで (a3nl_same の六面体版)
+	(cd "$WORK" && "$OFE" -n 2 "$2" > /dev/null 2>&1) || { echo "  $2 : the run failed -> NG" >&2; status=1; }
+	res=$(paste -d, "$WORK/a3hx_lin.csv" "$WORK/ofe_transient.csv" | awk -F, -v nfp="$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")" '
+		NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
+		END { ok = "NG"; if ((n == 50) && (m < 1e-7) && (nfp + 0 >= 50) && (nfp + 0 <= 100)) ok = "OK"
+		      printf "%s (%d steps, max %.1e, %d fixed-point iterations)", ok, n, m + 0, nfp + 0 }')
+	echo "  order-3 hexahedra, $1 == linear mur = 50 : I(t) : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+sed 's/^mesh = .*/mesh = bar_hex3.msh/' "$WORK/a2nl_bhl.ofe" > "$WORK/a3hx_bhl.ofe"
+a3hx_same "straight-line B-H curve" a3hx_bhl.ofe
+sed 's/^mesh = .*/mesh = bar_hex3.msh/' "$WORK/a2nl_jal.ofe" > "$WORK/a3hx_jal.ofe"
+a3hx_same "near-linear J-A" a3hx_jal.ofe
+sed 's/^mesh = .*/mesh = bar_hex3.msh/' "$WORK/abh_qs.ofe" > "$WORK/a3hx_bqs.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3hx_bqs.ofe > /dev/null 2>&1 && cp ofe_transient.csv a3hx_bqs.csv && cp ofe.log a3hx_bqs.log) || { echo "  a3hx_bqs : the run failed -> NG" >&2; status=1; }
+a3_energy "order-3 hexahedra, B-H curve, quasi-static sine"
+wfem=$(awk -F, 'NR == 33 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/a3hx_bqs.csv")
+wref=$(awk -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=32 -v bh="100 0.5 1000 1.0 10000 1.2" -f "$SRC/ja_bar_loop.awk")
+compare "order-3 hexahedra, B-H curve, quasi-static sine : 2nd-period sum of H dB == the same sum along H_y(z) (awk) [J]" "$wfem" "$wref" 5e-3
+awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+	{ print }' "$WORK/bar_hex3.msh" > "$WORK/bar_hex3_rot2.msh"
+sed 's/^mesh = .*/mesh = bar_hex3_rot2.msh/' "$WORK/a3hx_bqs.ofe" > "$WORK/a3hx_bqsr.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3hx_bqsr.ofe > /dev/null 2>&1) || { echo "  a3hx_bqsr : the run failed -> NG" >&2; status=1; }
+nfa=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/a3hx_bqs.log")
+nfr=$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")
+res=$(paste -d, "$WORK/a3hx_bqs.csv" "$WORK/ofe_transient.csv" | awk -F, -v a="${nfa:-0}" -v b="${nfr:-0}" '
+	NR > 1 { d = ($3 - $10) / 0.5; if (d < 0) d = -d; if (d > m) m = d; n++ }
+	END { ok = "NG"; if ((n == 64) && (m < 1e-6) && (a > 0) && (b > 0) && (b <= 1.2 * a + 5)) ok = "OK"
+	      printf "%s (%d steps, max %.1e of the peak; iterations %d vs %d)", ok, n, m + 0, b, a }')
+echo "  order-3 hexahedra, B-H curve, rigidly rotated mesh : I(t) and fixed-point iterations == axis-aligned mesh : $res"
+case "$res" in NG*) status=1 ;; esac
+sed 's/^mesh = .*/mesh = bar_hex3.msh/' "$WORK/a2nl_jqs.ofe" > "$WORK/a3hx_jqs.ofe"
+(cd "$WORK" && "$OFE" -n 2 a3hx_jqs.ofe > /dev/null 2>&1) || { echo "  a3hx_jqs : the run failed -> NG" >&2; status=1; }
+a3_energy "order-3 hexahedra, J-A, quasi-static sine (16 steps per period)"
+wfem=$(awk -F, 'NR == 17 { w = $5 } END { printf "%.10e", $5 - w }' "$WORK/ofe_transient.csv")
+wref=$(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -v j0=2e6 -v tt=1e-3 -v area=5e-7 -v ncyc=2 -v nstep=16 -f "$SRC/ja_bar_loop.awk")
+compare "order-3 hexahedra, J-A, quasi-static hysteresis loss of the 2nd period == forward J-A along H_y(z) (awk) [J]" "$wfem" "$wref" 1e-2
 
 # 未使用キーの警告。σ の読み出しは Material[].sigma (R/A/E) と CondSigma[] (Rs/F) の
 # 2 系統に分かれていて、取り違えても値が 0 になるだけで黙って通る。

@@ -247,6 +247,26 @@ static int setup_unstruct(void)
 			return 1;
 		}
 	}
+	// 高次の六面体 (27 / 64 / 125 / 216 節点、完全 Lagrange) だけの格子の A は部分辺の Nedelec 要素 (eddy3d_pr.c の六面体)。
+	// 四面体の 3 次以上と同じ範囲 (周波数領域・過渡解析・交流の発熱、B-H 曲線、過渡解析の J-A、周波数領域のゲージ固定・直接解法・
+	// 場の出力)。E・serendipity・混在は弾く
+	else if ((TetOrder >= 2) && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (HexNen != 20) && (Analysis & ANALYSIS_A)
+		&& !(Analysis & ANALYSIS_E)) {
+		int ja = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.on) ja = 1;
+		}
+		if (ja && (ThermalOn || !TransientOn)) {
+			printf("*** analysis A on a high-order hexahedral mesh (order-%d sub-edge Nedelec) supports ja (hysteresis) "
+				"materials only in the time domain without thermal\n", TetOrder);
+			return 1;
+		}
+		if ((GaugeTree || Direct) && (TransientOn || ThermalOn)) {
+			printf("*** analysis A on a high-order hexahedral mesh (order-%d sub-edge Nedelec) supports gauge = 0 and the "
+				"iterative solver only in the time domain / with thermal\n", TetOrder);
+			return 1;
+		}
+	}
 	else if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
 		// "need a first-order mesh" は rlc_check.sh が理由として grep する (3 次 / 4 次 / 2 次の六面体)
 		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh "

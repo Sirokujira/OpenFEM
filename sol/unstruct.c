@@ -3032,6 +3032,21 @@ static const signed char *prismp_a(int p, int a) { return ((p == 5) ? PRISM5_A[a
 static int hexp_order(int nen) { return ((nen == 216) ? 5 : (nen == 125) ? 4 : (nen == 64) ? 3 : 0); }
 static int prismp_order(int nen) { return ((nen == 126) ? 5 : (nen == 75) ? 4 : (nen == 40) ? 3 : 0); }
 
+// 六面体の局所節点 a の格子位置 ix (各方向 0..p) と次数 p (完全 Lagrange の 8 / 27 / 64 / 125 / 216 節点。serendipity の
+// 20 節点は格子に乗らないので 0)。高次の六面体の辺要素 (eddy3d_pr.c) が部分辺の番号付けに使う
+int hex_lattice(int a, int ix[3])
+{
+	const int p = hexp_order(HexNen);
+	if (p) {
+		const signed char *s = hexp_i(p, a);
+		for (int c = 0; c < 3; c++) ix[c] = s[c];
+		return p;
+	}
+	if ((HexNen != 8) && (HexNen != 27)) return 0;
+	for (int c = 0; c < 3; c++) ix[c] = ((HexNen == 27) ? (HEX2_XI[a][c] + 1) : ((HEX2_XI[a][c] + 1) / 2));
+	return ((HexNen == 27) ? 2 : 1);
+}
+
 
 
 // 1 次元の p 次 Lagrange (等間隔の節点 x_i = -1 + 2i/p) の値 v と微分 d

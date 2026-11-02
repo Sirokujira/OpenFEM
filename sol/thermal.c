@@ -2361,6 +2361,15 @@ static double th_pfac(void)
 }
 
 
+// 交流の発熱を eddy3d_pr.c で解く格子 : 3 次以上の四面体だけ、または 2 次以上の完全 Lagrange の六面体だけ
+static int th_pr_mesh(void)
+{
+	if (!MeshMode || (MeshDim != 3)) return 0;
+	if ((TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0)) return 1;
+	return ((TetOrder >= 2) && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (HexNen != 20));
+}
+
+
 // 電気の段 : 電流 cur での発熱の節点荷重 f と *gout = 1 / R を作る。
 // DC は th_conduct + th_joule (従来の経路そのもの)、交流は eddy3d_heat_solve
 static int th_electric(FILE *fp_log, crs_t *A, const double *scell, unsigned char *fix,
@@ -2375,7 +2384,7 @@ static int th_electric(FILE *fp_log, crs_t *A, const double *scell, unsigned cha
 		else if (MeshMode && (TetOrder == 2) && ((NHex + NPrism + NPyr) == 0)) {
 			if (eddy3d_p2_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
 		}
-		else if (MeshMode && (TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0)) {
+		else if (th_pr_mesh()) {
 			if (eddy3d_pr_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
 		}
 		else if (eddy3d_heat_solve(fp_log, scell, cur, f, &zr, &zi, it)) return 1;
@@ -2911,8 +2920,8 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 	const int p2tet = (MeshMode && (MeshDim == 3) && (TetOrder == 2) && ((NHex + NPrism + NPyr) == 0)
 		&& (Analysis & ANALYSIS_A));
 	// 3 次以上の四面体だけの格子の交流の発熱は次数 r の Nedelec (eddy3d_pr.c)
-	const int prtet = (MeshMode && (MeshDim == 3) && (TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0)
-		&& (Analysis & ANALYSIS_A));
+	// (と 2 次以上の完全 Lagrange の六面体だけの格子、部分辺の Nedelec)
+	const int prtet = (th_pr_mesh() && (Analysis & ANALYSIS_A));
 
 	fprintf(fp_log, "\n=== electro-thermal analysis ===\n");
 	// 非構造格子は 1 次の 3 次元要素 (四面体・六面体・角柱・ピラミッド、混在可)、高次の四面体、

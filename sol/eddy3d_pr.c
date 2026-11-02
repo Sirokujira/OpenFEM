@@ -33,8 +33,8 @@ f の上で 0 になり (λ_i (i ∉ f) が掛かるか、φ_σ の σ が f の
 
 #define PR_RMAX (7)
 #define PR_TMAX (128)		// 1 つの実体の関数の数の上限 (内部 r(r−1)(r−2)/2 = 105 @ r = 7)
-#define PR_NAMAX (6 * 7 + 4 * 42 + 105)		// 要素の A の自由度 (r = 7 で 315)
-#define PR_NPMAX (TET_NMAX)		// 要素の φ の自由度 (r = 7 で 120)
+#define PR_NAMAX (3 * 5 * 6 * 6)		// 要素の A の自由度 (四面体 r = 7 で 315、六面体 p = 5 で 3p(p+1)² = 540)
+#define PR_NPMAX (ELEM_NMAX)		// 要素の φ の自由度 (四面体 r = 7 で 120、六面体 p = 5 で 216)
 #define PR_NDMAX (PR_NAMAX + PR_NPMAX)
 
 static const int PR_EDGE[6][2] = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};	// edge.c と同じ
@@ -136,7 +136,179 @@ static struct {
 	double omega;
 	double *nuq;		// 非線形 (B-H) の積分点ごとの ν [nt * nq] (NULL なら材料の ν)
 	int nq;
+	int hex;			// 高次の六面体の格子なら次数 p (A は部分辺の自由度、下の「高次の六面体」)
+	int32_t *hse;		// [nt * nA] 要素の局所の部分辺 -> 全体の部分辺
+	signed char *hsg;	// [nt * nA] 向きの符号 (全体の向きは小さい節点番号 -> 大きい方)
+	int32_t *hsa, *hsb;	// [ne] 部分辺の両端の節点 (a < b)
 } PR;
+
+/*
+---- 高次の六面体 (27 / 64 / 125 / 216 節点、完全 Lagrange、等パラメトリック) ----
+
+A を次数 p の Nedelec 要素 (第 1 種、x 成分が Q_{p−1,p,p}、y・z も同様) で、φ を六面体の節点そのもので離散化する。
+自由度は**格子の隣り合う節点を結ぶ部分辺** (要素あたり 3p(p+1)²) の線積分で、基底は 1 次元の histopolation の関数
+
+	e_i(ξ) = −Σ_{m ≤ i} ℓ_m'(ξ)     (ℓ_m は等間隔の p 次 Lagrange。∫_{ξ_m}^{ξ_{m+1}} e_i dξ = δ_im)
+
+と Lagrange の積 : 方向 d の部分辺 (始点の格子位置 i) の関数は W = e_{i_d}(ξ_d) Π_{c≠d} ℓ_{i_c}(ξ_c) ∇ξ_d。参照座標 ξ_c は
+節点の値の補間 Σ_a ξ_c(a) N_a で厳密に表せるので、∇ξ_c = J⁻ᵀ e_c (共変 Piola) が形状関数の勾配から作れ、
+∇×W = ∇f × ∇ξ_d が曲がった要素でも厳密。ℓ_a' = e_{a−1} − e_a なので**節点の関数の勾配は部分辺の関数の接続行列
+の和に厳密に一致**し (∇N の係数は端点の ±1)、ゲージの零空間は 1 次と同じく部分辺のグラフの全域木で消える。
+隣の要素と共有する面の部分辺は節点の組で同じ自由度になり、面の上のトレース (e_i ℓ_j) は節点だけで決まるので
+接線連続 (向きの反転は e_i(−ξ) = −e_{p−1−i} で、全体の向きの符号に入る)。
+*/
+static int HXp, HXnen;
+static int HXI[ELEM_NMAX][3];			// 局所節点の格子位置
+static int HXinv[ELEM_NMAX];			// 格子位置 (i + (p+1)(j + (p+1)k)) -> 局所節点
+static int HXd[PR_NAMAX], HXa[PR_NAMAX], HXb[PR_NAMAX];		// 局所の部分辺の方向・始点・終点 (局所節点)
+
+
+static int pr_hex_init(void)
+{
+	int ix[3];
+	const int p = hex_lattice(0, ix);
+	if (p < 2) return 1;
+	HXp = p;
+	HXnen = HexNen;
+	const int q = p + 1;
+	for (int i = 0; i < q * q * q; i++) HXinv[i] = -1;
+	for (int a = 0; a < HexNen; a++) {
+		if (hex_lattice(a, HXI[a]) != p) return 1;
+		const int id = HXI[a][0] + (q * (HXI[a][1] + (q * HXI[a][2])));
+		if ((id < 0) || (id >= q * q * q) || (HXinv[id] >= 0)) return 1;
+		HXinv[id] = a;
+	}
+	int k = 0;
+	for (int d = 0; d < 3; d++) {
+		for (int a = 0; a < HexNen; a++) {
+			if (HXI[a][d] >= p) continue;
+			int jx[3] = {HXI[a][0], HXI[a][1], HXI[a][2]};
+			jx[d]++;
+			HXd[k] = d;
+			HXa[k] = a;
+			HXb[k] = HXinv[jx[0] + (q * (jx[1] + (q * jx[2])))];
+			k++;
+		}
+	}
+	return (k != (3 * p * q * q));
+}
+
+
+// 等間隔の p 次 Lagrange ℓ_m の値・1 階・2 階微分 (節点 −1 + 2m/p)
+static void pr_lag(int p, int m, double x, double *v, double *d1, double *d2)
+{
+	double val = 1, a1 = 0, a2 = 0;
+	const double xm = -1 + ((2.0 * m) / p);
+	for (int j = 0; j <= p; j++) {
+		if (j == m) continue;
+		const double xj = -1 + ((2.0 * j) / p);
+		const double f = (x - xj) / (xm - xj), fd = 1 / (xm - xj);
+		a2 = (a2 * f) + (2 * a1 * fd);
+		a1 = (a1 * f) + (val * fd);
+		val *= f;
+	}
+	*v = val;
+	*d1 = a1;
+	*d2 = a2;
+}
+
+
+// 高次の六面体の A の基底 (値 wv と回転 wc、pr_dofs の並び)。nv / g は積分点の形状関数の値と物理空間の勾配
+static void pr_hex_basis(int e, const double nv[ELEM_NMAX], const double g[ELEM_NMAX][3], double (*wv)[3], double (*wc)[3])
+{
+	const int p = HXp, nen = HXnen, nA = PR.nA;
+	double xi[3] = {0, 0, 0}, gx[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+	for (int a = 0; a < nen; a++) {
+		for (int c = 0; c < 3; c++) {
+			const double s = -1 + ((2.0 * HXI[a][c]) / p);
+			xi[c] += s * nv[a];
+			for (int q = 0; q < 3; q++) gx[c][q] += s * g[a][q];
+		}
+	}
+	double lv[3][PR_RMAX + 1], ld[3][PR_RMAX + 1], ev[3][PR_RMAX + 1], ed[3][PR_RMAX + 1];
+	for (int c = 0; c < 3; c++) {
+		double sv = 0, sd = 0;
+		for (int m = 0; m <= p; m++) {
+			double d2;
+			pr_lag(p, m, xi[c], &lv[c][m], &ld[c][m], &d2);
+			sv -= ld[c][m];
+			sd -= d2;
+			ev[c][m] = sv;
+			ed[c][m] = sd;
+		}
+	}
+	const signed char *sg = &PR.hsg[(int64_t)e * nA];
+	for (int k = 0; k < nA; k++) {
+		const int d = HXd[k], *ix = HXI[HXa[k]];
+		double f = sg[k], gf[3] = {0, 0, 0};
+		double fc[3], dc[3];
+		for (int c = 0; c < 3; c++) {
+			fc[c] = ((c == d) ? ev[c][ix[c]] : lv[c][ix[c]]);
+			dc[c] = ((c == d) ? ed[c][ix[c]] : ld[c][ix[c]]);
+		}
+		f *= fc[0] * fc[1] * fc[2];
+		for (int c = 0; c < 3; c++) {
+			double t = sg[k] * dc[c];
+			for (int o = 0; o < 3; o++) {
+				if (o != c) t *= fc[o];
+			}
+			for (int q = 0; q < 3; q++) gf[q] += t * gx[c][q];
+		}
+		for (int q = 0; q < 3; q++) wv[k][q] = f * gx[d][q];
+		cross3(gf, gx[d], wc[k]);
+	}
+}
+
+
+static int cmp_i64(const void *a, const void *b)
+{
+	const int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+	return ((x < y) ? -1 : ((x > y) ? 1 : 0));
+}
+
+
+// 高次の六面体の部分辺の番号付け (全要素の部分辺を節点の組で重複なく並べる)
+static int pr_hex_number(void)
+{
+	const int nt = PR.nt, nA = PR.nA;
+	const int64_t m = (int64_t)nt * nA, nn = NNode;
+	int64_t *key = (int64_t *)malloc((size_t)m * sizeof(int64_t));
+	PR.hse = (int32_t *)malloc((size_t)m * sizeof(int32_t));
+	PR.hsg = (signed char *)malloc((size_t)m * sizeof(signed char));
+	for (int e = 0; e < nt; e++) {
+		int32_t nd[ELEM_NMAX];
+		hex_nodes(e, nd);
+		for (int k = 0; k < nA; k++) {
+			const int64_t a = nd[HXa[k]], b = nd[HXb[k]];
+			key[((int64_t)e * nA) + k] = ((a < b) ? ((a * nn) + b) : ((b * nn) + a));
+			PR.hsg[((int64_t)e * nA) + k] = (signed char)((a < b) ? 1 : -1);
+		}
+	}
+	int64_t *srt = (int64_t *)malloc((size_t)m * sizeof(int64_t));
+	memcpy(srt, key, (size_t)m * sizeof(int64_t));
+	qsort(srt, (size_t)m, sizeof(int64_t), cmp_i64);
+	int64_t u = 0;
+	for (int64_t i = 0; i < m; i++) {
+		if ((i == 0) || (srt[i] != srt[i - 1])) srt[u++] = srt[i];
+	}
+	if (u >= INT32_MAX) {
+		free(key); free(srt);
+		return 1;
+	}
+	PR.ne = (int)u;
+	PR.hsa = (int32_t *)malloc((size_t)u * sizeof(int32_t));
+	PR.hsb = (int32_t *)malloc((size_t)u * sizeof(int32_t));
+	for (int64_t i = 0; i < u; i++) {
+		PR.hsa[i] = (int32_t)(srt[i] / nn);
+		PR.hsb[i] = (int32_t)(srt[i] % nn);
+	}
+	for (int64_t i = 0; i < m; i++) {
+		const int64_t *f = (const int64_t *)bsearch(&key[i], srt, (size_t)u, sizeof(int64_t), cmp_i64);
+		PR.hse[i] = (int32_t)(f - srt);
+	}
+	free(key); free(srt);
+	return 0;
+}
 
 #define PR_AAM (5)		// 非線形の Anderson 加速の深さ (2 次の P2_AAM と同じ)
 
@@ -144,6 +316,14 @@ static struct {
 // 要素の自由度の全体番号 (A : 辺・面・内部、φ : 要素の節点)。戻り値は個数
 static int pr_dofs(int e, int32_t dof[PR_NDMAX])
 {
+	if (PR.hex) {
+		const int nA = PR.nA;
+		for (int k = 0; k < nA; k++) dof[k] = PR.hse[((int64_t)e * nA) + k];
+		int32_t nd[ELEM_NMAX];
+		const int nen = hex_nodes(e, nd);
+		for (int a = 0; a < nen; a++) dof[nA + a] = PR.oV + nd[a];
+		return nA + nen;
+	}
 	const int32_t *ed = &TetEdge[EdgeOff[e]];
 	int k = 0;
 	for (int l = 0; l < 6; l++) {
@@ -189,6 +369,10 @@ static void pr_fun(const double lam[4], const double gl[4][3], const double pw[4
 static void pr_basis_core(int e, const double nv[ELEM_NMAX], const double g[ELEM_NMAX][3],
 	double (*wv)[3], double (*wc)[3])
 {
+	if (PR.hex) {
+		pr_hex_basis(e, nv, g, wv, wc);
+		return;
+	}
 	const int r = PR.r;
 	int32_t nd[TET_NMAX];
 	const int nen = tet_nodes(e, nd);
@@ -319,6 +503,7 @@ static void pr_close(void)
 	free(PR.xdr); free(PR.xdi); free(PR.br); free(PR.bi); free(PR.ur); free(PR.ui); free(PR.w1); free(PR.w2);
 	free(PR.fix); free(PR.cond); free(PR.used);
 	free(PR.fe); free(PR.fvert);
+	free(PR.hse); free(PR.hsg); free(PR.hsa); free(PR.hsb);
 	crs_free(&PR.Kr);
 	crs_free(&PR.Ki);
 	edge_free();
@@ -329,6 +514,27 @@ static void pr_close(void)
 // 実体と自由度の番号付け (A と E で共通)
 static int pr_number(FILE *fp_log, const char *what)
 {
+	// 高次の六面体だけの格子 (完全 Lagrange) : A は部分辺の自由度
+	if (MeshMode && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (TetOrder >= 2)) {
+		memset(&PR, 0, sizeof(PR));
+		if (pr_hex_init()) {
+			fprintf(fp_log, "*** the %s needs hexahedra with the full Lagrange nodes (27 / 64 / 125 / 216, not the "
+				"20-node serendipity element)\n", what);
+			return 1;
+		}
+		PR.hex = PR.r = HXp;
+		PR.nn = NNode;
+		PR.nt = NHex;
+		PR.nA = 3 * HXp * (HXp + 1) * (HXp + 1);
+		PR.nP = HexNen;
+		if (pr_hex_number()) {
+			fprintf(fp_log, "*** the %s : too many sub-edges\n", what);
+			return 1;
+		}
+		PR.oF = PR.oI = PR.oV = PR.ne;
+		PR.n = PR.oV + PR.nn;
+		return 0;
+	}
 	if (!MeshMode || (TetOrder < 2) || (NHex + NPrism + NPyr > 0) || pr_init(TetOrder)) {
 		fprintf(fp_log, "*** the %s needs a pure tetrahedral mesh of order 2 to %d\n", what, PR_RMAX);
 		return 1;
@@ -729,6 +935,124 @@ static int pr_gauge(FILE *fp_log, unsigned char *fix)
 }
 
 
+// 高次の六面体の awall : 要素の面の 4 隅が awall の四角形に一致したら、その面に乗る部分辺 (両端が面の上) を固定する。
+// 戻り値は固定した面の数 (内部の awall は両側から数える)
+static int cmp_quad4(const void *a, const void *b)
+{
+	const int32_t *x = (const int32_t *)a, *y = (const int32_t *)b;
+	for (int i = 0; i < 4; i++) {
+		if (x[i] != y[i]) return ((x[i] < y[i]) ? -1 : 1);
+	}
+	return 0;
+}
+
+static void sort4(int32_t *v)
+{
+	for (int x = 0; x < 3; x++) {
+		for (int y = x + 1; y < 4; y++) {
+			if (v[y] < v[x]) { const int32_t t = v[x]; v[x] = v[y]; v[y] = t; }
+		}
+	}
+}
+
+static int uf_find_pr(int *par, int x)
+{
+	while (par[x] != x) {
+		par[x] = par[par[x]];
+		x = par[x];
+	}
+	return x;
+}
+
+static int pr_hex_wall(unsigned char *fix)
+{
+	const int nt = PR.nt, nA = PR.nA, p = HXp, q = p + 1;
+	int32_t *key = (int32_t *)malloc(((size_t)NQuad + 1) * 4 * sizeof(int32_t));
+	int nk = 0;
+	for (int t = 0; t < NQuad; t++) {
+		int hit = 0;
+		for (int w = 0; w < NAWall; w++) {
+			if (QuadTag[t] == AWallTag[w]) hit = 1;
+		}
+		if (!hit) continue;
+		for (int c = 0; c < 4; c++) key[(nk * 4) + c] = Quad[(t * 4) + c];
+		sort4(&key[nk * 4]);
+		nk++;
+	}
+	qsort(key, (size_t)nk, 4 * sizeof(int32_t), cmp_quad4);
+	int nwall = 0;
+	for (int e = 0; (e < nt) && (nk > 0); e++) {
+		int32_t nd[ELEM_NMAX];
+		hex_nodes(e, nd);
+		for (int d = 0; d < 3; d++) {
+			for (int side = 0; side <= p; side += p) {
+				int32_t cv[4];
+				int m = 0;
+				for (int s1 = 0; s1 <= p; s1 += p) {
+					for (int s2 = 0; s2 <= p; s2 += p) {
+						int ix[3];
+						ix[d] = side;
+						ix[(d + 1) % 3] = s1;
+						ix[(d + 2) % 3] = s2;
+						cv[m++] = nd[HXinv[ix[0] + (q * (ix[1] + (q * ix[2])))]];
+					}
+				}
+				sort4(cv);
+				if (bsearch(cv, key, (size_t)nk, 4 * sizeof(int32_t), cmp_quad4) == NULL) continue;
+				nwall++;
+				for (int k = 0; k < nA; k++) {
+					if ((HXd[k] != d) && (HXI[HXa[k]][d] == side)) fix[PR.hse[((int64_t)e * nA) + k]] = 1;
+				}
+			}
+		}
+	}
+	free(key);
+	return nwall;
+}
+
+
+// 高次の六面体のゲージ固定 (gauge = 1)。∇ψ は部分辺の接続行列そのものなので、部分辺のグラフの全域木の辺で A = 0 と置く。
+// ψ は電極の節点で 0 (φ を固定した節点。電極ごとの別の値を許さない) で awall の上で一定なので、**電極の節点を全部
+// 1 つの根につなぎ、awall の部分辺を先に入れた** Kruskal の木を作る。木から決まる ψ は根で 0・awall の連結成分で一定に
+// なって零空間が消え、電極の上の部分辺 (根の中の辺) は木に入らないので固定されない (本物の接線の A)。根に awall の
+// 成分が入らなくても成分ごとの定数を木が決めるので、1 次と違い電極が awall でつながっている必要は無い
+static int pr_hex_gauge(FILE *fp_log, unsigned char *fix)
+{
+	const int ne = PR.ne, nn = PR.nn;
+	int *par = (int *)malloc((size_t)nn * sizeof(int));
+	for (int i = 0; i < nn; i++) par[i] = i;
+	int root = -1, nel = 0;
+	for (int i = 0; i < nn; i++) {
+		if ((NodeConductor[i] < 0) || !PR.cond[i] || !PR.used[i]) continue;
+		if (root < 0) root = i;
+		else par[i] = root;
+		nel++;
+	}
+	int ntree = 0, nwall = 0;
+	for (int pass = 0; pass < 2; pass++) {
+		for (int i = 0; i < ne; i++) {
+			if ((fix[i] != 0) != (pass == 0)) continue;
+			const int a = uf_find_pr(par, PR.hsa[i]), b = uf_find_pr(par, PR.hsb[i]);
+			if (a == b) continue;
+			par[a] = b;
+			if (pass == 0) nwall++;
+			else {
+				fix[i] = 1;
+				ntree++;
+			}
+		}
+	}
+	int ncomp = 0;
+	for (int i = 0; i < nn; i++) {
+		if (PR.used[i] && (uf_find_pr(par, i) == i)) ncomp++;
+	}
+	fprintf(fp_log, "  gauge : %d tree sub-edges beyond %d awall forest sub-edges, %d electrode nodes as the root, "
+		"%d connected component(s)\n", ntree, nwall, nel, ncomp);
+	free(par);
+	return 0;
+}
+
+
 static int pr_open(FILE *fp_log)
 {
 	if ((NPort < 1) || (Freq <= 0)) {
@@ -738,9 +1062,15 @@ static int pr_open(FILE *fp_log)
 	if (pr_number(fp_log, "high-order A-phi solver")) return 1;
 	const int n = PR.n, ne = PR.ne, nf = PR.nf, nn = PR.nn, nt = PR.nt;
 	PR.omega = 2 * PI * Freq;
-	fprintf(fp_log, "  order %d : nodes = %d, tetrahedra = %d, edges = %d, faces = %d, unknowns = %d "
-		"(A : %d x %d edges + %d x %d faces + %d x %d interiors = %d per element, phi : %d nodes)\n",
-		PR.r, nn, nt, ne, nf, n, NtE, ne, NtF, nf, NtI, nt, PR.nA, nn);
+	if (PR.hex) {
+		fprintf(fp_log, "  order %d hexahedra : nodes = %d, hexahedra = %d, unknowns = %d (A : %d sub-edges, %d per element, "
+			"phi : %d nodes)\n", PR.r, nn, nt, n, ne, PR.nA, nn);
+	}
+	else {
+		fprintf(fp_log, "  order %d : nodes = %d, tetrahedra = %d, edges = %d, faces = %d, unknowns = %d "
+			"(A : %d x %d edges + %d x %d faces + %d x %d interiors = %d per element, phi : %d nodes)\n",
+			PR.r, nn, nt, ne, nf, n, NtE, ne, NtF, nf, NtI, nt, PR.nA, nn);
+	}
 	pr_crs(&PR.Kr);
 	pr_crs(&PR.Ki);
 	// mpisolve = 2 : 実部・虚部とも自分の行ブロックだけを持つ
@@ -750,7 +1080,8 @@ static int pr_open(FILE *fp_log)
 	// Dirichlet : awall の三角形の辺と面の A (接線成分 0)、電極の節点の φ (= V)、非導電領域と未使用の φ
 	unsigned char *fix = PR.fix = (unsigned char *)calloc((size_t)n, sizeof(unsigned char));
 	int nwall = 0;
-	for (int t = 0; t < NTri; t++) {
+	if (PR.hex) nwall = pr_hex_wall(fix);
+	for (int t = 0; (t < NTri) && !PR.hex; t++) {
 		int hit = 0;
 		for (int q = 0; q < NAWall; q++) {
 			if (TriTag[t] == AWallTag[q]) hit = 1;
@@ -777,8 +1108,8 @@ static int pr_open(FILE *fp_log)
 	unsigned char *cond = PR.cond = (unsigned char *)calloc((size_t)nn, sizeof(unsigned char));
 	unsigned char *used = PR.used = (unsigned char *)calloc((size_t)nn, sizeof(unsigned char));
 	for (int e = 0; e < nt; e++) {
-		int32_t nd[TET_NMAX];
-		const int nen = tet_nodes(e, nd);
+		int32_t nd[ELEM_NMAX];
+		const int nen = elem3d_nodes(e, nd);
 		const int c = (Material[elem3d_mat(e)].sigma > 0);
 		for (int a = 0; a < nen; a++) {
 			used[nd[a]] = 1;
@@ -794,7 +1125,7 @@ static int pr_open(FILE *fp_log)
 		}
 	}
 	fprintf(fp_log, "  fixed : %d wall faces (A_t = 0), %d electrode nodes\n", nwall, nelec);
-	if (GaugeTree && pr_gauge(fp_log, fix)) return 1;
+	if (GaugeTree && (PR.hex ? pr_hex_gauge(fp_log, fix) : pr_gauge(fp_log, fix))) return 1;
 	if (nwall == 0) {
 		fprintf(fp_log, "*** warning : no awall surface; the outer boundary is a magnetic wall (dA/dn = 0)\n");
 	}
@@ -941,7 +1272,20 @@ static void pr_fields(void)
 	int32_t *dof = (int32_t *)malloc(PR_NDMAX * sizeof(int32_t));
 	for (int e = 0; e < nt; e++) {
 		double nv[ELEM_NMAX], g[ELEM_NMAX][3], det;
-		if (tet_ho_point(e, lc, nv, g, &det)) continue;
+		if (PR.hex) {
+			// 六面体の中心 (ξ = 0) : 形状関数は 1 次元の Lagrange の積
+			int nen;
+			if (hex2_grad_center(e, g, &nen)) continue;
+			for (int a = 0; a < nen; a++) {
+				nv[a] = 1;
+				for (int c = 0; c < 3; c++) {
+					double v, d1, d2;
+					pr_lag(HXp, HXI[a][c], 0, &v, &d1, &d2);
+					nv[a] *= v;
+				}
+			}
+		}
+		else if (tet_ho_point(e, lc, nv, g, &det)) continue;
 		pr_dofs(e, dof);
 		pr_basis_core(e, nv, g, wv, wc);
 		double br[3] = {0, 0, 0}, er[3] = {0, 0, 0}, ei[3] = {0, 0, 0};
@@ -1255,8 +1599,8 @@ int eddy3d_pr_heat_solve(FILE *fp_log, const double *sigelem, double cur, double
 		const double sg = sigelem[e];
 		if (sg <= 0) continue;
 		pr_dofs(e, dof);
-		int32_t nd[TET_NMAX];
-		tet_nodes(e, nd);
+		int32_t nd[ELEM_NMAX];
+		elem3d_nodes(e, nd);
 		const int nq = elem3d_nip(e);
 		for (int q = 0; q < nq; q++) {
 			double nv[ELEM_NMAX], g[ELEM_NMAX][3], w;
