@@ -73,7 +73,8 @@ void monitor2(FILE *fp, int nthread)
 	else if (MeshMode && (MeshElem == MESHELEM_HEX)) {
 		fprintf(fp, "Mesh = %s (unstructured, %d-node %s hexahedra)\n", MeshFile,
 			HexNen, ((HexNen == 8) ? "trilinear" : (HexNen == 20) ? "serendipity"
-			       : (HexNen == 64) ? "tricubic" : (HexNen == 125) ? "triquartic" : (HexNen == 216) ? "triquintic" : "triquadratic"));
+			       : (HexNen == 64) ? "tricubic" : (HexNen == 125) ? "triquartic" : (HexNen == 216) ? "triquintic"
+			       : (HexNen == 343) ? "trisextic" : (HexNen == 512) ? "triseptic" : "triquadratic"));
 		fprintf(fp, "Nodes = %lld, Hexahedra = %d, Quadrilaterals = %d\n",
 			(long long)nnode, NHex, NQuad);
 		if (MeshRaisedElem > 0) {

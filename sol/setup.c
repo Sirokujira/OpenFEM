@@ -334,8 +334,8 @@ static int setup_unstruct(void)
 			return 1;
 		}
 	}
-	// 種別の混在した高次の格子 (四面体・六面体・角柱、同じ次数 2〜5、完全 Lagrange) も eddy3d_pr.c (辺の自由度をすべて部分辺にそろえる)
-	else if ((TetOrder >= 2) && (TetOrder <= 5) && (NPyr == 0) && (((NTet > 0) + (NHex > 0) + (NPrism > 0)) >= 2)
+	// 種別の混在した高次の格子 (四面体・六面体・角柱、同じ次数 2〜7、完全 Lagrange) も eddy3d_pr.c (辺の自由度をすべて部分辺にそろえる)
+	else if ((TetOrder >= 2) && (TetOrder <= 7) && (NPyr == 0) && (((NTet > 0) + (NHex > 0) + (NPrism > 0)) >= 2)
 		&& ((NHex == 0) || (HexNen != 20)) && ((NPrism == 0) || (PrismNen != 15)) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
 		int ja = 0, nl = 0;
 		for (int m = 0; m < NMaterial; m++) {

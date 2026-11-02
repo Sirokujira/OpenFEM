@@ -4665,6 +4665,86 @@ for m in slab_hex5:8 slab_prism5:16; do
 	th_energy "$g"
 done
 
+# ---- 6 次 / 7 次の六面体 (hexa343 = 型 95 / hexa512 = 型 96) と角柱 (prism196 = 型 107 / prism288 = 型 108) ----
+#
+# 局所節点の並びは gmsh の並びの再帰の規則 (unstruct.c の hex_rule / prism_rule : 頂点、辺、面に 1 つ低い 2 次元の格子、内部に 2 つ
+# 低い同じ形)。規則は gmsh の出力と 2〜8 次の全項で一致し (gmsh_hp_order.py)、起動時に 3〜5 次の実測の表と照合する。境界面の
+# 四角形は 49 / 64 節点 (型 47 / 48)。格子はどれも gmsh 製 (box_hex.geo / box_prism.geo を 2 x 2 x 1 にしたもの、gmsh_coax_ho.py、
+# gmsh_slab_ho.py、gmsh_bar_hex.py <out> p 2 1 2、gmsh_bar_prism.py <out> p 0.5e-3 1 y)。
+#   (a) 平行平板の C が全桁、analysis = P の 6 次 / 7 次の場の恒等式 (X Z^p と X^p Y の項が各方向 p + 1 点の積分を検査する)
+#   (b) 曲がった同軸 (1/4 周 2 分割) : 6 次が同じ格子の 5 次の 5 倍、7 次が 6 次の 3 倍よい (実測 13.5 / 13.9 倍、12 / 11 倍)
+#   (c) 熱連成 : 片面を冷やす板が閉形式に 1e-9 (6 次)
+#   (d) A (部分辺の Nedelec の 6 次 / 7 次、100 kHz の棒、粗い 2 x 1 x 2 / h = 0.5 mm) : 6 次が 5 次の 10 倍、7 次が 6 次の 10 倍よく
+#       7 次は 1e-8 以内 (実測 六面体 −4.6e-6 → +1.8e-7 → +2.8e-9、角柱 −2.3e-6 → +8.3e-8 → −3.1e-10)。**7 次の反復解法は
+#       収束しない** (20000 回で残差 9e-3、部分辺の基底の悪条件) ので、3 次以上のゲージの検査と同じく gauge = 1 + direct = 1 で解く
+#   (e) 辺要素の自己検証 (E) : 6 次の六面体・角柱、7 次の六面体で (Pra) (Prb) が厳密
+echo "[order-6/7 hex/prism] 343 / 512-node hexahedra and 196 / 288-node prisms (gmsh hexa343 / hexa512 / prism196 / prism288)"
+for m in box_hex6 box_hex7 box_prism6 box_prism7 coax_hex6a coax_hex7a coax_prism6a coax_prism7a coax_hex5a coax_prism5a slab_hex6 slab_prism6 \
+	bar_hex5c bar_hex6c bar_hex7c bar_prismy5c bar_prismy6c bar_prismy7c; do cp "$SRC/$m.msh" "$WORK/"; done
+for m in box_hex6:sextic box_hex7:septic box_prism6:sextic box_prism7:septic; do
+	g=${m%%:*}; w=${m#*:}
+	h3_c "$g" C
+	compare "$g : C (parallel plate) [F]" "$(value_of C)" 1.77083756e-13 1e-8
+	h3_c "$g" P
+	if grep -q '^\*\*\*' "$WORK/ofe.log" || ! grep -q "$w field : phi" "$WORK/ofe.log"; then
+		echo "  $g (analysis P) : the $w-field identity failed or did not run -> NG" >&2; status=1
+	else
+		echo "  $g (analysis P) : linear and $w field identities ($(awk -v w="$w" '$0 ~ w " field : phi" { print $NF }' "$WORK/ofe.log")) -> OK"
+	fi
+done
+for k in hex prism; do
+	for r in 5a 6a 7a; do
+		sed -e "s/coax_hex2.msh/coax_${k}$r.msh/" "$SRC/coax_hex2.ofe" | awk '/^analysis/{print "analysis = C"; next} {print}' > "$WORK/h67cx.ofe"
+		(cd "$WORK" && "$OFE" -n 2 h67cx.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  coax_${k}$r : the run failed -> NG" >&2; status=1; }
+		eval "c_$r=\$(value_of C)"
+	done
+	res=$(awk -v a="$c_5a" -v b="$c_6a" -v c="$c_7a" -v e="$cex" 'BEGIN {
+		e5 = (a - e) / e; if (e5 < 0) e5 = -e5; e6 = (b - e) / e; if (e6 < 0) e6 = -e6; e7 = (c - e) / e; if (e7 < 0) e7 = -e7
+		printf "%s (order 5 %.2e, order 6 %.2e, order 7 %.2e)", ((e5 > 5 * e6) && (e6 > 3 * e7)) ? "OK" : "NG", e5, e6, e7 }')
+	echo "  curved coax ($k, same mesh) : order 6 beats order 5, order 7 beats order 6 : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+for m in slab_hex6:8 slab_prism6:16; do
+	g=${m%%:*}; nf=${m#*:}
+	printf 'OpenFEM 1 0\ntitle = order-6 slab cooled on one face\nmesh = %s.msh\nmaterial = 1.0 1e6\ntempco = 2 0 0\nkthermal = 2 10\nregion = 1 2\nelectrode = 10 0\nelectrode = 11 1\nconvection = 5000 20 0 2e-3 0 1e-3 0 0\ntemperature = 20\nthermal = 10\nanalysis = R\nsolver = 100000 20000 1e-12\nend\n' "$g" > "$WORK/h67th.ofe"
+	th_run h67th.ofe
+	compare "$g : bottom face cooled : T_max (parabola) [degC]" "$(th_t)" 125 1e-9
+	compare "$g : bottom face cooled : T_mean [degC]" "$(t3_tm)" 123.333333333 1e-9
+	th_nface "$g : convection on the bottom face only" "$nf"
+	th_energy "$g"
+done
+set -- $(awk -v f=1e5 -f "$SRC/bar_eddy_z.awk"); hbre=$1; hble=$2
+for k in hex prismy; do
+	for o in 5 6 7; do
+		grep -v '^#' "$SRC/bar_eddy.ofe" | awk -v m="bar_${k}${o}c.msh" '/^mesh/{print "mesh = " m; next} /^frequency/{print "frequency = 1e5"; next} /^analysis/{print "gauge = 1"; print "direct = 1"} {print}' > "$WORK/h67a.ofe"
+		rm -f "$WORK/rlc.csv"
+		(cd "$WORK" && "$OFE" -n 2 h67a.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || true
+		set -- $(awk -F, '$1 == "Rf" && NF == 2 { f = 1; next } f && $1 == "1" { r = $2; exit } END { print (r == "") ? "x" : r }' "$WORK/rlc.csv" 2> /dev/null || echo x)
+		eval "e_$o=\$(awk -v r=\"\$1\" -v re=\"\$hbre\" 'BEGIN { if (r == \"x\") { print 1; exit } d = r / re - 1; if (d < 0) d = -d; printf \"%.3e\", d }')"
+		if [ "$o" = 7 ]; then
+			# 直接解法のピボットの桁落ち (pv_check と同じ判定。pv_check はこの節より後ろで定義されている)
+			res=$(awk '/smallest pivot \/ diagonal/ { v = $NF } END { if (v == "") { print "NG (no value)"; exit } printf "%s (%s)", (v + 0 > 1e-6) ? "OK" : "NG", v }' "$WORK/ofe.log")
+			echo "  bar_${k}7c : gauge = 1 + direct = 1 : smallest LDL^T pivot / diagonal > 1e-6 (no null space left) : $res"
+			case "$res" in NG*) status=1 ;; esac
+		fi
+	done
+	res=$(awk -v a="$e_5" -v b="$e_6" -v c="$e_7" 'BEGIN { printf "%s (R : order 5 %.2e, order 6 %.2e, order 7 %.2e)", ((a > 10 * b) && (b > 10 * c) && (c < 1e-8)) ? "OK" : "NG", a, b, c }')
+	echo "  A, $k bar (2 x 1 x 2), 100 kHz : order 6 beats 5, order 7 beats 6 by 10x, order 7 within 1e-8 of the 1-D exact solution : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+cp "$SRC/edge_test.ofe" "$WORK/"
+for c in "box_hex6 6" "box_hex7 7" "box_prism6 6"; do
+	set -- $c
+	sed "s/^mesh = .*/mesh = $1.msh/" "$WORK/edge_test.ofe" > "$WORK/h67e.ofe"
+	(cd "$WORK" && "$OFE" -n 2 h67e.ofe > /dev/null 2>&1) || true
+	np=$(grep -c "^  (Pr[ab]) .* passed$" "$WORK/ofe.log" || true)
+	if [ "$np" = 2 ] && grep -q "order-$2 edge self test : passed" "$WORK/ofe.log"; then
+		echo "  order-$2 edge self test (edge_test on $1) : (Pra) degree r-1, (Prb) + r x q : passed -> OK"
+	else
+		echo "  order-$2 edge self test (edge_test on $1) : $np of 2 identities passed -> NG" >&2; status=1
+	fi
+done
+
 # ---- 高次の種別混在 (同じ次数の四面体・六面体・角柱) ----
 #
 # 面のトレースは三角形なら P_p、四角形なら Q_p なので、同じ次数の種別どうしは面で適合する

@@ -2056,7 +2056,7 @@ static void gen_assemble(crs_t *A, const double *coef, int mass)
 		int32_t nd[ELEM_NMAX];
 		const int nen = elem3d_nodes(e, nd);
 		const int nq = elem3d_nip(e);
-		double ke[ELEM_NMAX][ELEM_NMAX];
+		static double ke[ELEM_NMAX][ELEM_NMAX];		// 7 次の六面体で 2 MB (スタックに置かない。並列領域の外)
 		for (int l = 0; l < nen; l++) {
 			for (int m = 0; m < nen; m++) ke[l][m] = 0;
 		}
@@ -2367,7 +2367,7 @@ static int th_pr_mesh(void)
 	if (!MeshMode || (MeshDim != 3)) return 0;
 	if ((TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0)) return 1;
 	if ((TetOrder >= 2) && (NPrism > 0) && ((NTet + NHex + NPyr) == 0) && (PrismNen != 15)) return 1;
-	if ((TetOrder >= 2) && (TetOrder <= 5) && (NPyr == 0) && (((NTet > 0) + (NHex > 0) + (NPrism > 0)) >= 2)
+	if ((TetOrder >= 2) && (TetOrder <= 7) && (NPyr == 0) && (((NTet > 0) + (NHex > 0) + (NPrism > 0)) >= 2)
 		&& ((NHex == 0) || (HexNen != 20)) && ((NPrism == 0) || (PrismNen != 15))) return 1;
 	return ((TetOrder >= 2) && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (HexNen != 20));
 }

@@ -33,7 +33,7 @@ f の上で 0 になり (λ_i (i ∉ f) が掛かるか、φ_σ の σ が f の
 
 #define PR_RMAX (7)
 #define PR_TMAX (128)		// 1 つの実体の関数の数の上限 (内部 r(r−1)(r−2)/2 = 105 @ r = 7)
-#define PR_NAMAX (3 * 5 * 6 * 6)		// 要素の A の自由度 (四面体 r = 7 で 315、六面体 p = 5 で 3p(p+1)² = 540、角柱 p = 5 で 315)
+#define PR_NAMAX (3 * 7 * 8 * 8)		// 要素の A の自由度 (四面体 r = 7 で 315、六面体 p = 7 で 3p(p+1)² = 1344、角柱 p = 7 で 756)
 #define PR_NPMAX (ELEM_NMAX)		// 要素の φ の自由度 (四面体 r = 7 で 120、六面体 p = 5 で 216)
 #define PR_NDMAX (PR_NAMAX + PR_NPMAX)
 
@@ -904,9 +904,9 @@ static int pr_number(FILE *fp_log, const char *what)
 	if (MeshMode && (TetOrder >= pmin) && (NPyr == 0) && ((((NTet > 0) + (NHex > 0) + (NPrism > 0)) >= 2))) {
 		memset(&PR, 0, sizeof(PR));
 		const int p = TetOrder;
-		if ((p > 5) || pr_init(p) || ((NHex > 0) && pr_hex_init()) || ((NPrism > 0) && pr_prism_init())
+		if ((p > 7) || pr_init(p) || ((NHex > 0) && pr_hex_init()) || ((NPrism > 0) && pr_prism_init())
 			|| ((NHex > 0) && (HXp != p)) || ((NPrism > 0) && (PXp != p)) || pr_mix_init(p)) {
-			fprintf(fp_log, "*** the %s on a mixed mesh needs elements of one order (2 to 5) with the full Lagrange nodes "
+			fprintf(fp_log, "*** the %s on a mixed mesh needs elements of one order (2 to 7) with the full Lagrange nodes "
 				"(not the 20-node / 15-node serendipity elements)\n", what);
 			return 1;
 		}

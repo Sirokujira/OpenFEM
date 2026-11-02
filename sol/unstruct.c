@@ -162,11 +162,11 @@ static int elem_store(int type, int tag, const int32_t *nd)
 	                 : ((type == 71) || (type == 42)) ? 6
 	                 : ((type == 72) || (type == 43)) ? 7 : 1);
 
-	if ((type == 5) || (type == 12) || (type == 17) || (type == 92) || (type == 93) || (type == 94)) {
+	if ((type == 5) || (type == 12) || (type == 17) || (type == 92) || (type == 93) || (type == 94) || (type == 95) || (type == 96)) {
 		// 六面体 (8 / 27 / 20 節点)。局所の並びは Gmsh のまま使う。
 		// 頂点 8 個を Hex に、2 次の残り (辺 12 + 面 6 + 体心 1) を Hex2 に
 		// 入れる。次数は最初の 1 個で決め、以後は混在を許さない
-		const int hn = ((type == 5) ? 8 : (type == 12) ? 27 : (type == 92) ? 64 : (type == 93) ? 125 : (type == 94) ? 216 : 20);
+		const int hn = ((type == 5) ? 8 : (type == 12) ? 27 : (type == 92) ? 64 : (type == 93) ? 125 : (type == 94) ? 216 : (type == 95) ? 343 : (type == 96) ? 512 : 20);
 		if (HexNen == 0) HexNen = hn;
 		if (HexNen != hn) {
 			// 節点数の違う六面体 : 取っておき、読み終えてから最高次数に上げる (ho_raise)
@@ -187,10 +187,10 @@ static int elem_store(int type, int tag, const int32_t *nd)
 
 		return 0;
 	}
-	if ((type == 6) || (type == 13) || (type == 18) || (type == 90) || (type == 91) || (type == 106)) {
+	if ((type == 6) || (type == 13) || (type == 18) || (type == 90) || (type == 91) || (type == 106) || (type == 107) || (type == 108)) {
 		// 角柱 (6 / 18 / 15 節点)。局所の並びは Gmsh のまま使う。
 		// 頂点 6 個を Prism に、2 次の残り (辺 9 + 四角形面 3) を Prism2 に入れる
-		const int pn = ((type == 6) ? 6 : (type == 13) ? 18 : (type == 90) ? 40 : (type == 91) ? 75 : (type == 106) ? 126 : 15);
+		const int pn = ((type == 6) ? 6 : (type == 13) ? 18 : (type == 90) ? 40 : (type == 91) ? 75 : (type == 106) ? 126 : (type == 107) ? 196 : (type == 108) ? 288 : 15);
 		if (PrismNen == 0) PrismNen = pn;
 		if (PrismNen != pn) {
 			// 節点数の違う角柱 : 取っておき、読み終えてから最高次数に上げる (ho_raise)
@@ -223,11 +223,11 @@ static int elem_store(int type, int tag, const int32_t *nd)
 
 		return 0;
 	}
-	if ((type == 3) || (type == 16) || (type == 10) || (type == 36) || (type == 37) || (type == 38)) {
+	if ((type == 3) || (type == 16) || (type == 10) || (type == 36) || (type == 37) || (type == 38) || (type == 47) || (type == 48)) {
 		// 四角形 (境界面、4 / 8 / 9 節点)。六面体格子の電極面はこれになる。
 		// 2 次の中間節点 (辺 4 + 中心) は Quad2 に入れる。無い位置は -1 で
 		// 埋める (realloc した領域は未初期化なので、必ず全 5 要素を書くこと)
-		const int qn = ((type == 3) ? 4 : (type == 16) ? 8 : (type == 36) ? 16 : (type == 37) ? 25 : (type == 38) ? 36 : 9);
+		const int qn = ((type == 3) ? 4 : (type == 16) ? 8 : (type == 36) ? 16 : (type == 37) ? 25 : (type == 38) ? 36 : (type == 47) ? 49 : (type == 48) ? 64 : 9);
 		if (NQuad % ARRAY_INC == 0) {
 			Quad = (int32_t *)realloc(Quad, (size_t)(NQuad + ARRAY_INC) * 4 * sizeof(int32_t));
 			QuadTag = (int *)realloc(QuadTag, (size_t)(NQuad + ARRAY_INC) * sizeof(int));
@@ -575,8 +575,10 @@ static int node_merge_check(void)
 static int hexp_order(int nen);
 static int prismp_order(int nen);
 
+static int hp_tables_init(void);
 static int elem_finish(void)
 {
+	if (hp_tables_init()) return 1;
 	if (node_merge_check()) return 1;
 	if (ho_raise()) return 1;
 
@@ -887,7 +889,9 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid, int v1)
 		              : (type == 10) ? 9 : (type == 16) ? 8
 		              : (type == 92) ? 64 : (type == 90) ? 40 : (type == 36) ? 16
 		              : (type == 93) ? 125 : (type == 91) ? 75 : (type == 37) ? 25
-		              : (type == 94) ? 216 : (type == 106) ? 126 : (type == 38) ? 36 : 0);
+		              : (type == 94) ? 216 : (type == 106) ? 126 : (type == 38) ? 36
+		              : (type == 95) ? 343 : (type == 107) ? 196 : (type == 47) ? 49
+		              : (type == 96) ? 512 : (type == 108) ? 288 : (type == 48) ? 64 : 0);
 		if (nn == 0) continue;			// 点・線分など、使わない要素型
 		if (nv < off + nn) continue;
 		if (v1 && (v[4] != nn)) {
@@ -1099,7 +1103,9 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              : (type == 10) ? 9 : (type == 16) ? 8
 		              : (type == 92) ? 64 : (type == 90) ? 40 : (type == 36) ? 16
 		              : (type == 93) ? 125 : (type == 91) ? 75 : (type == 37) ? 25
-		              : (type == 94) ? 216 : (type == 106) ? 126 : (type == 38) ? 36 : 0);
+		              : (type == 94) ? 216 : (type == 106) ? 126 : (type == 38) ? 36
+		              : (type == 95) ? 343 : (type == 107) ? 196 : (type == 47) ? 49
+		              : (type == 96) ? 512 : (type == 108) ? 288 : (type == 48) ? 64 : 0);
 		// 物理タグはエンティティ側にある (2.2 と違い要素の行には無い)
 
 		for (long e = 0; e < cnt; e++) {
@@ -1181,6 +1187,12 @@ static int gmsh_nnode(long type)
 	if (type == 94) return 216;
 	if (type == 106) return 126;
 	if (type == 38) return 36;
+	if (type == 95) return 343;
+	if (type == 96) return 512;
+	if (type == 107) return 196;
+	if (type == 108) return 288;
+	if (type == 47) return 49;
+	if (type == 48) return 64;
 	// 6 次 / 7 次の四面体・三角形
 	if (type == 71) return 84;
 	if (type == 72) return 120;
@@ -1309,7 +1321,8 @@ static int read_elements_bin22(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 		              || (type == 12) || (type == 17) || (type == 13) || (type == 18)
 		              || (type == 10) || (type == 16) || (type == 92) || (type == 90) || (type == 36)
-		              || (type == 93) || (type == 91) || (type == 37) || (type == 94) || (type == 106) || (type == 38));
+		              || (type == 93) || (type == 91) || (type == 37) || (type == 94) || (type == 106) || (type == 38)
+	     || (type == 95) || (type == 96) || (type == 107) || (type == 108) || (type == 47) || (type == 48));
 
 		for (long e = 0; e < cnt; e++) {
 			int32_t etag = 0;
@@ -1472,7 +1485,8 @@ static int read_elements_bin41(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 		              || (type == 12) || (type == 17) || (type == 13) || (type == 18)
 		              || (type == 10) || (type == 16) || (type == 92) || (type == 90) || (type == 36)
-		              || (type == 93) || (type == 91) || (type == 37) || (type == 94) || (type == 106) || (type == 38));
+		              || (type == 93) || (type == 91) || (type == 37) || (type == 94) || (type == 106) || (type == 38)
+	     || (type == 95) || (type == 96) || (type == 107) || (type == 108) || (type == 47) || (type == 48));
 
 		for (int64_t e = 0; e < cnt; e++) {
 			int64_t etag = 0;
@@ -1531,14 +1545,16 @@ static int gmsh_type_used(long type)
 	     || (type == 5) || (type == 3) || (type == 6) || (type == 7)
 	     || (type == 12) || (type == 17) || (type == 13) || (type == 18)
 	     || (type == 10) || (type == 16) || (type == 92) || (type == 90) || (type == 36)
-	     || (type == 93) || (type == 91) || (type == 37) || (type == 94) || (type == 106) || (type == 38));
+	     || (type == 93) || (type == 91) || (type == 37) || (type == 94) || (type == 106) || (type == 38)
+	     || (type == 95) || (type == 96) || (type == 107) || (type == 108) || (type == 47) || (type == 48));
 }
 
 // 使う要素型の次元 (物理タグをエンティティから引くのに要る)
 static int gmsh_type_dim(long type)
 {
 	return (((type == 2) || (type == 9) || (type == 21) || (type == 23) || (type == 25) || (type == 42) || (type == 43)
-	      || (type == 3) || (type == 10) || (type == 16) || (type == 36) || (type == 37) || (type == 38)) ? 2 : 3);
+	      || (type == 3) || (type == 10) || (type == 16) || (type == 36) || (type == 37) || (type == 38)
+	      || (type == 47) || (type == 48)) ? 2 : 3);
 }
 
 
@@ -3327,11 +3343,160 @@ static const signed char PRISM5_A[126][4] = {
 	{1, 1, 3, 2}, {1, 1, 3, 3}, {2, 2, 1, 1}, {2, 2, 1, 4}, {2, 2, 1, 2}, {2, 2, 1, 3}, {1, 2, 2, 1}, {1, 2, 2, 4},
 	{1, 2, 2, 2}, {1, 2, 2, 3}, {2, 1, 2, 1}, {2, 1, 2, 4}, {2, 1, 2, 2}, {2, 1, 2, 3}
 };
-static const signed char *hexp_i(int p, int a) { return ((p == 5) ? HEX5_I[a] : (p == 4) ? HEX4_I[a] : HEX3_I[a]); }
-static const signed char *prismp_a(int p, int a) { return ((p == 5) ? PRISM5_A[a] : (p == 4) ? PRISM4_A[a] : PRISM3_A[a]); }
+/*
+6 次 / 7 次 (hexa343 = 型 95 / hexa512 = 型 96、prism196 = 型 107 / prism288 = 型 108、境界面の四角形 49 / 64 節点 = 型 47 / 48) は
+四面体の 6 次以上と同じく gmsh の並びの**再帰の規則**で作る:
+  六面体 : 頂点 8、辺 (0,1) (0,3) (0,4) (1,2) (1,5) (2,3) (2,6) (3,7) (4,5) (4,7) (5,6) (6,7) に p−1 個ずつ (始点の側から)、
+          面 (0,3,2,1) (0,1,5,4) (0,4,7,3) (1,2,6,5) (2,3,7,6) (4,5,6,7) に次数 p−2 の四角形 (面の頂点の順に写し 1 だけ内側)、
+          内部に (1,1,1) + 次数 p−2 の六面体 (同じ規則)
+  四角形 : 角 4、辺 (0,1) (1,2) (2,3) (3,0) に q−1 個ずつ、内部に (1,1) + 次数 q−2 の四角形
+  角柱   : 頂点 6、辺 (0,1) (0,2) (0,3) (1,2) (1,4) (2,5) (3,4) (3,5) (4,5) に p−1 個ずつ、三角形の面 (0,2,1) (3,4,5) に
+          (1,1,1) + 次数 p−3 の三角形 (tri_rule)、四角形の面 (0,1,4,3) (0,3,5,2) (1,2,5,4) に次数 p−2 の四角形、
+          内部は (1,1,1) + 次数 p−3 の三角形の各点に ζ の格子位置を「1, p−1, 2, 3, …, p−2」の順に
+この規則は gmsh 4.15.2 の出力 (立方体の六面体 / 角柱) を分類したものと 2〜8 次の全項で一致し (data/sample/gmsh_hp_order.py)、
+3〜5 次の実測の表 HEX3_I〜HEX5_I / PRISM3_A〜PRISM5_A とも全項一致する (hp_tables_init が格子を読むたびに確かめる)
+*/
+static void quad_rule(int q, int (*out)[2], int *n)
+{
+	if (q < 0) return;
+	if (q == 0) { out[*n][0] = out[*n][1] = 0; (*n)++; return; }
+	static const int cr[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+	for (int v = 0; v < 4; v++) { out[*n][0] = q * cr[v][0]; out[*n][1] = q * cr[v][1]; (*n)++; }
+	for (int e = 0; e < 4; e++) {
+		const int *a = cr[e], *b = cr[(e + 1) % 4];
+		for (int k = 1; k < q; k++) {
+			out[*n][0] = (q * a[0]) + ((b[0] - a[0]) * k);
+			out[*n][1] = (q * a[1]) + ((b[1] - a[1]) * k);
+			(*n)++;
+		}
+	}
+	if (q >= 2) {
+		const int n0 = *n;
+		quad_rule(q - 2, out, n);
+		for (int s = n0; s < *n; s++) { out[s][0] += 1; out[s][1] += 1; }
+	}
+}
+
+static int hex_rule(int p, int (*out)[3])
+{
+	static const int hv[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+	static const int he[12][2] = {{0, 1}, {0, 3}, {0, 4}, {1, 2}, {1, 5}, {2, 3}, {2, 6}, {3, 7}, {4, 5}, {4, 7}, {5, 6}, {6, 7}};
+	static const int hf[6][4] = {{0, 3, 2, 1}, {0, 1, 5, 4}, {0, 4, 7, 3}, {1, 2, 6, 5}, {2, 3, 7, 6}, {4, 5, 6, 7}};
+	if (p == 0) { out[0][0] = out[0][1] = out[0][2] = 0; return 1; }
+	int n = 0;
+	for (int v = 0; v < 8; v++) { for (int c = 0; c < 3; c++) out[n][c] = p * hv[v][c]; n++; }
+	for (int e = 0; e < 12; e++) {
+		for (int k = 1; k < p; k++) {
+			for (int c = 0; c < 3; c++) out[n][c] = (p * hv[he[e][0]][c]) + ((hv[he[e][1]][c] - hv[he[e][0]][c]) * k);
+			n++;
+		}
+	}
+	if (p >= 2) {
+		int sq[HEXP_NMAX][2], m = 0;
+		quad_rule(p - 2, sq, &m);
+		for (int f = 0; f < 6; f++) {
+			const int *c0 = hv[hf[f][0]], *c1 = hv[hf[f][1]], *c3 = hv[hf[f][3]];
+			for (int s = 0; s < m; s++) {
+				for (int c = 0; c < 3; c++) out[n][c] = (p * c0[c]) + ((c1[c] - c0[c]) * (sq[s][0] + 1)) + ((c3[c] - c0[c]) * (sq[s][1] + 1));
+				n++;
+			}
+		}
+		const int mi = hex_rule(p - 2, &out[n]);
+		for (int s = 0; s < mi; s++) { for (int c = 0; c < 3; c++) out[n + s][c] += 1; }
+		n += mi;
+	}
+	return n;
+}
+
+static int prism_rule(int p, int (*out)[4])
+{
+	static const int pv[6][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {1, 0, 0, 1}, {0, 1, 0, 1}, {0, 0, 1, 1}};
+	static const int pe[9][2] = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 4}, {2, 5}, {3, 4}, {3, 5}, {4, 5}};
+	static const int pt[2][3] = {{0, 2, 1}, {3, 4, 5}};
+	static const int pq[3][4] = {{0, 1, 4, 3}, {0, 3, 5, 2}, {1, 2, 5, 4}};
+	int n = 0;
+	for (int v = 0; v < 6; v++) { for (int c = 0; c < 4; c++) out[n][c] = p * pv[v][c]; n++; }
+	for (int e = 0; e < 9; e++) {
+		for (int k = 1; k < p; k++) {
+			for (int c = 0; c < 4; c++) out[n][c] = (p * pv[pe[e][0]][c]) + ((pv[pe[e][1]][c] - pv[pe[e][0]][c]) * k);
+			n++;
+		}
+	}
+	int st[TRI_NMAX][3], mt = 0;
+	if (p >= 3) mt = tri_rule(p - 3, st);
+	for (int f = 0; f < 2; f++) {
+		for (int s = 0; s < mt; s++) {
+			for (int c = 0; c < 3; c++) out[n][c] = 0;
+			for (int k = 0; k < 3; k++) { for (int c = 0; c < 3; c++) out[n][c] += (st[s][k] + 1) * pv[pt[f][k]][c]; }
+			out[n][3] = p * pv[pt[f][0]][3];
+			n++;
+		}
+	}
+	if (p >= 2) {
+		int sq[PRISMP_NMAX][2], m = 0;
+		quad_rule(p - 2, sq, &m);
+		for (int f = 0; f < 3; f++) {
+			const int *c0 = pv[pq[f][0]], *c1 = pv[pq[f][1]], *c3 = pv[pq[f][3]];
+			for (int s = 0; s < m; s++) {
+				for (int c = 0; c < 4; c++) out[n][c] = (p * c0[c]) + ((c1[c] - c0[c]) * (sq[s][0] + 1)) + ((c3[c] - c0[c]) * (sq[s][1] + 1));
+				n++;
+			}
+		}
+	}
+	for (int s = 0; s < mt; s++) {
+		for (int k = 1; k < p; k++) {
+			const int z = ((k == 1) ? 1 : (k == 2) ? (p - 1) : (k - 1));		// ζ の線の並び : 1, p−1, 2, 3, …, p−2
+			for (int c = 0; c < 3; c++) out[n][c] = st[s][c] + 1;
+			out[n][3] = z;
+			n++;
+		}
+	}
+	return n;
+}
+
+static signed char HEXG_I[2][HEXP_NMAX][3], PRISMG_A[2][PRISMP_NMAX][4];		// 6 次 / 7 次 (hp_tables_init)
+
+// 規則が 3〜5 次の実測の表と全項一致することを確かめ、6 次 / 7 次の表を作る (格子を読み終えたとき、直列で呼ぶ)
+static int hp_tables_init(void)
+{
+	static int done = 0;
+	if (done) return 0;
+	int h[HEXP_NMAX][3], pr[PRISMP_NMAX][4];
+	for (int q = 3; q <= 7; q++) {
+		const int nh = hex_rule(q, h), np = prism_rule(q, pr);
+		int bad = ((nh != ((q + 1) * (q + 1) * (q + 1))) || (np != (((q + 1) * (q + 1) * (q + 2)) / 2)));
+		for (int i = 0; (i < nh) && !bad; i++) {
+			for (int c = 0; c < 3; c++) {
+				if (q <= 5) bad |= (h[i][c] != ((q == 5) ? HEX5_I : (q == 4) ? HEX4_I : HEX3_I)[i][c]);
+				else HEXG_I[q - 6][i][c] = (signed char)h[i][c];
+			}
+		}
+		for (int i = 0; (i < np) && !bad; i++) {
+			for (int c = 0; c < 4; c++) {
+				if (q <= 5) bad |= (pr[i][c] != ((q == 5) ? PRISM5_A : (q == 4) ? PRISM4_A : PRISM3_A)[i][c]);
+				else PRISMG_A[q - 6][i][c] = (signed char)pr[i][c];
+			}
+		}
+		if (bad) {
+			printf("*** internal error : the hexahedron / prism node-ordering rule disagrees with the measured order-%d tables\n", q);
+			return 1;
+		}
+	}
+	done = 1;
+	return 0;
+}
+
+static const signed char *hexp_i(int p, int a)
+{
+	return ((p >= 6) ? HEXG_I[p - 6][a] : (p == 5) ? HEX5_I[a] : (p == 4) ? HEX4_I[a] : HEX3_I[a]);
+}
+static const signed char *prismp_a(int p, int a)
+{
+	return ((p >= 6) ? PRISMG_A[p - 6][a] : (p == 5) ? PRISM5_A[a] : (p == 4) ? PRISM4_A[a] : PRISM3_A[a]);
+}
 // 節点数から次数 (3 次以上の六面体 / 角柱、それ以外は 0)
-static int hexp_order(int nen) { return ((nen == 216) ? 5 : (nen == 125) ? 4 : (nen == 64) ? 3 : 0); }
-static int prismp_order(int nen) { return ((nen == 126) ? 5 : (nen == 75) ? 4 : (nen == 40) ? 3 : 0); }
+static int hexp_order(int nen) { return ((nen == 512) ? 7 : (nen == 343) ? 6 : (nen == 216) ? 5 : (nen == 125) ? 4 : (nen == 64) ? 3 : 0); }
+static int prismp_order(int nen) { return ((nen == 288) ? 7 : (nen == 196) ? 6 : (nen == 126) ? 5 : (nen == 75) ? 4 : (nen == 40) ? 3 : 0); }
 
 // 六面体の局所節点 a の格子位置 ix (各方向 0..p) と次数 p (完全 Lagrange の 8 / 27 / 64 / 125 / 216 節点。serendipity の
 // 20 節点は格子に乗らないので 0)。高次の六面体の辺要素 (eddy3d_pr.c) が部分辺の番号付けに使う
@@ -5678,7 +5843,8 @@ static int nodal_test_hex2(FILE *fp_log)
 	for (int e = 0; e < NHex; e++) {
 		int32_t nd[ELEM_NMAX];
 		const int nen = hex_nodes(e, nd);
-		double ke[HEXP_NMAX][HEXP_NMAX], vol;
+		static double ke[HEXP_NMAX][HEXP_NMAX];		// 7 次で 2 MB (スタックに置かない)
+		double vol;
 		if (hex2_element(e, c, ke, &vol)) continue;
 		for (int l = 0; l < nen; l++) {
 			for (int m = 0; m < nen; m++) {
@@ -5852,7 +6018,8 @@ static int nodal_test_prism2(FILE *fp_log)
 	for (int e = 0; e < NPrism; e++) {
 		int32_t nd[PRISMP_NMAX];
 		const int nen = prism_nodes(e, nd);
-		double ke[PRISMP_NMAX][PRISMP_NMAX], vol;
+		static double ke[PRISMP_NMAX][PRISMP_NMAX];
+		double vol;
 		if (prism2_element(e, c, ke, &vol)) continue;
 		for (int l = 0; l < nen; l++) {
 			for (int m = 0; m < nen; m++) {
@@ -6072,7 +6239,8 @@ void assemble_elem3d(crs_t *A, int mode)
 			if (HexNen > 8) {
 				int32_t nd[ELEM_NMAX];
 				const int nen = hex_nodes(e - NTet, nd);
-				double ke[HEXP_NMAX][HEXP_NMAX], vol;
+				static double ke[HEXP_NMAX][HEXP_NMAX];		// 7 次で 2 MB (スタックに置かない)
+				double vol;
 				if (hex2_element(e - NTet, c, ke, &vol)) continue;
 				for (int l = 0; l < nen; l++) {
 					for (int m = 0; m < nen; m++) {
@@ -6098,7 +6266,8 @@ void assemble_elem3d(crs_t *A, int mode)
 			if (PrismNen > 6) {
 				int32_t nd[PRISMP_NMAX];
 				const int nen = prism_nodes(e - NTet - NHex, nd);
-				double ke[PRISMP_NMAX][PRISMP_NMAX], vol;
+				static double ke[PRISMP_NMAX][PRISMP_NMAX];
+				double vol;
 				if (prism2_element(e - NTet - NHex, c, ke, &vol)) continue;
 				for (int l = 0; l < nen; l++) {
 					for (int m = 0; m < nen; m++) {
@@ -6420,6 +6589,19 @@ static double quintic_term(double l, const double ax[3], int prism, const double
 	return (a * x * x * y * y * z) + (b * y * y * y * y * y) + (c * x * z4) + (d * x * z4 * z) + (e * x4 * x * y);
 }
 
+// 6 次 / 7 次 (po) の項 : L (2 X Z^po − 0.4 Y^po (+ 2.5 X^po Y : 六面体だけ))。5 次の項と同じ考え方で、(∂φ/∂x)² が z の 2po 次、
+// (∂φ/∂y)² が x の 2po 次なので、各方向 po + 1 点の要素の行列で厳密、po 点に落とすと外れる
+static double high_term(int po, double l, const double ax[3], int prism, const double r[3], double g[3])
+{
+	const double x = r[0] / ax[0], y = r[1] / ax[1], z = r[2] / ax[2];
+	const double d = 2.0 * l, b = -0.4 * l, e = (prism ? 0 : 2.5 * l);
+	const double zp = pow(z, po), zq = pow(z, po - 1), yq = pow(y, po - 1), xp = pow(x, po), xq = pow(x, po - 1);
+	g[0] += ((d * zp) + (po * e * xq * y)) / ax[0];
+	g[1] += ((po * b * yq) + (e * xp)) / ax[1];
+	g[2] += (po * d * x * zq) / ax[2];
+	return (d * x * zp) + (b * yq * y) + (e * xp * y);
+}
+
 static double cubic_val(const double r[3], const double av[3], const double bm[3][3], const double gm[9])
 {
 	const double x = r[0], y = r[1], z = r[2];
@@ -6606,6 +6788,7 @@ static int nodal_test_ho3(FILE *fp_log, int prism)
 					double g[3];
 					cubic_grad(r, av, bs, gm, g);
 					if (po >= 5) (void)quintic_term(lmax, axl, prism, r, g);
+					if (po >= 6) (void)high_term(po, lmax, axl, prism, r, g);
 					double gcg = 0;
 					for (int i = 0; i < 3; i++) {
 						for (int j = 0; j < 3; j++) gcg += g[i] * cm[i][j] * g[j];
@@ -6636,6 +6819,7 @@ static int nodal_test_ho3(FILE *fp_log, int prism)
 				double g[3];
 				cubic_grad(r, av, bs, gm, g);
 				if (po >= 5) (void)quintic_term(lmax, axl, prism, r, g);
+				if (po >= 6) (void)high_term(po, lmax, axl, prism, r, g);
 				double gcg = 0;
 				for (int a = 0; a < 3; a++) {
 					for (int b = 0; b < 3; b++) gcg += g[a] * cm[a][b] * g[b];
@@ -6650,12 +6834,13 @@ static int nodal_test_ho3(FILE *fp_log, int prism)
 		for (int i = 0; i < NNode; i++) {
 			const double r[3] = {Xp[i], Yp[i], Zp[i]};
 			double gd[3] = {0, 0, 0};
-			phi[i] = cubic_val(r, av, bs, gm) + ((po >= 5) ? quintic_term(lmax, axl, prism, r, gd) : 0);
+			phi[i] = cubic_val(r, av, bs, gm) + ((po >= 5) ? quintic_term(lmax, axl, prism, r, gd) : 0)
+			       + ((po >= 6) ? high_term(po, lmax, axl, prism, r, gd) : 0);
 		}
 		double q3 = 0;
 		for (int i = 0; i < NNode; i++) q3 += phi[i] * crs_row_dot(&A, i, phi);
 		const double err = fabs(q3 - exact) / fabs(exact);
-		fprintf(fp_log, "  %s field : phi^T K phi = %.10e, exact = %.10e, rel. error = %.2e\n", ((po >= 5) ? "quintic" : (po >= 4) ? "quartic" : "cubic"), q3, exact, err);
+		fprintf(fp_log, "  %s field : phi^T K phi = %.10e, exact = %.10e, rel. error = %.2e\n", ((po >= 7) ? "septic" : (po >= 6) ? "sextic" : (po >= 5) ? "quintic" : (po >= 4) ? "quartic" : "cubic"), q3, exact, err);
 		// 許容 1e-12 (実測 1e-15〜7e-14)。1e-10 では 5 次の積分点を 5 点に落とす誤り (1e-11 しか動かない) が素通りした
 		if (!(err <= 1e-12)) {
 			fprintf(fp_log, "*** the order-%d field identity failed (this is the only test that exercises the order-%d basis)\n", po, po);
@@ -6664,7 +6849,7 @@ static int nodal_test_ho3(FILE *fp_log, int prism)
 	}
 	else {
 		fprintf(fp_log, "  %s field : skipped (%d of %d elements are affine and straight; the identity needs all of them)\n",
-			((po >= 5) ? "quintic" : (po >= 4) ? "quartic" : "cubic"),
+			((po >= 7) ? "septic" : (po >= 6) ? "sextic" : (po >= 5) ? "quintic" : (po >= 4) ? "quartic" : "cubic"),
 			naff, ne);
 	}
 	free(phi);
