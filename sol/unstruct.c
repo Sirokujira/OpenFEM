@@ -7659,6 +7659,31 @@ void assemble_newton_tri(crs_t *J, const double *az, double *res)
 }
 
 
+// ベクトル J-A の固定点の行列 (1 次の三角形)。ten6 は要素ごとの ∇A の基底のテンソル (xx, yy, zz, xy, yz, zx、assemble_ja_tri が書く)
+void assemble_nu_tri6(crs_t *A, const double *ten6)
+{
+	int p, q;
+	tri_axes(&p, &q);
+	const int off = (((p + q) == 1) ? 3 : ((p + q) == 3) ? 4 : 5);		// (0,1) -> xy、(1,2) -> yz、(0,2) -> zx
+	crs_zero(A);
+	for (int e = 0; e < NTri; e++) {
+		const int32_t *nd = &Tri[e * 3];
+		double g[3][2], area;
+		if (tri_grad(nd, g, &area)) continue;
+		const double *t = &ten6[(int64_t)e * 6];
+		const double cpp = t[p], cqq = t[q], cpq = t[off];
+		for (int l = 0; l < 3; l++) {
+			for (int m = 0; m < 3; m++) {
+				const double v = (cpp * g[l][0] * g[m][0]) + (cqq * g[l][1] * g[m][1])
+				               + (cpq * ((g[l][0] * g[m][1]) + (g[l][1] * g[m][0])));
+				const int64_t s2 = crs_find(A, nd[l], nd[m]);
+				if (s2 >= 0) A->val[s2] += v * area;
+			}
+		}
+	}
+}
+
+
 // 質量行列 M_ij = ∫ σ λ_i λ_j dS = σ S (1 + δ_ij)/12 (導体要素のみ)
 void assemble_mass_tri(crs_t *A)
 {

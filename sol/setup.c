@@ -59,6 +59,44 @@ static void alloc_matrices(void)
 //
 // 単位長あたりの量として扱うので TlineLength = 1 とし、以降の
 // 「体積」はすべて面積になる。
+// Jiles-Atherton の状態 (Gauss 点毎、セル / 三角形あたり 8 個の枠。1 次の三角形は先頭の 1 個だけを使う)
+static void ja_alloc(int hysteresis, int64_t ncell)
+{
+	JaB = JaH = JaM = JaBn = JaHn = JaMn = JaD = JaDn = NULL;
+	JaVB = JaVH = JaVM = JaVBn = JaVHn = JaVMn = NULL;
+	JaNu6 = NULL;
+	if (hysteresis) {
+		const size_t njasz = (size_t)ncell * 8 * sizeof(double);
+		JaB  = (double *)malloc(njasz);
+		JaH  = (double *)malloc(njasz);
+		JaM  = (double *)malloc(njasz);
+		JaBn = (double *)malloc(njasz);
+		JaHn = (double *)malloc(njasz);
+		JaMn = (double *)malloc(njasz);
+		memset(JaB,  0, njasz);		// 初期状態 : 処女 (B = H = M = 0)
+		memset(JaH,  0, njasz);
+		memset(JaM,  0, njasz);
+		memset(JaBn, 0, njasz);
+		memset(JaHn, 0, njasz);
+		memset(JaMn, 0, njasz);
+		JaD  = (double *)malloc(njasz * 3);
+		JaDn = (double *)malloc(njasz * 3);
+		memset(JaD,  0, njasz * 3);		// 0 : 方向未確定 (未磁化)
+		memset(JaDn, 0, njasz * 3);
+		if (JaVector) {
+			JaVB  = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVH  = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVM  = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVBn = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVHn = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVMn = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaNu6 = (double *)calloc((size_t)ncell * 6, sizeof(double));
+		}
+	}
+
+}
+
+
 static int setup_tri2d(void)
 {
 	// 断面 2 次元の格子で解けるのは M / F だけ
@@ -72,15 +110,16 @@ static int setup_tri2d(void)
 		printf("%s\n", "*** a 2-D (cross-section) mesh needs the tline key");
 		return 1;
 	}
-	// ヒステリシス (J-A) は Gauss 点毎の状態を構造格子のセル配列で持っているので、2 次元格子では使えない。
-	// B-H 曲線は M (Newton、積分点ごとの ν、assemble_newton_tri) も F (実効磁気抵抗率法、要素ごとの ν) も三角形の
-	// 1 次 / 高次で解く
+	// ヒステリシス (J-A) は 1 次の三角形で解く (B が要素内一定なので状態は要素に 1 つ、assemble_ja_tri)。高次の三角形は
+	// 積分点ごとの状態の枠が足りない (9 点以上) ので弾く。B-H 曲線は M (Newton、積分点ごとの ν、assemble_newton_tri) も
+	// F (実効磁気抵抗率法、要素ごとの ν) も三角形の 1 次 / 高次で解く
+	int hysteresis = 0;
 	for (int m = 0; m < NMaterial; m++) {
-		if (Material[m].ja.on) {
-			printf("%s\n", "*** hysteresis (ja) materials are available only on a structured mesh "
-				"(bh curves work on a 2-D mesh with analysis M and F)");
-			return 1;
-		}
+		if (Material[m].ja.on) hysteresis = 1;
+	}
+	if (hysteresis && (TetOrder >= 2)) {
+		printf("%s\n", "*** hysteresis (ja) materials on a 2-D mesh need first-order (3-node) triangles");
+		return 1;
 	}
 	{
 		const double *c = ((Tline == 'X') ? Xp : (Tline == 'Y') ? Yp : Zp);
@@ -159,6 +198,9 @@ static int setup_tri2d(void)
 
 	TlineLength = 1;
 	if (LineLength <= 0) LineLength = 1;
+
+	// J-A の状態 (1 次の三角形は要素に 1 つ。枠は構造格子と同じ 8 個で先頭だけを使う)
+	ja_alloc(hysteresis, NTri);
 
 	alloc_matrices();
 
@@ -614,37 +656,7 @@ int setup(void)
 	for (int m = 0; m < NMaterial; m++) {
 		if (Material[m].ja.on) hysteresis = 1;
 	}
-	JaB = JaH = JaM = JaBn = JaHn = JaMn = JaD = JaDn = NULL;
-	JaVB = JaVH = JaVM = JaVBn = JaVHn = JaVMn = NULL;
-	JaNu6 = NULL;
-	if (hysteresis) {
-		const size_t njasz = (size_t)ncell * 8 * sizeof(double);
-		JaB  = (double *)malloc(njasz);
-		JaH  = (double *)malloc(njasz);
-		JaM  = (double *)malloc(njasz);
-		JaBn = (double *)malloc(njasz);
-		JaHn = (double *)malloc(njasz);
-		JaMn = (double *)malloc(njasz);
-		memset(JaB,  0, njasz);		// 初期状態 : 処女 (B = H = M = 0)
-		memset(JaH,  0, njasz);
-		memset(JaM,  0, njasz);
-		memset(JaBn, 0, njasz);
-		memset(JaHn, 0, njasz);
-		memset(JaMn, 0, njasz);
-		JaD  = (double *)malloc(njasz * 3);
-		JaDn = (double *)malloc(njasz * 3);
-		memset(JaD,  0, njasz * 3);		// 0 : 方向未確定 (未磁化)
-		memset(JaDn, 0, njasz * 3);
-		if (JaVector) {
-			JaVB  = (double *)calloc((size_t)ncell * 16, sizeof(double));
-			JaVH  = (double *)calloc((size_t)ncell * 16, sizeof(double));
-			JaVM  = (double *)calloc((size_t)ncell * 16, sizeof(double));
-			JaVBn = (double *)calloc((size_t)ncell * 16, sizeof(double));
-			JaVHn = (double *)calloc((size_t)ncell * 16, sizeof(double));
-			JaVMn = (double *)calloc((size_t)ncell * 16, sizeof(double));
-			JaNu6 = (double *)calloc((size_t)ncell * 6, sizeof(double));
-		}
-	}
+	ja_alloc(hysteresis, ncell);
 
 	// 結果行列
 

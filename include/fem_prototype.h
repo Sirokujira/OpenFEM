@@ -72,6 +72,7 @@ int64_t crs_find_tri(const crs_t *, int32_t, int32_t);
 void crs_alloc_tri(crs_t *);
 void assemble_nu_tri(crs_t *, const double *);
 void assemble_newton_tri(crs_t *, const double *, double *);
+void assemble_nu_tri6(crs_t *, const double *);
 int pr_p1_nonlinear(void);
 void assemble_mass_tri(crs_t *);
 void assemble_mass_tri_sig(crs_t *, const double *);

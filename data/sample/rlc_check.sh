@@ -1971,10 +1971,11 @@ sed 's/^analysis = M/analysis = C/' "$SRC/plate2d_dc.ofe" > "$WORK/t2d_c.ofe"
 mesh_reject "analysis C on a 2-D mesh" t2d_c.ofe
 sed 's/^tline = X/tline = Y/' "$SRC/plate2d_dc.ofe" > "$WORK/t2d_plane.ofe"
 mesh_reject "2-D mesh not normal to tline" t2d_plane.ofe
-# B-H 曲線は 2 次元格子でも解く ([M bh 2-D])。ヒステリシス (J-A) は構造格子だけ (理由まで見る)
+# B-H 曲線 ([M bh 2-D]) と 1 次の三角形のヒステリシス ([M ja 2-D]) は 2 次元格子でも解く。高次の三角形の J-A は [M ja 2-D] で弾く。
+# 2 次元格子でも非線形・ヒステリシスの入力の検査 (単一ポートなど) は構造格子と共通 (mag_nl_checks)
 cp "$SRC/plate2d.msh" "$WORK/"
-awk '/^region = 1 2/{print; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"; next} {print}' "$SRC/plate2d_dc.ofe" > "$WORK/t2d_ja.ofe"
-th_reject "hysteresis (ja) on a 2-D mesh" t2d_ja.ofe "hysteresis (ja) materials are available only on a structured mesh"
+awk '/^region = 1 2/{print; print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"; next} /^analysis/{print "currentsweep = 1 2"} {print}' "$SRC/plate2d_dc.ofe" > "$WORK/t2d_cs.ofe"
+th_reject "currentsweep without a ja material on a 2-D mesh" t2d_cs.ofe "currentsweep needs a hysteretic (ja) material"
 
 # ---- 断面 2 次元の三角形の格子の非線形静磁場 (analysis = M + bh、Newton) ----
 #
@@ -7339,6 +7340,60 @@ if grep -q "did not converge" "$WORK/ofe.log"; then
 	echo "  *** hysteresis iteration did not converge" >&2
 	status=1
 fi
+
+
+# 断面 2 次元の三角形の格子 (1 次) のヒステリシス (M + ja、電流掃引)。∇A が要素内で一定なので J-A の状態は要素に 1 つ
+# (assemble_ja_tri)。plate2d の板間に plate_line_ja と同じ材料を入れ、同じ掃引で:
+#   (a) 掃引の B が独立な ODE の参照値に 0.5% (構造格子と同じ許容)、構造格子の plate_line_ja の B に 1e-5 (実測は表示の全桁)
+#   (b) 端子の仕事 = ∫ H dB (+ 線形の要素の磁気エネルギー) が 1e-7 (要素の重み = 面積の検査)
+#   (c) ベクトル J-A (javector) の B がスカラーに 1e-6 (板間の場はほぼ 1 方向)
+#   (d) 面内に 30 度回した格子 (plate2d_r30) で B と各刻みの固定点の反復回数が一致 (スカラー・ベクトルとも。ベクトルの行列の
+#       非対角 (∇A の基底の pq 成分) は B が軸に沿わないときにしか効かない)
+#   (e) 高次の三角形は弾く (積分点ごとの状態の枠が足りない、理由まで見る)
+echo "[M ja 2-D] Jiles-Atherton hysteresis on a 2-D triangular mesh (first-order triangles)"
+cp "$SRC/plate2d.msh" "$SRC/plate2d_r30.msh" "$SRC/plate2d_p2.msh" "$SRC/plate2d_dc.ofe" "$SRC/plate2d_r30.ofe" "$WORK/"
+mj_mk() {	# mj_mk <元の .ofe> <javector 0|1> <出力>
+	awk -v jv="$2" '/^region = 1 2/{print; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"; next}
+		/^current/{print "current = 1.0"; print "currentsweep = 0.5 1.0 2.0 1.0 0.0 -1.0 -2.0 -1.0 0.0 1.0 2.0"; print "jasub = 40"
+			print "nlsolver = 200 1e-7 1.0"; if (jv) print "javector = 1"; next} {print}' "$WORK/$1" > "$WORK/$3"
+}
+mj_tab() {	# mj_tab <.ofe> : 実行して "刻み:B:反復" の列を mj_<.ofe>.tab に
+	(cd "$WORK" && "$OFE" -n 2 "$1" > /dev/null 2>&1) || { echo "  $1 : the run failed -> NG" >&2; status=1; }
+	grep -q "did not converge" "$WORK/ofe.log" && { echo "  $1 : hysteresis iteration did not converge -> NG" >&2; status=1; }
+	awk '/Jiles-Atherton hysteresis/ { inb = 1; next } inb && (NF == 6) && ($1 ~ /^[0-9]+$/) { print $1, $4, $6 }' "$WORK/ofe.log" > "$WORK/mj_$1.tab"
+	cp "$WORK/ofe.log" "$WORK/mj_$1.log"
+}
+mj_mk plate2d_dc.ofe 0 mj_s.ofe; mj_mk plate2d_dc.ofe 1 mj_v.ofe; mj_mk plate2d_r30.ofe 0 mj_sr.ofe; mj_mk plate2d_r30.ofe 1 mj_vr.ofe
+for c in mj_s mj_v mj_sr mj_vr; do mj_tab "$c.ofe"; done
+cp "$SRC/plate_line_ja.ofe" "$WORK/"
+mj_tab plate_line_ja.ofe
+n=0
+for bexp in 0.355138 0.912045 1.342832 1.260954 0.713845 -0.908562 -1.342754 -1.260921 -0.713844 0.908562 1.342754; do
+	n=$((n + 1))
+	compare "2-D triangles, B(step $n) [T]" "$(awk -v s="$n" '$1 == s { print $2 }' "$WORK/mj_mj_s.ofe.tab")" "$bexp" 0.005
+done
+res=$(paste -d' ' "$WORK/mj_mj_s.ofe.tab" "$WORK/mj_plate_line_ja.ofe.tab" | awk '{ d = ($2 - $5) / (($5 == 0) ? 1 : $5); if (d < 0) d = -d; if (d > m) m = d; n++ }
+	END { printf "%s (%d steps, max %.1e)", ((n == 11) && (m <= 1e-5)) ? "OK" : "NG", n, m }')
+echo "  2-D triangles : B(step) == structured plate_line_ja : $res"
+case "$res" in NG*) status=1 ;; esac
+for c in mj_s mj_v; do
+	res=$(awk '/hysteresis work : terminals =/ { a = $6 + 0; b = $11 + 0 } END { if (a == "") { print "NG (no work line)"; exit } d = (a - b) / a; if (d < 0) d = -d
+		printf "%s (%.1e)", (d <= 1e-7) ? "OK" : "NG", d }' "$WORK/mj_$c.ofe.log")
+	echo "  2-D triangles ($c) : terminal work == int H dB + linear energy : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+res=$(paste -d' ' "$WORK/mj_mj_v.ofe.tab" "$WORK/mj_mj_s.ofe.tab" | awk '{ d = $2 - $5; if (d < 0) d = -d; if (d > m) m = d; n++ }
+	END { printf "%s (%d steps, max %.1e T)", ((n == 11) && (m <= 1e-6)) ? "OK" : "NG", n, m }')
+echo "  2-D triangles : vector J-A B(step) == scalar : $res"
+case "$res" in NG*) status=1 ;; esac
+for c in s v; do
+	res=$(paste -d' ' "$WORK/mj_mj_${c}r.ofe.tab" "$WORK/mj_mj_$c.ofe.tab" | awk '{ d = $2 - $5; if (d < 0) d = -d; if (d > m) m = d; if ($3 != $6) k++; n++ }
+		END { printf "%s (%d steps, max %.1e T, %d iteration counts differ)", ((n == 11) && (m <= 1e-9) && (k == 0)) ? "OK" : "NG", n, m, k }')
+	echo "  2-D triangles rotated 30 degrees ($c) : B(step) and fixed-point iterations == unrotated : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+sed 's/^mesh = .*/mesh = plate2d_p2.msh/' "$WORK/mj_s.ofe" > "$WORK/mj_p2.ofe"
+th_reject "hysteresis (ja) on second-order triangles" mj_p2.ofe "need first-order (3-node) triangles"
 
 # 系列の HDF5 出力 (hdf5 = 1)。**HDF5 は任意依存**なので、
 #   ・入っていないビルド : 「hdf5 = 1 が弾かれること」だけを見て残りは skip する

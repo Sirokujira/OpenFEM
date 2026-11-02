@@ -194,6 +194,128 @@ int material_freq(void)
 }
 
 
+/*
+磁性体の非線形 (B-H) とヒステリシス (J-A) の入力の検査。構造格子と断面 2 次元の三角形の格子 (M / F) の両方で呼ぶ
+(input_data() は非構造格子のとき途中で return するので、そこに置いた検査は三角形の格子に効かない — 単一ポート・
+currentsweep の既定値などが三角形の格子で黙って抜けていた)
+*/
+static int mag_nl_checks(void)
+{
+	// 非線形磁性体 (B-H) は重ね合わせが成り立たないので単一ポートに限る
+	int nonlinear = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh[0] > 0) nonlinear = 1;
+		// 軸毎に与えるときは 3 軸とも必要
+		if (Material[m].bhaniso) {
+			for (int d = 0; d < 3; d++) {
+				if (Material[m].nbh[d] <= 0) {
+					printf("*** bh : material %d needs a curve for all three axes "
+						"when axes are specified\n", m);
+					return 1;
+				}
+			}
+		}
+	}
+	// ヒステリシス (Jiles-Atherton)
+	int hysteresis = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].ja.on) hysteresis = 1;
+		if (Material[m].ja.on && (Material[m].nbh[0] > 0)) {
+			printf("*** material %d cannot have both bh and ja\n", m);
+			return 1;
+		}
+	}
+	if (hysteresis) {
+		// 異方性の J-A はベクトル J-A だけが読む (スカラーの J-A は場の向きを持たない)
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.aniso && !JaVector) {
+				printf("%s\n", "*** jaaxis (anisotropic J-A) needs javector = 1 with analysis M");
+				return 1;
+			}
+		}
+		if (!(Analysis & ANALYSIS_M)) {
+			printf("%s\n", "*** the ja key needs analysis M (magnetostatic)");
+			return 1;
+		}
+		if (Analysis & ANALYSIS_F) {
+			printf("%s\n", "*** the ja key cannot be combined with analysis F");
+			return 1;
+		}
+		if (NSweep2 > 0) {
+			// 2 ポートの掃引 (回転磁界) : 2 番目のポートの電流を currentsweep2 で与える
+			if (NPort != 2) {
+				printf("%s\n", "*** currentsweep2 needs exactly two ports (conductors 1 and 2)");
+				return 1;
+			}
+			if (NSweep2 != NSweep) {
+				printf("%s\n", "*** currentsweep2 needs as many points as currentsweep");
+				return 1;
+			}
+			if (TransientOn) {
+				printf("%s\n", "*** currentsweep2 cannot be combined with transient");
+				return 1;
+			}
+		}
+		else if (NPort != 1) {
+			printf("%s\n", "*** a hysteretic (ja) model requires exactly one port "
+				"(two ports with currentsweep2)");
+			return 1;
+		}
+		if (NSweep < 1) {
+			// 掃引が無いときは current の 1 点だけを処女曲線として解く
+			NSweep = 1;
+			Sweep[0] = Curr;
+		}
+	}
+	else if (NSweep > 0) {
+		printf("%s\n", "*** currentsweep needs a hysteretic (ja) material");
+		return 1;
+	}
+	if ((NSweep2 > 0) && !hysteresis) {
+		printf("%s\n", "*** currentsweep2 needs a hysteretic (ja) material and currentsweep");
+		return 1;
+	}
+	if (!hysteresis && JaVector) {
+		input_warn("javector has no effect without a hysteretic (ja) material");
+	}
+	if (!hysteresis && JaProbeOn) {
+		input_warn("japrobe has no effect without a hysteretic (ja) material");
+	}
+	if ((NFreqSweep > 0) && (NSweep > 0)) {
+		printf("%s\n", "*** frequencysweep and currentsweep cannot be combined");
+		return 1;
+	}
+
+	if (nonlinear) {
+		// M (静磁場) は Newton、F (渦電流) は実効磁気抵抗率法 (波高値 |B| での ν)
+		if (!(Analysis & (ANALYSIS_M | ANALYSIS_F))) {
+			printf("%s\n", "*** the bh key needs analysis M (magnetostatic) or F (eddy current)");
+			return 1;
+		}
+		if (Analysis & ANALYSIS_F) {
+			for (int m = 0; m < NMaterial; m++) {
+				if (Material[m].bhaniso) {
+					printf("%s\n", "*** analysis F supports isotropic bh curves only "
+						"(not per-axis curves)");
+					return 1;
+				}
+			}
+			if (NFreqSweep > 0) {
+				printf("%s\n", "*** a nonlinear (bh) analysis F cannot be combined with "
+					"frequencysweep (solve each frequency separately)");
+				return 1;
+			}
+		}
+		if (NPort != 1) {
+			printf("%s\n", "*** a nonlinear (bh) model requires exactly one port "
+				"(superposition does not hold)");
+			return 1;
+		}
+	}
+	return 0;
+}
+
+
 int input_data(FILE *fp)
 {
 	int    nline = 0;
@@ -2015,6 +2137,8 @@ int input_data(FILE *fp)
 				return 1;
 			}
 		}
+		// 断面 2 次元 (M / F) の非線形・ヒステリシスの検査は構造格子と共通
+		if ((Analysis & (ANALYSIS_M | ANALYSIS_F)) && mag_nl_checks()) return 1;
 		return 0;
 	}
 
@@ -2117,117 +2241,7 @@ int input_data(FILE *fp)
 		printf("%s\n", "*** analysis M requires the tline key (2D magnetostatic)");
 		return 1;
 	}
-	// 非線形磁性体 (B-H) は重ね合わせが成り立たないので単一ポートに限る
-	int nonlinear = 0;
-	for (int m = 0; m < NMaterial; m++) {
-		if (Material[m].nbh[0] > 0) nonlinear = 1;
-		// 軸毎に与えるときは 3 軸とも必要
-		if (Material[m].bhaniso) {
-			for (int d = 0; d < 3; d++) {
-				if (Material[m].nbh[d] <= 0) {
-					printf("*** bh : material %d needs a curve for all three axes "
-						"when axes are specified\n", m);
-					return 1;
-				}
-			}
-		}
-	}
-	// ヒステリシス (Jiles-Atherton)
-	int hysteresis = 0;
-	for (int m = 0; m < NMaterial; m++) {
-		if (Material[m].ja.on) hysteresis = 1;
-		if (Material[m].ja.on && (Material[m].nbh[0] > 0)) {
-			printf("*** material %d cannot have both bh and ja\n", m);
-			return 1;
-		}
-	}
-	if (hysteresis) {
-		// 異方性の J-A はベクトル J-A だけが読む (スカラーの J-A は場の向きを持たない)
-		for (int m = 0; m < NMaterial; m++) {
-			if (Material[m].ja.aniso && !JaVector) {
-				printf("%s\n", "*** jaaxis (anisotropic J-A) needs javector = 1 with analysis M");
-				return 1;
-			}
-		}
-		if (!(Analysis & ANALYSIS_M)) {
-			printf("%s\n", "*** the ja key needs analysis M (magnetostatic)");
-			return 1;
-		}
-		if (Analysis & ANALYSIS_F) {
-			printf("%s\n", "*** the ja key cannot be combined with analysis F");
-			return 1;
-		}
-		if (NSweep2 > 0) {
-			// 2 ポートの掃引 (回転磁界) : 2 番目のポートの電流を currentsweep2 で与える
-			if (NPort != 2) {
-				printf("%s\n", "*** currentsweep2 needs exactly two ports (conductors 1 and 2)");
-				return 1;
-			}
-			if (NSweep2 != NSweep) {
-				printf("%s\n", "*** currentsweep2 needs as many points as currentsweep");
-				return 1;
-			}
-			if (TransientOn) {
-				printf("%s\n", "*** currentsweep2 cannot be combined with transient");
-				return 1;
-			}
-		}
-		else if (NPort != 1) {
-			printf("%s\n", "*** a hysteretic (ja) model requires exactly one port "
-				"(two ports with currentsweep2)");
-			return 1;
-		}
-		if (NSweep < 1) {
-			// 掃引が無いときは current の 1 点だけを処女曲線として解く
-			NSweep = 1;
-			Sweep[0] = Curr;
-		}
-	}
-	else if (NSweep > 0) {
-		printf("%s\n", "*** currentsweep needs a hysteretic (ja) material");
-		return 1;
-	}
-	if ((NSweep2 > 0) && !hysteresis) {
-		printf("%s\n", "*** currentsweep2 needs a hysteretic (ja) material and currentsweep");
-		return 1;
-	}
-	if (!hysteresis && JaVector) {
-		input_warn("javector has no effect without a hysteretic (ja) material");
-	}
-	if (!hysteresis && JaProbeOn) {
-		input_warn("japrobe has no effect without a hysteretic (ja) material");
-	}
-	if ((NFreqSweep > 0) && (NSweep > 0)) {
-		printf("%s\n", "*** frequencysweep and currentsweep cannot be combined");
-		return 1;
-	}
-
-	if (nonlinear) {
-		// M (静磁場) は Newton、F (渦電流) は実効磁気抵抗率法 (波高値 |B| での ν)
-		if (!(Analysis & (ANALYSIS_M | ANALYSIS_F))) {
-			printf("%s\n", "*** the bh key needs analysis M (magnetostatic) or F (eddy current)");
-			return 1;
-		}
-		if (Analysis & ANALYSIS_F) {
-			for (int m = 0; m < NMaterial; m++) {
-				if (Material[m].bhaniso) {
-					printf("%s\n", "*** analysis F supports isotropic bh curves only "
-						"(not per-axis curves)");
-					return 1;
-				}
-			}
-			if (NFreqSweep > 0) {
-				printf("%s\n", "*** a nonlinear (bh) analysis F cannot be combined with "
-					"frequencysweep (solve each frequency separately)");
-				return 1;
-			}
-		}
-		if (NPort != 1) {
-			printf("%s\n", "*** a nonlinear (bh) model requires exactly one port "
-				"(superposition does not hold)");
-			return 1;
-		}
-	}
+	if (mag_nl_checks()) return 1;
 	// F 解析 (渦電流) も断面 2 次元。周波数と導体の導電率が要る
 	if (Analysis & ANALYSIS_F) {
 		if (!Tline) {

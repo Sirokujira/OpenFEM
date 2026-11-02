@@ -1011,8 +1011,12 @@ static double ja_vec3_selftest_dir(const ja_t *ja, const ja_t *js, const double 
 // 線形材料 (J-A でないセル) の磁気エネルギー ½ ∫ ν |∇A|² dV (2x2x2 Gauss、assemble_ja と同じ ν)。
 // 線形のセルでは台形則の ∫ H・ΔB が厳密に telescoping するので、掃引の仕事の収支には
 // 最後の状態のこの値を足せばよい
+static double ja_linear_energy_tri(const double *az);
+static void assemble_ja_tri(const double *az, double *res, double *nucell);
+
 double ja_linear_energy(const double *az)
 {
+	if (MeshMode && (MeshDim == 2)) return ja_linear_energy_tri(az);
 	const double gp = 1 / sqrt(3.0);
 	double wsum = 0;
 	for (int i = 0; i < Nx; i++) {
@@ -1076,6 +1080,10 @@ void ja_commit(int64_t ncell)
 // 反復中の状態は JaBn / JaMn に書き、収束後に JaB / JaM へ確定させる。
 void assemble_ja(const double *az, double *res, double *nucell)
 {
+	if (MeshMode && (MeshDim == 2)) {
+		assemble_ja_tri(az, res, nucell);
+		return;
+	}
 	const double gp = 1 / sqrt(3.0);
 	const int64_t nnode = num_node();
 
@@ -1209,6 +1217,103 @@ void assemble_ja(const double *az, double *res, double *nucell)
 	}
 	}
 	}
+}
+
+
+/*
+断面 2 次元の三角形の格子 (1 次) のヒステリシス : ∇A が要素内で一定なので、J-A の状態は要素に 1 つ (枠の先頭 id = 8e) で
+厳密 (構造格子の 2x2x2 Gauss の代わり)。式は構造格子と同じ (∇A の面内 2 成分 (∂A/∂p, ∂A/∂q)、B = (∂A/∂q, −∂A/∂p))。
+JaD の向きは面内 2 成分だけを使う (この経路の中だけで閉じる)
+*/
+static void assemble_ja_tri(const double *az, double *res, double *nucell)
+{
+	const int it = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
+	const int ip = (it + 1) % 3, iq = (it + 2) % 3;
+
+	memset(res, 0, (size_t)NNode * sizeof(double));
+	for (int e = 0; e < NTri; e++) {
+		const int32_t *nd = &Tri[e * 3];
+		const material_t *mt = &Material[TriMat[e]];
+		double g[3][2], area;
+		if (tri_grad(nd, g, &area)) continue;		// 退化した三角形は setup で弾いてある
+		const double gr[2] = {(az[nd[0]] * g[0][0]) + (az[nd[1]] * g[1][0]) + (az[nd[2]] * g[2][0]),
+		                      (az[nd[0]] * g[0][1]) + (az[nd[1]] * g[1][1]) + (az[nd[2]] * g[2][1])};
+		const double bmag = sqrt((gr[0] * gr[0]) + (gr[1] * gr[1]));
+		double re[3] = {0, 0, 0};
+		double nu, nud;
+		double ten[6] = {0, 0, 0, 0, 0, 0};
+		if (mt->ja.on) {
+			const int64_t id = (int64_t)e * 8;
+			double *dir = &JaD[id * 3];
+			const int haved = ((dir[0] != 0) || (dir[1] != 0));
+			const double bs = (haved ? ((gr[0] * dir[0]) + (gr[1] * dir[1])) : bmag);
+			if (bmag > 1e-12) {
+				JaDn[(id * 3) + 0] = gr[0] / bmag;
+				JaDn[(id * 3) + 1] = gr[1] / bmag;
+				JaDn[(id * 3) + 2] = 0;
+			}
+			if (JaVector) {
+				const double bv[2] = {gr[1], -gr[0]};
+				const double *dg = (haved ? dir : &JaDn[id * 3]);
+				double dref[2] = {dg[1], -dg[0]};
+				double hv[2], mv[2], ns[2][2];
+				ja_eval_vec(&mt->ja, &JaVB[id * 2], &JaVH[id * 2], &JaVM[id * 2], bv, dref, hv, mv, ns);
+				const double nmax = ja_symmax(ns);
+				ten[ip] = ns[1][1];
+				ten[iq] = ns[0][0];
+				ten[it] = nmax;
+				ten[ja_off(ip, iq)] = -ns[0][1];
+				for (int q = 0; q < 2; q++) {
+					JaVBn[(id * 2) + q] = bv[q];
+					JaVHn[(id * 2) + q] = hv[q];
+					JaVMn[(id * 2) + q] = mv[q];
+				}
+				JaBn[id] = bs;
+				JaHn[id] = (hv[0] * dref[0]) + (hv[1] * dref[1]);
+				JaMn[id] = (mv[0] * dref[0]) + (mv[1] * dref[1]);
+				for (int l = 0; l < 3; l++) re[l] = ((hv[0] * g[l][1]) - (hv[1] * g[l][0])) * area;
+				nucell[e] = nmax;
+				if (JaNu6 != NULL) for (int d = 0; d < 6; d++) JaNu6[((int64_t)e * 6) + d] = ten[d];
+				for (int l = 0; l < 3; l++) res[nd[l]] += re[l];
+				continue;
+			}
+			double h, m, dhdb;
+			ja_eval(&mt->ja, JaB[id], JaH[id], JaM[id], bs, &h, &m, &dhdb);
+			JaBn[id] = bs;
+			JaHn[id] = h;
+			JaMn[id] = m;
+			nu  = ((fabs(bs) > 1e-12) ? (h / bs) : dhdb);
+			nud = dhdb;
+		}
+		else {
+			nu = nud = 1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
+		}
+		for (int l = 0; l < 3; l++) re[l] = nu * ((g[l][0] * gr[0]) + (g[l][1] * gr[1])) * area;
+		nucell[e] = nud;
+		if (JaNu6 != NULL) {
+			for (int d = 0; d < 6; d++) JaNu6[((int64_t)e * 6) + d] = ((d < 3) ? nud : 0);
+		}
+		for (int l = 0; l < 3; l++) res[nd[l]] += re[l];
+	}
+}
+
+
+// 線形の三角形 (J-A でない要素) の磁気エネルギー ½ ∫ ν |∇A|² dS (∇A は要素内一定で厳密)
+static double ja_linear_energy_tri(const double *az)
+{
+	double wsum = 0;
+	for (int e = 0; e < NTri; e++) {
+		const material_t *mt = &Material[TriMat[e]];
+		if (mt->ja.on) continue;
+		const int32_t *nd = &Tri[e * 3];
+		double g[3][2], area;
+		if (tri_grad(nd, g, &area)) continue;
+		double gr[2] = {0, 0};
+		for (int l = 0; l < 3; l++) { gr[0] += az[nd[l]] * g[l][0]; gr[1] += az[nd[l]] * g[l][1]; }
+		const double nu = 1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
+		wsum += 0.5 * nu * ((gr[0] * gr[0]) + (gr[1] * gr[1])) * area;
+	}
+	return wsum;
 }
 
 

@@ -768,7 +768,29 @@ static int solve_magnetostatic(FILE *fp_log)
 			// 仕事の収支と観測点
 			double win = 0, wmag = 0, iprev[2] = {0, 0}, lprev[2] = {0, 0};
 			int64_t probe = -1;
-			if (JaProbeOn) {
+			if (JaProbeOn && tri2d) {
+				// 1 次の三角形 : 要素の重心 (状態は要素に 1 つ、枠の先頭)
+				double dbest = 1e300;
+				for (int e = 0; e < NTri; e++) {
+					if (!Material[TriMat[e]].ja.on) continue;
+					double dd = 0;
+					const double *cc[3] = {Xp, Yp, Zp};
+					for (int c = 0; c < 3; c++) {
+						const double pc = (cc[c][Tri[e * 3]] + cc[c][Tri[(e * 3) + 1]] + cc[c][Tri[(e * 3) + 2]]) / 3;
+						dd += (pc - JaProbe[c]) * (pc - JaProbe[c]);
+					}
+					if (dd < dbest) { dbest = dd; probe = (int64_t)e * 8; }
+				}
+				if (probe < 0) {
+					fprintf(fp_log, "*** warning : japrobe : no hysteretic cell, the probe is ignored\n");
+				}
+				else {
+					fprintf(fp_log, "  probe : triangle %lld (distance %.3e [m]); columns : step, %s\n",
+						(long long)(probe / 8) + 1, sqrt(dbest), (JaVector ? "H_p H_q [A/m], B_p B_q [T] (in-plane, p, q follow tline)"
+						                                           : "H [A/m], B [T] (signed along the first direction)"));
+				}
+			}
+			else if (JaProbeOn) {
 				double dbest = 1e300;
 				const double gq = 1 / sqrt(3.0);
 				for (int i = 0; i < Nx; i++) {
@@ -821,7 +843,11 @@ static int solve_magnetostatic(FILE *fp_log)
 						converged = 1;
 						break;
 					}
-					if (JaNu6 != NULL) assemble_nu6(&A, JaNu6);
+					if (tri2d) {
+						if (JaNu6 != NULL) assemble_nu_tri6(&A, JaNu6);
+						else assemble_nu_tri(&A, nucell);
+					}
+					else if (JaNu6 != NULL) assemble_nu6(&A, JaNu6);
 					else assemble_nu(&A, nucell);
 					if (solver_cg(&A, rhs2, del, fix, Solver.maxiter, Solver.nout,
 							Solver.converg, NULL, "ja") < 0) {
@@ -839,7 +865,20 @@ static int solve_magnetostatic(FILE *fp_log)
 				}
 
 				// 磁気の仕事 ∫ H・ΔB (台形則、確定前の状態と比べる)。ベクトル J-A は面内 2 成分
-				for (int i = 0; i < Nx; i++) {
+				for (int e = 0; tri2d && (e < NTri); e++) {
+					if (!Material[TriMat[e]].ja.on) continue;
+					const double w = TriArea[e];
+					const int64_t id = (int64_t)e * 8;
+					if (JaVector) {
+						for (int q = 0; q < 2; q++) {
+							wmag += w * scale * (JaVH[(id * 2) + q] + JaVHn[(id * 2) + q]) / 2 * (JaVBn[(id * 2) + q] - JaVB[(id * 2) + q]);
+						}
+					}
+					else {
+						wmag += w * scale * (JaH[id] + JaHn[id]) / 2 * (JaBn[id] - JaB[id]);
+					}
+				}
+				for (int i = 0; (i < Nx) && !tri2d; i++) {
 				for (int j = 0; j < Ny; j++) {
 				for (int k = 0; k < Nz; k++) {
 					const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
@@ -884,7 +923,14 @@ static int solve_magnetostatic(FILE *fp_log)
 
 				// ヒステリシス材料の体積平均 B, H
 				double bsum = 0, hsum = 0, vsum = 0;
-				for (int i = 0; i < Nx; i++) {
+				for (int e = 0; tri2d && (e < NTri); e++) {
+					if (!Material[TriMat[e]].ja.on) continue;
+					const int64_t id = (int64_t)e * 8;
+					bsum += JaB[id] * TriArea[e];
+					hsum += JaH[id] * TriArea[e];
+					vsum += TriArea[e];
+				}
+				for (int i = 0; (i < Nx) && !tri2d; i++) {
 				for (int j = 0; j < Ny; j++) {
 				for (int k = 0; k < Nz; k++) {
 					const int64_t c = ((int64_t)i * Ny + j) * Nz + k;
