@@ -5747,8 +5747,8 @@ th_reject "transient M with a bh curve" mtx_bh.ofe "linear and Jiles-Atherton ma
 #       1/T で近づく、構造格子 (間隙 20 分割) の B_mean に各刻み 1e-5・渦電流損に 1e-4 (同じ 1 次元の場の 2 つの h² の
 #       離散化。実測 B は印字の全桁、損 3e-7)
 #   (d) ベクトル J-A の B がスカラーに 1e-6 (場は 1 方向)
-#   (e) 面内に 30 度回した格子 (lam2d の節点を awk で回す、位相は同じ) のベクトル J-A : B と渦電流損が 1e-9 で、各刻みの
-#       固定点の反復回数も一致 (ベクトルの行列の pq 成分は B が軸に沿わないときにしか効かず、行列の誤りは答えを変えない)
+#   (e) 面内に 30 度回した格子 (lam2d の節点を awk で回す、位相は同じ) のベクトル J-A : B と渦電流損が 1e-9 で、固定点の
+#       反復の総数も 10% で一致 (ベクトルの行列の pq 成分は B が軸に沿わないときにしか効かず、行列の誤りは答えを変えない)
 #   (f) 反転の直後に固定点が最良の 10 倍の内側で 2 値を往復する (r_k ≈ r_{k−2}) と、2 周期の往復とみなして傾きを
 #       安全側にする (三角形の (c) で実測。検出しないと 31 刻み目で収束しない)。構造格子の出力は変わらない
 #   (g) 2 次の三角形 (状態と行列のテンソルは積分点ごと) : 積層板の Richardson が 1e-5 (1 次の 40 分割では届かない)、ベクトル J-A +
@@ -5816,9 +5816,10 @@ res=$(awk -v a="$bb1" -v b="$bb2" 'BEGIN { r = 1.342754; e1 = a - r; if (e1 < 0)
 	q = (e2 > 0) ? e1 / e2 : 0; printf "%s (|B - B_ODE| %.2e -> %.2e, ratio %.2f)", ((e1 < 5e-5) && (q > 1.7) && (q < 2.3)) ? "OK" : "NG", e1, e2, q }')
 echo "  triangles : final B approaches the independent J-A ODE value as 1/T : $res"
 case "$res" in NG*) status=1 ;; esac
-mt2_cmp() {	# mt2_cmp <ラベル> <csv a> <csv b> <B の許容 [T]> [it : 各刻みの反復回数も一致]
-	res=$(paste -d, "$WORK/$2.csv" "$WORK/$3.csv" | awk -F, -v tol="$4" -v it="$5" 'NR > 1 { d = $5 - $11; if (d < 0) d = -d; if (d > m) m = d; if ($6 != $12) k++; n++ }
-		END { printf "%s (%d steps, max %.1e T, %d iteration counts differ)", ((n == 110) && (m <= tol) && ((it != "it") || (k == 0))) ? "OK" : "NG", n, m, k }')
+mt2_cmp() {	# mt2_cmp <ラベル> <csv a> <csv b> <B の許容 [T]> [it : 反復の総数も 10% で一致 (刻みごとの一致は丸めで OS により 1 回ずれ得る)]
+	res=$(paste -d, "$WORK/$2.csv" "$WORK/$3.csv" | awk -F, -v tol="$4" -v it="$5" 'NR > 1 { d = $5 - $11; if (d < 0) d = -d; if (d > m) m = d; ia += $6; ib += $12; n++ }
+		END { di = ia - ib; if (di < 0) di = -di
+		      printf "%s (%d steps, max %.1e T, iterations %d / %d)", ((n == 110) && (m <= tol) && ((it != "it") || (di <= 0.1 * ib))) ? "OK" : "NG", n, m, ia, ib }')
 	echo "  $1 : $res"
 	case "$res" in NG*) status=1 ;; esac
 }
@@ -7473,7 +7474,7 @@ fi
 #   (a) 掃引の B が独立な ODE の参照値に 0.5% (構造格子と同じ許容)、構造格子の plate_line_ja の B に 1e-5 (実測は表示の全桁)
 #   (b) 端子の仕事 = ∫ H dB (+ 線形の要素の磁気エネルギー) が 1e-7 (要素の重み = 面積の検査)
 #   (c) ベクトル J-A (javector) の B がスカラーに 1e-6 (板間の場はほぼ 1 方向)
-#   (d) 面内に 30 度回した格子 (plate2d_r30) で B と各刻みの固定点の反復回数が一致 (スカラー・ベクトルとも。ベクトルの行列の
+#   (d) 面内に 30 度回した格子 (plate2d_r30) で B が一致、ベクトル J-A は固定点の反復の総数も 10% で一致 (ベクトルの行列の
 #       非対角 (∇A の基底の pq 成分) は B が軸に沿わないときにしか効かない)
 #   (e) 高次の三角形 (下の注釈)
 echo "[M ja 2-D] Jiles-Atherton hysteresis on a 2-D triangular mesh"
@@ -7512,10 +7513,13 @@ res=$(paste -d' ' "$WORK/mj_mj_v.ofe.tab" "$WORK/mj_mj_s.ofe.tab" | awk '{ d = $
 	END { printf "%s (%d steps, max %.1e T)", ((n == 11) && (m <= 1e-6)) ? "OK" : "NG", n, m }')
 echo "  2-D triangles : vector J-A B(step) == scalar : $res"
 case "$res" in NG*) status=1 ;; esac
+# スカラーの行列は等方なので反復回数は回転に依らない量でなく、丸めで 1 刻みだけ 1 回ずれた (macOS の CI、実測) — B だけ比べる。
+# ベクトルの行列の非対角を落とすと回した格子の反復の総数が 232 -> 719 になる (実測) ので、総数の 10% で比べる
 for c in s v; do
-	res=$(paste -d' ' "$WORK/mj_mj_${c}r.ofe.tab" "$WORK/mj_mj_$c.ofe.tab" | awk '{ d = $2 - $5; if (d < 0) d = -d; if (d > m) m = d; if ($3 != $6) k++; n++ }
-		END { printf "%s (%d steps, max %.1e T, %d iteration counts differ)", ((n == 11) && (m <= 1e-9) && (k == 0)) ? "OK" : "NG", n, m, k }')
-	echo "  2-D triangles rotated 30 degrees ($c) : B(step) and fixed-point iterations == unrotated : $res"
+	res=$(paste -d' ' "$WORK/mj_mj_${c}r.ofe.tab" "$WORK/mj_mj_$c.ofe.tab" | awk -v c="$c" '{ d = $2 - $5; if (d < 0) d = -d; if (d > m) m = d; ia += $3; ib += $6; n++ }
+		END { di = ia - ib; if (di < 0) di = -di; ok = (n == 11) && (m <= 1e-9) && ((c == "s") || (di <= 0.1 * ib))
+		      printf "%s (%d steps, max %.1e T, iterations %d / %d)", ok ? "OK" : "NG", n, m, ia, ib }')
+	echo "  2-D triangles rotated 30 degrees ($c) : B(step) == unrotated$( [ "$c" = v ] && echo ', total fixed-point iterations within 10%') : $res"
 	case "$res" in NG*) status=1 ;; esac
 done
 # (e) 高次の三角形 : 状態は積分点ごと (剛性と同じ則の点、tri_ja_ip)、固定点の行列は積分点ごとのテンソル (assemble_ja_tri_matrix)。
