@@ -240,7 +240,8 @@ static int setup_unstruct(void)
 		}
 		const char *why = NULL;
 		if (nl) why = "linear materials with analysis E (bh : A, also with thermal; ja : A with transient, no thermal)";
-		else if (GaugeTree || Direct) why = "gauge = 0 and the iterative solver";
+		else if ((GaugeTree || Direct) && (TransientOn || ThermalOn || (Analysis & ANALYSIS_E)))
+			why = "gauge = 0 and the iterative solver in the time domain / with thermal / for E";
 		if (why != NULL) {
 			printf("*** analysis A / E on a mesh of order 3 and up (order-%d Nedelec) supports %s only\n", TetOrder, why);
 			return 1;

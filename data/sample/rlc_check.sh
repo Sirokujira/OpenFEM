@@ -5989,8 +5989,8 @@ grep -q "not connected through awall" "$WORK/ofe.log" || { echo "  *** it was re
 #   (h) 辺要素の自己検証 (analysis = E) : 3〜7 次の直線の箱 (box_p3..p7) で、次数 r − 1 の一般の場 (Pra) と
 #       r' × q (q は r − 1 次の同次式、P_{r−1}³ に入らない、Prb) の σ 重み L2 射影の誤差 0・回転のエネルギー。
 #       3 次は異方性の ν と剛体回転した格子でも。曲がった格子 (coax_p3) は理由をつけて弾く
-#   (i) 対応しない組み合わせ (ゲージ・過渡解析・B-H 曲線) は理由をつけて弾く (交流の発熱は [thermal] の (2c)。直接解法はゲージなしの A を
-#       入力段が弾く)
+#   (i) 対応しない組み合わせ (時間領域・熱連成のゲージ / 直接解法) は理由をつけて弾く (直接解法はゲージなしの A を入力段が弾く)。
+#   (i') ゲージ固定と直接解法 (3 次・4 次) が gauge = 0 と一致し、LDLᵀ のピボットに零空間が残らない
 echo "[A order 3+] 3-D eddy current on tetrahedra of order 3 and up (order-r Nedelec / nodal elements)"
 cp "$SRC/bar_ho2.msh" "$SRC/bar_ho3.msh" "$SRC/bar_ho4.msh" "$SRC/bar_air_ho2.msh" "$SRC/bar_air_ho3.msh" "$WORK/"
 pr_ratio() {	# pr_ratio <ラベル> <R の誤差 (低)> <L の誤差 (低)> <R の誤差 (高)> <L の誤差 (高)> <倍率>
@@ -6092,8 +6092,47 @@ mesh_reject "order-3 edge self test on a curved mesh" prx_ecurv.ofe
 grep -q "needs straight-sided elements" "$WORK/ofe.log" || { echo "  *** it was rejected for a different reason than: needs straight-sided elements" >&2; status=1; }
 # (i)
 grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho3.msh"; next} {print}' > "$WORK/prbase.ofe"
-awk '/^analysis/{print "gauge = 1"} {print}' "$WORK/prbase.ofe" > "$WORK/prx_g.ofe"
-th_reject "order-3 A with gauge = 1" prx_g.ofe "supports gauge = 0 and the iterative solver only"
+awk '/^analysis/{print "gauge = 1"; print "transient = 1e-6 4"} {print}' "$WORK/prbase.ofe" > "$WORK/prx_g.ofe"
+th_reject "order-3 A transient with gauge = 1" prx_g.ofe "supports gauge = 0 and the iterative solver in the time domain"
+# (i') ゲージ固定 (gauge = 1) と直接解法 (direct = 1)。ψ ∈ P_r の勾配は実体の次元について区分的に三角なので、
+#     Whitney は 1 次・2 次と同じ awall 優先の全域木 (木の辺は r 個の関数を全部 0)、辺・面・内部の泡の勾配は
+#     参照四面体で最小 2 乗に解いた対角ブロックの非特異な小行列の行 (辺 r−1・面 (r−1)(r−2)/2・内部
+#     (r−1)(r−2)(r−3)/6 個) を 0 にする。Z はゲージ不変なので gauge = 0 と一致する。**3 次以上では固定し忘れても
+#     丸めで厳密な 0 のピボットにならず、右辺が値域に入るので直接解法の残差も答えも正しいまま通る** (2 次と違う、実測)
+#     ので、LDLᵀ のピボットの桁落ち |d_i|/|a_ii| の最小を assert する (正しい固定で 5e-2、辺・面・内部のどれを
+#     落としても 2e-17〜8e-17、実測)。電極の面を awall にしない格子 (bar_air_yw_ho3c.msh、gmsh_bar_ho.py の yawall、
+#     電極の面に内部の頂点が無い) で電極の上の辺・面の泡の勾配を固定しないことを見る (固定すると R +1.6% / +1.4%)
+pv() { awk '/smallest pivot \/ diagonal/ { v = $NF } END { print v }' "$WORK/ofe.log"; }
+pv_check() {	# pv_check <ラベル> : 直前の直接解法のピボットの桁落ち
+	res=$(awk -v v="$(pv)" 'BEGIN { if (v == "") { print "NG (no value)"; exit } printf "%s (%s)", (v + 0 > 1e-6) ? "OK" : "NG", v }')
+	echo "  $1 : smallest LDL^T pivot / diagonal > 1e-6 (no null space left) : $res"
+	case "$res" in NG*) status=1 ;; esac
+}
+cp "$SRC/bar_air_yw_ho3c.msh" "$WORK/"
+grep -v '^#' "$SRC/bar_air.ofe" | awk '/^frequency/{print "frequency = 1e5"; next} {print}' > "$WORK/prg.ofe"
+for m in bar_air_ho3c bar_air_yw_ho3c; do
+	for g in 0 1 2; do
+		awk -v m="$m" -v g="$g" '/^mesh/{print "mesh = " m ".msh"; next} /^analysis/{ if (g > 0) print "gauge = 1"; if (g > 1) print "direct = 1" } {print}' \
+			"$WORK/prg.ofe" > "$WORK/prg_${m}_$g.ofe"
+	done
+	set -- $(p2_rl "prg_${m}_0.ofe") $(p2_rl "prg_${m}_1.ofe")
+	compare "order 3, $m : gauge = 1 (tree + bubble gradients) == gauge = 0 : R [ohm]" "$3" "$1" 1e-7
+	compare "order 3, $m : gauge = 1 (tree + bubble gradients) == gauge = 0 : L [H]" "$4" "$2" 1e-7
+	r0=$1; l0=$2
+	set -- $(p2_rl "prg_${m}_2.ofe")
+	pv_check "order 3, $m : gauge = 1 + direct = 1"
+	compare "order 3, $m : gauge = 1 + direct = 1 (LDL^T, no pivoting) == gauge = 0 : R [ohm]" "$1" "$r0" 1e-6
+	compare "order 3, $m : gauge = 1 + direct = 1 (LDL^T, no pivoting) == gauge = 0 : L [H]" "$2" "$l0" 1e-6
+done
+#     4 次 (内部の泡の勾配が初めて現れる) : bar_ho4 の 100 kHz の直接解法が (b) の反復解法 (gauge = 0) と一致
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_ho4.msh"; next} /^frequency/{print "frequency = 1e5"; next} {print}' > "$WORK/prg4_0.ofe"
+awk '/^analysis/{print "gauge = 1"; print "direct = 1"} {print}' "$WORK/prg4_0.ofe" > "$WORK/prg4_2.ofe"
+set -- $(p2_rl prg4_2.ofe)
+pv_check "order 4, bar_ho4 : gauge = 1 + direct = 1"
+r4=$1; l4=$2
+set -- $(p2_rl prg4_0.ofe)
+compare "order 4, bar_ho4 : gauge = 1 + direct = 1 == gauge = 0 : R [ohm]" "$r4" "$1" 1e-6
+compare "order 4, bar_ho4 : gauge = 1 + direct = 1 == gauge = 0 : L [H]" "$l4" "$2" 1e-6
 # (j) B-H 曲線 (周波数領域の実効磁気抵抗率法、ν は積分点ごと、2 次の (h) と同じ更新と Anderson 加速)。CI の時間のため
 #     gmsh が幾何から h = 0.5 mm で切った粗い格子 (bar_air_ho3c.msh と同じ頂点の 2 次 bar_air_ho2c.msh) で見る:
 #     ・層が非線形 (250 A、H が一様) : 自己無撞着な閉形式に 1e-7 (実測 1.4e-9 / 5.3e-9。層の A は 1 次なので空間に入る)

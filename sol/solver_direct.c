@@ -554,6 +554,7 @@ int solver_direct_c(const crs_t *K, const crs_t *M, double omega,
 	}
 
 	// スカイライン LDL^T
+	double pmin = 1;
 	for (int i = 0; i < n; i++) {
 		const int32_t fi = first[i];
 		for (int j = fi; j < i; j++) {
@@ -573,6 +574,7 @@ int solver_direct_c(const crs_t *K, const crs_t *M, double omega,
 			cmul(lr, li, dr[j], di[j], &tr[j], &ti[j]);		// t_j = L_ij D_j
 		}
 		double sr = Lr[sp[i] + (i - fi)], si = Li[sp[i] + (i - fi)];
+		const double a0 = sqrt((sr * sr) + (si * si));
 		for (int k = fi; k < i; k++) {
 			double pr, pi;
 			cmul(tr[k], ti[k], Lr[sp[i] + (k - fi)], Li[sp[i] + (k - fi)], &pr, &pi);
@@ -591,6 +593,19 @@ int solver_direct_c(const crs_t *K, const crs_t *M, double omega,
 		}
 		dr[i] = sr;
 		di[i] = si;
+		if (a0 > 0) {
+			const double q = sqrt((sr * sr) + (si * si)) / a0;
+			if (q < pmin) pmin = q;
+		}
+	}
+	/*
+	**ピボットの桁落ち (|d_i| / |a_ii| の最小) をログに出す。** 特異な系は丸めで厳密な 0 のピボットに
+	ならないことがある (3 次の Nedelec でゲージの面の自由度を固定し忘れると 2e-17 で、右辺が値域に
+	入るので残差も解も正しいまま通る、実測)。正しく固定した系は 5e-2 なので桁で分かれる。判定は
+	しない (低周波の F は ωM ≪ K で正当に小さくなり得る) — 検証が値を見る
+	*/
+	if (fp_log != NULL) {
+		fprintf(fp_log, "  %-10s direct : smallest pivot / diagonal = %.3e\n", label, pmin);
 	}
 
 	double *zr = (double *)malloc((size_t)n * sizeof(double));

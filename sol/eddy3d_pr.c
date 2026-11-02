@@ -393,6 +393,341 @@ static int pr_element(int e, const double nu0[6], const double *nuq, double sig,
 	return 0;
 }
 
+/*
+ゲージ固定 (gauge = 1)。A-φ 系は (A, φ) → (A + ∇ψ, φ − jωψ) で不変で、ψ は次数 r の節点空間 (電極の節点で 0、awall の上で一定)。
+ψ を階層的に「頂点の λ_v + 辺の泡 + 面の泡 + 内部の泡」に分けると、∇ψ の AFW の係数は実体の次元について**ブロック三角**になる
+(泡の勾配は低い次元の実体の接線のトレースが 0 なので、その実体の関数の係数も 0)。そこで
+  ・頂点 : 1 次・2 次と同じ awall 優先の全域木。木の辺は辺の r 個の自由度を全部 0 (定数のトレース + 泡の勾配)
+  ・辺 / 面 / 内部 : その実体の自由度のうち、泡の勾配の「対角ブロック」D (実体の関数 x 泡) の行で正則な小行列になる g 個を 0
+    (g = 泡の数 : 辺 r − 1、面 (r − 1)(r − 2)/2、内部 (r − 1)(r − 2)(r − 3)/6)
+とすれば ψ が一意に決まり零空間が消える (実体ごとに下から順に解ける)。D は重心座標の代数だけで決まり要素の形に依らないので、
+参照の四面体 (頂点の順 = 全体の順) で 1 度だけ最小二乗で作り (残差と、他の実体の係数が 0 になることを確かめる)、行は
+ピボット付きの Gram-Schmidt で選ぶ。**電極の上の実体 (泡の節点の φ を固定した辺・面) は ψ の泡も 0 なのでゲージの自由度でなく、
+固定しない** (2 次の eddy3d_p2.c と同じ理由)。
+*/
+static int GTe[PR_TMAX], GTf[PR_TMAX], GTi[PR_TMAX];
+static int NGe, NGf, NGi, GTr;
+
+
+// Householder の QR で最小二乗 min |A x − b| を nb 本の右辺について解く (A は m x n の列優先、上書きする)。戻り値は最大の相対残差
+static double pr_lsq(double *A, int m, int n, double *B, int nb, double *X)
+{
+	double *v = (double *)malloc((size_t)m * sizeof(double));
+	for (int k = 0; k < n; k++) {
+		double nrm = 0;
+		for (int i = k; i < m; i++) nrm += A[((int64_t)k * m) + i] * A[((int64_t)k * m) + i];
+		nrm = sqrt(nrm);
+		const double akk = A[((int64_t)k * m) + k];
+		const double alpha = ((akk > 0) ? -nrm : nrm);
+		for (int i = 0; i < m; i++) v[i] = ((i < k) ? 0 : A[((int64_t)k * m) + i]);
+		v[k] -= alpha;
+		double vn = 0;
+		for (int i = k; i < m; i++) vn += v[i] * v[i];
+		if (vn <= 0) continue;
+		for (int j = k; j < n; j++) {
+			double d = 0;
+			for (int i = k; i < m; i++) d += v[i] * A[((int64_t)j * m) + i];
+			d = 2 * d / vn;
+			for (int i = k; i < m; i++) A[((int64_t)j * m) + i] -= d * v[i];
+		}
+		for (int j = 0; j < nb; j++) {
+			double d = 0;
+			for (int i = k; i < m; i++) d += v[i] * B[((int64_t)j * m) + i];
+			d = 2 * d / vn;
+			for (int i = k; i < m; i++) B[((int64_t)j * m) + i] -= d * v[i];
+		}
+	}
+	double rmax = 0;
+	for (int j = 0; j < nb; j++) {
+		double rr = 0, bb = 0;
+		for (int i = n; i < m; i++) rr += B[((int64_t)j * m) + i] * B[((int64_t)j * m) + i];
+		for (int i = n - 1; i >= 0; i--) {
+			double t = B[((int64_t)j * m) + i];
+			for (int c = i + 1; c < n; c++) t -= A[((int64_t)c * m) + i] * X[((int64_t)j * n) + c];
+			X[((int64_t)j * n) + i] = t / A[((int64_t)i * m) + i];
+			bb += t * t;
+		}
+		const double rel = sqrt(rr / ((bb + rr) > 0 ? (bb + rr) : 1));
+		if (rel > rmax) rmax = rel;
+	}
+	free(v);
+	return rmax;
+}
+
+
+// 参照の四面体での λ^α φ_(a,b) と、泡 Π λ^m の勾配
+static void pr_ref_point(const double x[3], double lam[4], double gl[4][3], double pw[4][PR_RMAX + 1], int r)
+{
+	lam[0] = 1 - x[0] - x[1] - x[2];
+	lam[1] = x[0]; lam[2] = x[1]; lam[3] = x[2];
+	const double g0[4][3] = {{-1, -1, -1}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+	for (int i = 0; i < 4; i++) {
+		for (int q = 0; q < 3; q++) gl[i][q] = g0[i][q];
+		pw[i][0] = 1;
+		for (int k = 1; k <= r; k++) pw[i][k] = pw[i][k - 1] * lam[i];
+	}
+}
+
+
+static void pr_bubble_grad(const double lam[4], const double gl[4][3], const double pw[4][PR_RMAX + 1], const int m[4], double gb[3])
+{
+	for (int q = 0; q < 3; q++) gb[q] = 0;
+	for (int i = 0; i < 4; i++) {
+		if (m[i] == 0) continue;
+		double d = m[i] * pw[i][m[i] - 1];
+		for (int j = 0; j < 4; j++) {
+			if (j != i) d *= pw[j][m[j]];
+		}
+		for (int q = 0; q < 3; q++) gb[q] += d * gl[i][q];
+	}
+	(void)lam;
+}
+
+
+// 実体 (頂点 nv 個 : 2 辺 / 3 面 / 4 内部) の泡の勾配の対角ブロックを作り、固定する自由度 (テンプレートの番号) を選ぶ
+static int pr_gauge_kind(FILE *fp_log, int nv, int *sel, int *nsel)
+{
+	const int r = PR.r;
+	// 列 : 実体の閉包に属する AFW の関数 (辺 / 面 / 内部、参照の頂点 0..nv-1 の上)
+	typedef struct { int a, b, al[4], own; } fn_t;
+	fn_t *fn = (fn_t *)malloc((size_t)PR_NAMAX * sizeof(fn_t));
+	int nf = 0;
+	for (int u = 0; u < nv; u++) {
+		for (int w = u + 1; w < nv; w++) {
+			for (int t = 0; t < NtE; t++) {
+				fn_t z = {0, 0, {0, 0, 0, 0}, (nv == 2)};
+				const int v2[2] = {u, w};
+				z.a = v2[TplE[t].a]; z.b = v2[TplE[t].b];
+				z.al[u] = TplE[t].al[0]; z.al[w] = TplE[t].al[1];
+				fn[nf++] = z;
+			}
+		}
+	}
+	if (nv >= 3) {
+		for (int u = 0; u < nv; u++) {
+			for (int w = u + 1; w < nv; w++) {
+				for (int y = w + 1; y < nv; y++) {
+					const int v3[3] = {u, w, y};
+					for (int t = 0; t < NtF; t++) {
+						fn_t z = {0, 0, {0, 0, 0, 0}, (nv == 3)};
+						z.a = v3[TplF[t].a]; z.b = v3[TplF[t].b];
+						for (int i = 0; i < 3; i++) z.al[v3[i]] = TplF[t].al[i];
+						fn[nf++] = z;
+					}
+				}
+			}
+		}
+	}
+	if (nv == 4) {
+		for (int t = 0; t < NtI; t++) {
+			fn_t z = {TplI[t].a, TplI[t].b, {TplI[t].al[0], TplI[t].al[1], TplI[t].al[2], TplI[t].al[3]}, 1};
+			fn[nf++] = z;
+		}
+	}
+	// 泡 : λ_0 … λ_(nv-1) x 次数 r − nv の単項式
+	int (*bm)[4] = (int (*)[4])malloc((size_t)PR_TMAX * sizeof(int[4]));
+	int nb = 0;
+	const int dr = r - nv;
+	for (int a0 = 0; a0 <= dr; a0++) {
+		for (int a1 = 0; a1 <= dr - a0; a1++) {
+			for (int a2 = 0; a2 <= ((nv >= 3) ? (dr - a0 - a1) : 0); a2++) {
+				const int a3 = ((nv == 4) ? (dr - a0 - a1 - a2) : 0);
+				if ((nv == 2) && ((a0 + a1) != dr)) continue;
+				if ((nv == 3) && ((a0 + a1 + a2) != dr)) continue;
+				int m[4] = {a0 + 1, a1 + 1, ((nv >= 3) ? (a2 + 1) : 0), ((nv == 4) ? (a3 + 1) : 0)};
+				for (int i = 0; i < 4; i++) bm[nb][i] = m[i];
+				nb++;
+			}
+		}
+	}
+	// 標本点 (実体の上) と接線の成分
+	const int K = (2 * r) + 3;
+	int np = 0;
+	double (*pt)[3] = (double (*)[3])malloc((size_t)K * K * K * sizeof(double[3]));
+	for (int i = 0; i < K; i++) {
+		for (int j = 0; j < ((nv >= 3) ? K : 1); j++) {
+			for (int k = 0; k < ((nv == 4) ? K : 1); k++) {
+				const double x = (i + 0.37) / K, y = ((nv >= 3) ? (j + 0.21) / K : 0), z = ((nv == 4) ? (k + 0.13) / K : 0);
+				if ((x + y + z) >= 1) continue;
+				pt[np][0] = x; pt[np][1] = y; pt[np][2] = z;
+				np++;
+			}
+		}
+	}
+	const int nc = nv - 1;		// 接線の成分の数 (辺 1 : x、面 2 : x y、内部 3)
+	const int m = np * nc;
+	double *A = (double *)calloc((size_t)m * nf, sizeof(double));
+	double *B = (double *)calloc((size_t)m * nb, sizeof(double));
+	double *X = (double *)calloc((size_t)nf * nb, sizeof(double));
+	for (int p = 0; p < np; p++) {
+		double lam[4], gl[4][3], pw[4][PR_RMAX + 1];
+		pr_ref_point(pt[p], lam, gl, pw, r);
+		for (int c = 0; c < nf; c++) {
+			double w[3], cu[3];
+			pr_fun(lam, gl, pw, fn[c].a, fn[c].b, fn[c].al, w, cu);
+			for (int q = 0; q < nc; q++) A[((int64_t)c * m) + (p * nc) + q] = w[q];
+		}
+		for (int c = 0; c < nb; c++) {
+			double gb[3];
+			pr_bubble_grad(lam, gl, pw, bm[c], gb);
+			for (int q = 0; q < nc; q++) B[((int64_t)c * m) + (p * nc) + q] = gb[q];
+		}
+	}
+	const double res = pr_lsq(A, m, nf, B, nb, X);
+	// 対角ブロック (実体自身の関数の行) と、他の実体の係数の大きさ
+	int nown = 0, own[PR_TMAX];
+	double offmax = 0, onmax = 0;
+	for (int c = 0; c < nf; c++) {
+		for (int j = 0; j < nb; j++) {
+			const double v = fabs(X[((int64_t)j * nf) + c]);
+			if (fn[c].own) { if (v > onmax) onmax = v; }
+			else if (v > offmax) offmax = v;
+		}
+		if (fn[c].own) own[nown++] = c;
+	}
+	// 行の選択 : ピボット付きの Gram-Schmidt (残りの成分が最大の行を順に)
+	double *Q = (double *)calloc((size_t)nb * nb, sizeof(double));
+	unsigned char *used = (unsigned char *)calloc((size_t)nown, sizeof(unsigned char));
+	double minpiv = 1e300;
+	*nsel = 0;
+	for (int s = 0; s < nb; s++) {
+		int best = -1;
+		double bn = -1, bv[PR_TMAX];
+		for (int o = 0; o < nown; o++) {
+			if (used[o]) continue;
+			double v[PR_TMAX];
+			for (int j = 0; j < nb; j++) v[j] = X[((int64_t)j * nf) + own[o]];
+			for (int t = 0; t < s; t++) {
+				double d = 0;
+				for (int j = 0; j < nb; j++) d += v[j] * Q[(t * nb) + j];
+				for (int j = 0; j < nb; j++) v[j] -= d * Q[(t * nb) + j];
+			}
+			double nn = 0;
+			for (int j = 0; j < nb; j++) nn += v[j] * v[j];
+			if (nn > bn) {
+				bn = nn;
+				best = o;
+				for (int j = 0; j < nb; j++) bv[j] = v[j];
+			}
+		}
+		if ((best < 0) || (bn <= 0)) break;
+		used[best] = 1;
+		bn = sqrt(bn);
+		if ((bn / ((onmax > 0) ? onmax : 1)) < minpiv) minpiv = bn / ((onmax > 0) ? onmax : 1);
+		for (int j = 0; j < nb; j++) Q[(s * nb) + j] = bv[j] / bn;
+		sel[(*nsel)++] = own[best] - (nf - nown);		// 実体の関数の中での番号 (テンプレートの番号)
+	}
+	// テンプレートの番号の昇順に並べる
+	for (int i = 0; i < *nsel; i++) {
+		for (int j = i + 1; j < *nsel; j++) {
+			if (sel[j] < sel[i]) { const int t = sel[i]; sel[i] = sel[j]; sel[j] = t; }
+		}
+	}
+	const char *nm = ((nv == 2) ? "edge" : (nv == 3) ? "face" : "interior");
+	fprintf(fp_log, "  gauge (%s) : %d bubble gradients in %d %s functions, least-squares residual %.1e, other entities %.1e, "
+		"smallest pivot %.1e\n", nm, nb, nown, nm, res, offmax / ((onmax > 0) ? onmax : 1), minpiv);
+	int bad = ((*nsel != nb) || !(res < 1e-9) || !(offmax <= (1e-8 * onmax)) || !(minpiv > 1e-6));
+	free(fn); free(bm); free(pt); free(A); free(B); free(X); free(Q); free(used);
+	if (bad) {
+		fprintf(fp_log, "*** the gauge of the order-%d Nedelec space : the %s bubble gradients are not resolved\n", r, nm);
+		return 1;
+	}
+	return 0;
+}
+
+
+static int pr_gauge(FILE *fp_log, unsigned char *fix)
+{
+	const int r = PR.r, ne = PR.ne, nf = PR.nf, nt = PR.nt, nn = PR.nn;
+	NGe = NGf = NGi = 0;
+	if (pr_gauge_kind(fp_log, 2, GTe, &NGe)) return 1;
+	if ((r >= 3) && pr_gauge_kind(fp_log, 3, GTf, &NGf)) return 1;
+	if ((r >= 4) && pr_gauge_kind(fp_log, 4, GTi, &NGi)) return 1;
+	GTr = r;
+	// 電極の上の実体 (泡の節点が電極の節点) と awall の実体
+	unsigned char *eel = (unsigned char *)calloc((size_t)ne, sizeof(unsigned char));
+	unsigned char *fel = (unsigned char *)calloc((size_t)nf, sizeof(unsigned char));
+	for (int e = 0; e < nt; e++) {
+		int32_t nd[TET_NMAX];
+		const int nen = tet_nodes(e, nd);
+		for (int a = 4; a < nen; a++) {
+			const int i = nd[a];
+			if (!((NodeConductor[i] >= 0) && PR.cond[i] && PR.used[i])) continue;
+			const int *ix = tet_ho_index(a);
+			int v[4], k = 0;
+			for (int q = 0; q < 4; q++) {
+				if (ix[q] > 0) v[k++] = nd[q];
+			}
+			if (k == 2) {
+				const int64_t id = edge_id(v[0], v[1]);
+				if (id >= 0) eel[id] = 1;
+			}
+			else if (k == 3) {
+				int32_t sv[3] = {v[0], v[1], v[2]};
+				for (int x = 0; x < 2; x++) {
+					for (int y = x + 1; y < 3; y++) {
+						if (sv[y] < sv[x]) { const int32_t tt = sv[x]; sv[x] = sv[y]; sv[y] = tt; }
+					}
+				}
+				const int f = p2_face_id(PR.fvert, nf, sv);
+				if (f >= 0) fel[f] = 1;
+			}
+		}
+	}
+	unsigned char *wall = (unsigned char *)malloc((size_t)ne * sizeof(unsigned char));
+	unsigned char *tree = (unsigned char *)malloc((size_t)ne * sizeof(unsigned char));
+	int *comp = (int *)malloc((size_t)nn * sizeof(int));
+	for (int i = 0; i < ne; i++) wall[i] = fix[(int64_t)i * NtE];
+	const int ntree = edge_tree_gauge(wall, tree, comp);
+	int nte = 0, ngr = 0, nfe = 0, nfg = 0, nig = 0, nee = 0;
+	for (int i = 0; i < ne; i++) {
+		if (wall[i]) continue;
+		if (tree[i]) {
+			for (int t = 0; t < NtE; t++) fix[((int64_t)i * NtE) + t] = 1;
+			nte++;
+		}
+		else if (eel[i]) nee++;
+		else {
+			for (int t = 0; t < NGe; t++) fix[((int64_t)i * NtE) + GTe[t]] = 1;
+			ngr++;
+		}
+	}
+	for (int f = 0; (f < nf) && (NGf > 0); f++) {
+		if (fix[PR.oF + ((int64_t)f * NtF)]) continue;
+		if (fel[f]) { nfe++; continue; }
+		for (int t = 0; t < NGf; t++) fix[PR.oF + ((int64_t)f * NtF) + GTf[t]] = 1;
+		nfg++;
+	}
+	for (int e = 0; (e < nt) && (NGi > 0); e++) {
+		for (int t = 0; t < NGi; t++) fix[PR.oI + ((int64_t)e * NtI) + GTi[t]] = 1;
+		nig++;
+	}
+	// 木から決まる ψ が電極上で 0 になる条件 : 電極 (の頂点) が awall の辺だけで連結
+	int bad = 0, ref = -1;
+	for (int e = 0; e < nt; e++) {
+		int32_t nd[TET_NMAX];
+		tet_nodes(e, nd);
+		for (int a = 0; a < 4; a++) {
+			const int i = nd[a];
+			if ((NodeConductor[i] < 0) || !PR.cond[i]) continue;
+			if (ref < 0) ref = comp[i];
+			else if (comp[i] != ref) bad = 1;
+		}
+	}
+	fprintf(fp_log, "  gauge : %d tree edges (%d beyond the wall, all %d functions), edge gradients on %d edges (%d of %d functions; "
+		"%d electrode edges left free), face gradients on %d faces (%d of %d; %d electrode faces free), interior gradients on %d (%d of %d)\n",
+		ntree, nte, NtE, ngr, NGe, NtE, nee, nfg, NGf, NtF, nfe, nig, NGi, NtI);
+	free(eel); free(fel); free(wall); free(tree); free(comp);
+	if (bad) {
+		fprintf(fp_log, "*** the electrodes are not connected through awall edges, "
+			"so the tree gauge would shift the terminal voltage; "
+			"use gauge = 0 (the default), or extend awall so that all electrodes "
+			"share one A_t = 0 surface\n");
+		return 1;
+	}
+	return 0;
+}
+
 
 static int pr_open(FILE *fp_log)
 {
@@ -459,6 +794,7 @@ static int pr_open(FILE *fp_log)
 		}
 	}
 	fprintf(fp_log, "  fixed : %d wall faces (A_t = 0), %d electrode nodes\n", nwall, nelec);
+	if (GaugeTree && pr_gauge(fp_log, fix)) return 1;
 	if (nwall == 0) {
 		fprintf(fp_log, "*** warning : no awall surface; the outer boundary is a magnetic wall (dA/dn = 0)\n");
 	}
