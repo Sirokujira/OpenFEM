@@ -5759,7 +5759,7 @@ th_reject "transient M with a bh curve" mtx_bh.ofe "linear and Jiles-Atherton ma
 # ---- 断面 2 次元の三角形の格子 (1 次) の静磁場の過渡解析 (M + transient : 渦電流 + ヒステリシス) ----
 #
 # mag_transient の三角形の分岐 : σ の質量は導体でない要素の σ で組み (assemble_mass_tri_elem)、孤立した導電領域は
-# 要素の節点をまとめ、行列は assemble_nu_tri / assemble_nu_tri6、J-A の状態は要素に 1 つ (assemble_ja_tri)。
+# 要素の節点をまとめ、行列は積分点ごとのテンソル (assemble_ja_tri_matrix)、J-A の状態は積分点ごと (assemble_ja_tri)。
 # lam2d.msh は plate2d と同じ形で間隙を 40 分割した 1 次の三角形 (plate2d_p3.geo の NW 4 / NG 40 / NT 2):
 #   (a) 積層板のステップ応答 : Richardson 2 B(200) − B(100) が Fourier 級数に 2e-4 ([transient M] と同じ根拠、実測 +4.4e-5)、
 #       時間の 1 次 (誤差比 2.04)、入力 = 磁気の仕事 + 渦電流損。導体の要素にも σ の材料 (3) を置く — 導体は撚り線
@@ -5775,6 +5775,7 @@ th_reject "transient M with a bh curve" mtx_bh.ofe "linear and Jiles-Atherton ma
 #       安全側にする (三角形の (c) で実測。検出しないと 31 刻み目で収束しない)。構造格子の出力は変わらない
 #   (g) 2 次の三角形 (状態と行列のテンソルは積分点ごと) : 積層板の Richardson が 1e-5 (1 次の 40 分割では届かない)、ベクトル J-A +
 #       渦電流が構造格子に 1e-5 T、σ = 0 の J-A (導体を J-A にした 2 次の格子) が電流掃引と全桁一致
+#   (h) 2 次の三角形のスカラーの J-A + 渦電流 : 横の磁気抵抗率 max(ν, dh/db) と積分点ごとの接線のテンソルで収束し、ベクトル J-A に 1e-6
 echo "[transient M 2-D] eddy currents + hysteresis in the time domain on triangles"
 cp "$SRC/lam2d.msh" "$SRC/plate2d.msh" "$SRC/plate2d_p2.msh" "$SRC/plate2d_dc.ofe" "$SRC/plate_line_ja_eddy.ofe" "$WORK/"
 mt2_lam() {	# mt2_lam <刻み数> <出力>
@@ -5859,13 +5860,19 @@ th_run mt2_q200.ofe; q200=$(mt_b)
 #     Richardson の残りは 1 次 (間隙 40 分割) の +4.4e-5 に対し 2 次 (10 分割) は 1.9e-6 なので 1e-5 で 1 次と区別する
 compare "order 2, lamination step : B_mean, Richardson 2 B(200) - B(100) vs Fourier series [T]" \
 	"$(awk -v a="$q100" -v b="$q200" 'BEGIN { printf "%.12e", 2 * b - a }')" "$bex" 1e-5
-#     J-A + 渦電流 はベクトル J-A で : スカラーの J-A は電流が 0 を横切った直後に固定点が 1e-8〜1e-6 で停滞する (2 次の格子と細かい
-#     1 次の格子で実測。原因は未解明 — B ≈ 0 の点の横成分を微分磁気抵抗率にする修正では変わらなかった。ベクトル J-A は同じ格子で
-#     収束する)
 mt2_je lam2d_p2.msh 1 1 mt2_jeq.ofe
 mt2_csv mt2_jeq.ofe mt2_jeq; mt_energy "order 2, vector J-A + eddy currents" 1e-9; lq=$(mt2_loss)
 mt2_cmp "order 2 (vector J-A) == structured plate_line_ja_eddy : B_mean(t)" mt2_jeq mt2_st 1e-5
 compare "order 2 (vector J-A) == structured : eddy loss [J/m]" "$lq" "$lst" 1e-4
+#     スカラーの J-A + 渦電流 (h) : 離散の ∇A には横成分があり、横の磁気抵抗率が割線 ν = h/b のままだと第 2 象限 (ν < 0) で負の剛性に
+#     なって固定点が 1 回 1.1 倍で発散した (52 刻み目、残差 2.5e-8)。横を max(ν, dh/db) にし、行列は積分点ごとに真の接線のテンソル
+#     (保磁力の近くの ν > dh/db では横を ν)。どちらか一方を外すと 52 / 94 刻み目で収束しない (実測)。場は 1 方向なのでベクトル J-A に
+#     1e-6 (1 次と同じ)
+mt2_je lam2d_p2.msh 0 1 mt2_jeqs.ofe
+#     恒等式は反復の打ち切り (nlsolver 1e-8) の分だけ残る (実測 1.8e-9) ので 5e-9
+mt2_csv mt2_jeqs.ofe mt2_jeqs; mt_energy "order 2, scalar J-A + eddy currents" 5e-9; lqs=$(mt2_loss)
+mt2_cmp "order 2 : scalar J-A == vector J-A : B_mean(t)" mt2_jeqs mt2_jeq 1e-6
+compare "order 2 : scalar J-A == vector J-A : eddy loss [J/m]" "$lqs" "$lq" 1e-5
 #     σ = 0 の J-A (導体を J-A にして B が厚さ方向に変わる 2 次の格子、単調) : 刻みを掃引の点に揃えると電流掃引と B の列が全桁一致
 printf 'OpenFEM 1 0\ntitle = J-A in the conductors\nmesh = plate2d_nt8_p2.msh\nmaterial = 1.0 0\nja = 2 1.6e6 1100 1.6e-3 400 0.2\nregion = 10 2\nregion = 11 2\nelectrode = 10 0\nelectrode = 11 1\nanalysis = M\ntline = X\ncurrent = 1.0\ncurrentsweep = 0.5 1.0 2.0\njasub = 40\nnlsolver = 200 1e-8 1.0\nsolver = 200000 5000 1e-12\nend\n' > "$WORK/mt2_qsw.ofe"
 th_run mt2_qsw.ofe

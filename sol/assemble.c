@@ -1224,9 +1224,10 @@ void assemble_ja(const double *az, double *res, double *nucell)
 断面 2 次元の三角形の格子のヒステリシス : 状態は積分点ごと (tri_ja_ip)。1 次は ∇A が要素内で一定なので重心の 1 点
 (枠の先頭 id = 8e) で厳密、高次は剛性と同じ則の点ごと (id = e tri_ja_stride() + q)。式は構造格子と同じ (∇A の面内 2 成分
 (∂A/∂p, ∂A/∂q)、B = (∂A/∂q, −∂A/∂p))。JaD の向きは面内 2 成分だけを使う (この経路の中だけで閉じる)。
-固定点の行列は要素ごとの ν / テンソル (積分点の重み付きの平均。1 次はその点の値そのもの)
+固定点の行列は積分点ごとのテンソル (assemble_ja_tri_matrix)。nucell / JaNu6 は要素の平均 (積分点の重み付き、1 次はその点の値)
 */
-// 高次の三角形の固定点の行列 : 積分点ごとの微分磁気抵抗率のテンソル (∇A の基底、6 成分)。要素で平均すると、点ごとの傾きが
+// 三角形の固定点の行列 : 積分点ごとの微分磁気抵抗率のテンソル (∇A の基底、6 成分。1 次は要素に 1 点で、等方 / ベクトル J-A の
+// 行列は従来の assemble_nu_tri / assemble_nu_tri6 と同じ値)。要素で平均すると、点ごとの傾きが
 // 平均の 2 倍を越える所で固定点が縮小しない (J-A + 渦電流の 2 次の積層板で残差が 7e-8 から 1 回 1.1 倍で増えた、実測)
 static double *JqTen = NULL;
 static int64_t JqTenN = 0;
@@ -1263,7 +1264,7 @@ static void assemble_ja_tri(const double *az, double *res, double *nucell)
 	const int it = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
 	const int ip = (it + 1) % 3, iq = (it + 2) % 3;
 	const int nip = tri_ja_nip(), stride = tri_ja_stride();
-	if ((nip > 1) && (JqTenN != ((int64_t)NTri * nip * 6))) {
+	if (JqTenN != ((int64_t)NTri * nip * 6)) {
 		free(JqTen);
 		JqTenN = (int64_t)NTri * nip * 6;
 		JqTen = (double *)calloc((size_t)JqTenN, sizeof(double));
@@ -1287,7 +1288,8 @@ static void assemble_ja_tri(const double *az, double *res, double *nucell)
 				gr[1] += az[nd[l]] * gn[l][1];
 			}
 			const double bmag = sqrt((gr[0] * gr[0]) + (gr[1] * gr[1]));
-			double nu;
+			double nu, tpp = 0, tqq = 0, tpq = 0, tnu = 0, h0 = 0, bsv = 0, hd[2] = {0, 0};
+			int aniso = 0, hperp = 0;
 			for (int d = 0; d < 6; d++) ten[d] = 0;
 			if (mt->ja.on) {
 				const int64_t id = ((int64_t)e * stride) + qp;
@@ -1323,7 +1325,7 @@ static void assemble_ja_tri(const double *az, double *res, double *nucell)
 					nus += nud * w;
 					wsum += w;
 					for (int d = 0; d < 6; d++) tens[d] += ten[d] * w;
-					if (nip > 1) for (int d = 0; d < 6; d++) JqTen[((((int64_t)e * nip) + qp) * 6) + d] = ten[d];
+					for (int d = 0; d < 6; d++) JqTen[((((int64_t)e * nip) + qp) * 6) + d] = ten[d];
 					continue;
 				}
 				double h, m, dhdb;
@@ -1333,16 +1335,52 @@ static void assemble_ja_tri(const double *az, double *res, double *nucell)
 				JaMn[id] = m;
 				nu  = ((fabs(bs) > 1e-12) ? (h / bs) : dhdb);
 				nud = dhdb;
+				// 基準の向き d に沿う成分は h(b)。横の成分は modelling の選択で、従来は割線 H = ν ∇A (剛体の回転と同じ ν = h/b)。
+				// 第 2 象限では ν < 0 で横が負の剛性になり、三角形の格子の離散の ∇A には横成分があるので固定点が 1 回 1.1 倍で
+				// 発散した (2 次の積層板の J-A + 渦電流、反転の後の刻みで残差 2.5e-8 から、実測)。横を max(ν, dh/db) にすると
+				// 横の剛性が正になり、行列 (下のテンソル) が真の接線に一致する。真の解は B ∥ d なので答えは横成分の分しか動かない
+				// (構造格子は場が厳密に 1 方向で、この経路も通らない)
+				const double *dg = (haved ? dir : &JaDn[id * 3]);
+				if (nu > dhdb) {
+					// 保磁力の近く (B が小さく H ≈ Hc) は ν が dh/db の数十倍。等方の dh/db の行列では横向きに縮小しない
+					// (細かい 1 次の格子で停滞、実測) ので横だけ ν
+					aniso = 1;
+					tpp = (dhdb * dg[0] * dg[0]) + (nu * (1 - (dg[0] * dg[0])));
+					tqq = (dhdb * dg[1] * dg[1]) + (nu * (1 - (dg[1] * dg[1])));
+					tpq = (dhdb - nu) * dg[0] * dg[1];
+					tnu = nu;
+				}
+				else if (nu < dhdb) {
+					hperp = 1;
+					h0 = h;
+					bsv = bs;
+					hd[0] = dg[0];
+					hd[1] = dg[1];
+				}
 			}
 			else {
 				nu = nud = 1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
 			}
-			for (int l = 0; l < nen; l++) re[l] += nu * ((gn[l][0] * gr[0]) + (gn[l][1] * gr[1])) * w;
+			if (hperp) {
+				// 横の磁気抵抗率を max(ν, dh/db) にする : H = h d + dh/db (∇A − b d)
+				const double hp = (h0 * hd[0]) + (nud * (gr[0] - (bsv * hd[0])));
+				const double hq = (h0 * hd[1]) + (nud * (gr[1] - (bsv * hd[1])));
+				for (int l = 0; l < nen; l++) re[l] += ((gn[l][0] * hp) + (gn[l][1] * hq)) * w;
+			}
+			else {
+				for (int l = 0; l < nen; l++) re[l] += nu * ((gn[l][0] * gr[0]) + (gn[l][1] * gr[1])) * w;
+			}
 			for (int d = 0; d < 3; d++) ten[d] = nud;
+			if (aniso) {
+				ten[ip] = tpp;
+				ten[iq] = tqq;
+				ten[it] = tnu;
+				ten[ja_off(ip, iq)] = tpq;
+			}
 			nus += nud * w;
 			wsum += w;
 			for (int d = 0; d < 6; d++) tens[d] += ten[d] * w;
-			if (nip > 1) for (int d = 0; d < 6; d++) JqTen[((((int64_t)e * nip) + qp) * 6) + d] = ten[d];
+			for (int d = 0; d < 6; d++) JqTen[((((int64_t)e * nip) + qp) * 6) + d] = ten[d];
 		}
 		if (nen == 0) continue;
 		// 1 次は積分点の値そのもの (平均の割り算の丸めを入れない)

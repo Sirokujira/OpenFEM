@@ -522,9 +522,7 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 				continue;
 			}
 			if (tri2d) {
-				if (tri_ja_nip() > 1) assemble_ja_tri_matrix(A);		// 高次 : 積分点ごとのテンソル
-				else if (JaNu6 != NULL) assemble_nu_tri6(A, JaNu6);
-				else assemble_nu_tri(A, nucell);
+				assemble_ja_tri_matrix(A);		// 積分点ごとのテンソル (スカラーの J-A の保磁力の近くは横を割線の ν)
 			}
 			else if (JaNu6 != NULL) assemble_nu6(A, JaNu6);
 			else assemble_nu(A, nucell);
@@ -900,9 +898,7 @@ static int solve_magnetostatic(FILE *fp_log)
 						break;
 					}
 					if (tri2d) {
-						if (tri_ja_nip() > 1) assemble_ja_tri_matrix(&A);		// 高次 : 積分点ごとのテンソル
-						else if (JaNu6 != NULL) assemble_nu_tri6(&A, JaNu6);
-						else assemble_nu_tri(&A, nucell);
+						assemble_ja_tri_matrix(&A);		// 積分点ごとのテンソル (スカラーの J-A の保磁力の近くは横を割線の ν)
 					}
 					else if (JaNu6 != NULL) assemble_nu6(&A, JaNu6);
 					else assemble_nu(&A, nucell);
