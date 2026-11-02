@@ -2498,7 +2498,7 @@ static int pr_solve_port(FILE *fp_log, int jc, FILE *fp_iter, const char *label,
 
 
 // 場の出力 (ポート 1 の励振) : 要素の重心での B = ∇×A (実部) と J = −σ (jωA + ∇φ) (実部・虚部)
-static void pr_fields(void)
+static void pr_fields(int transient)
 {
 	const int nt = PR.nt, nA = PR.nA, nP = PR.nP;
 	const double omega = PR.omega;
@@ -2564,9 +2564,17 @@ static void pr_fields(void)
 			ji[(e * 3) + c] = -sg * ei[c];
 		}
 	}
-	field_add_cellvec("B_A_re", bv);
-	field_add_cellvec("J_A_re", jr);
-	field_add_cellvec("J_A_im", ji);
+	if (transient) {
+		// 過渡解析 : ur = [A^{n+1}; χ/Δt]、ui = [A^{n+1} - A^n; 0]、ω = -1/Δt で呼ぶので、B = ∇×A^{n+1}、
+		// 実部の J = -σ((A^{n+1} - A^n) + ∇χ)/Δt (後退 Euler の刻みの電流密度)
+		field_add_cellvec("B_A", bv);
+		field_add_cellvec("J_A", jr);
+	}
+	else {
+		field_add_cellvec("B_A_re", bv);
+		field_add_cellvec("J_A_re", jr);
+		field_add_cellvec("J_A_im", ji);
+	}
 	free(bv); free(jr); free(ji); free(wv); free(wc); free(dof);
 }
 
@@ -2682,7 +2690,7 @@ int solve_eddy3d_pr(FILE *fp_log)
 					PR.ui[i] = (svr * xi) + (svi * xr);
 				}
 			}
-			if (FieldOut && (jc == 1) && final) pr_fields();
+			if (FieldOut && (jc == 1) && final) pr_fields(0);
 		}
 		if (final || ierr) break;
 
@@ -3448,6 +3456,23 @@ int solve_eddy3d_pr_transient(FILE *fp_log)
 		if (fcsv) fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%.8e,%d\n", t, v, cur, win, wmag, wjou, it);
 		if ((st == TransientSteps) || ((st % ((TransientSteps >= 20) ? (TransientSteps / 20) : 1)) == 0)) {
 			fprintf(fp_log, "  %6d %13.6e %13.6e %13.6e %6d\n", st, t, v, cur, it);
+		}
+		// 場の出力 (fieldout = 1) : 終了時刻の B と J (hdf5 = 1 なら刻みごとのスナップショットも)。解の作業配列 PR.ur / ui は
+		// 過渡解析では使わないので、そこに [A^{n+1}; χ/Δt] と [ΔA; 0] を入れて周波数領域の場の関数を ω = -1/Δt で呼ぶ
+		if (FieldOut && (h5_series_open() || (st == TransientSteps))) {
+			for (int i = 0; i < n; i++) {
+				PR.ur[i] = ((i < oV) ? x[i] : (x[i] / dt));
+				PR.ui[i] = ((i < oV) ? (x[i] - xo[i]) : 0);
+			}
+			const double wsave = PR.omega;
+			PR.omega = -1 / dt;
+			field_free();
+			pr_fields(1);
+			PR.omega = wsave;
+			if (h5_series_open()) {
+				if (st == 1) h5_field_axis("time [s]");
+				ierr |= h5_add_field(t);
+			}
 		}
 	}
 	if (fcsv) fclose(fcsv);

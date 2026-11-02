@@ -456,6 +456,110 @@ static void elem_bfield(int e, const double *ur, const double *ui, double bre[3]
 }
 
 
+// 場の出力 : 要素毎に B = ∇×A と J = -σ(jωA + ∇φ) を作る (ur / ui は [A; φ] の実部・虚部、ne は辺の数)。
+// **要素の種別ごとに分岐する** (混在格子があるため)。四面体は Whitney 基底の閉形式 (∇×W_e = 2∇λ_a×∇λ_b、W_e は 1 次なので
+// 重心で評価)、六面体・角柱は参照基底を Piola 変換した要素中心の値を使う。純粋な格子では従来と同じ式を同じ順に通るので
+// 出力はバイト一致する。
+// 過渡解析 (transient = 1) は ur = [A^{n+1}; χ/Δt]、ui = [A^{n+1} - A^n; 0]、ω = -1/Δt で呼ぶ : B = ∇×A^{n+1}、
+// 実部の J = -σ((A^{n+1} - A^n) + ∇χ)/Δt (後退 Euler の刻みの電流密度、端子電流と同じ離散) を B_A / J_A として書く
+static void ed_fields(const double *ur, const double *ui, double omega, int ne, int transient)
+{
+	const int nelem = edge_elem_count();
+	double *bv = (double *)malloc((size_t)nelem * 3 * sizeof(double));
+	double *jr = (double *)malloc((size_t)nelem * 3 * sizeof(double));
+	double *ji = (double *)malloc((size_t)nelem * 3 * sizeof(double));
+	for (int e = 0; e < nelem; e++) {
+		const int kind = edge_elem_kind(e);
+		const int nedge = edge_elem_nedge(e);
+		const int32_t *ed = &TetEdge[EdgeOff[e]];
+		const signed char *sg = &TetEdgeSgn[EdgeOff[e]];
+		const int32_t *nd = edge_elem_nodes(e);
+		double brv[3] = {0, 0, 0}, arv[3] = {0, 0, 0}, aiv[3] = {0, 0, 0};
+		double pr[3] = {0, 0, 0}, pi2[3] = {0, 0, 0};	// ∇φ
+
+		if (kind == MESHELEM_TET) {
+			double g[4][3], vol;
+			for (int c = 0; c < 3; c++) {
+				bv[(e * 3) + c] = jr[(e * 3) + c] = ji[(e * 3) + c] = 0;
+			}
+			if (tet_grad_pub(&Tet[e * 4], g, &vol)) continue;
+			for (int k = 0; k < 6; k++) {
+				const int a = EDGE_NODE3[k][0], b = EDGE_NODE3[k][1];
+				const double cr[3] = {
+					(g[a][1] * g[b][2]) - (g[a][2] * g[b][1]),
+					(g[a][2] * g[b][0]) - (g[a][0] * g[b][2]),
+					(g[a][0] * g[b][1]) - (g[a][1] * g[b][0])};
+				const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
+				for (int c = 0; c < 3; c++) {
+					brv[c] += 2 * wr * cr[c];		// ∇×W_e = 2 cr
+					// 重心での W_e = (∇λ_b - ∇λ_a)/4
+					arv[c] += wr * (g[b][c] - g[a][c]) / 4;
+					aiv[c] += wi * (g[b][c] - g[a][c]) / 4;
+				}
+			}
+			for (int a = 0; a < 4; a++) {
+				for (int c = 0; c < 3; c++) {
+					pr[c] += ur[ne + nd[a]] * g[a][c];
+					pi2[c] += ui[ne + nd[a]] * g[a][c];
+				}
+			}
+		}
+		else {
+			double wc[12][3], cc[12][3];
+			edge_elem_center(e, wc, cc);
+			for (int k = 0; k < nedge; k++) {
+				const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
+				for (int c = 0; c < 3; c++) {
+					brv[c] += wr * cc[k][c];
+					arv[c] += wr * wc[k][c];
+					aiv[c] += wi * wc[k][c];
+				}
+			}
+			if (kind == MESHELEM_HEX) {
+				double gn[8][3];
+				if (!hex_grad_center(e - NTet, gn)) {
+					for (int a = 0; a < 8; a++) {
+						for (int c = 0; c < 3; c++) {
+							pr[c] += ur[ne + nd[a]] * gn[a][c];
+							pi2[c] += ui[ne + nd[a]] * gn[a][c];
+						}
+					}
+				}
+			}
+			else {
+				double gn[6][3];
+				if (!prism_grad_center(e - NTet - NHex, gn)) {
+					for (int a = 0; a < 6; a++) {
+						for (int c = 0; c < 3; c++) {
+							pr[c] += ur[ne + nd[a]] * gn[a][c];
+							pi2[c] += ui[ne + nd[a]] * gn[a][c];
+						}
+					}
+				}
+			}
+		}
+
+		const double sg2 = Material[edge_elem_mat(e)].sigma;
+		for (int c = 0; c < 3; c++) {
+			bv[(e * 3) + c] = brv[c];		// |B| は実部で代表させる
+			// J = -σ(jωA + ∇φ)、jωA = jω(ar + j ai) = -ω ai + j ω ar
+			jr[(e * 3) + c] = -sg2 * ((-omega * aiv[c]) + pr[c]);
+			ji[(e * 3) + c] = -sg2 * ((omega * arv[c]) + pi2[c]);
+		}
+	}
+	if (transient) {
+		field_add_cellvec("B_A", bv);
+		field_add_cellvec("J_A", jr);
+	}
+	else {
+		field_add_cellvec("B_A_re", bv);
+		field_add_cellvec("J_A_re", jr);
+		field_add_cellvec("J_A_im", ji);
+	}
+	free(bv); free(jr); free(ji);
+}
+
+
 int solve_eddy3d(FILE *fp_log)
 {
 	const int np = NPort;
@@ -729,94 +833,7 @@ int solve_eddy3d(FILE *fp_log)
 		// Whitney 基底の閉形式 (∇×W_e = 2∇λ_a×∇λ_b、W_e は 1 次なので重心で
 		// 評価)、六面体・角柱は参照基底を Piola 変換した要素中心の値を使う。
 		// 純粋な格子では従来と同じ式を同じ順に通るので出力はバイト一致する
-		if (FieldOut && (jc == 1) && final) {
-			double *bv = (double *)malloc((size_t)nelem * 3 * sizeof(double));
-			double *jr = (double *)malloc((size_t)nelem * 3 * sizeof(double));
-			double *ji = (double *)malloc((size_t)nelem * 3 * sizeof(double));
-			for (int e = 0; e < nelem; e++) {
-				const int kind = edge_elem_kind(e);
-				const int nedge = edge_elem_nedge(e);
-				const int32_t *ed = &TetEdge[EdgeOff[e]];
-				const signed char *sg = &TetEdgeSgn[EdgeOff[e]];
-				const int32_t *nd = edge_elem_nodes(e);
-				double brv[3] = {0, 0, 0}, arv[3] = {0, 0, 0}, aiv[3] = {0, 0, 0};
-				double pr[3] = {0, 0, 0}, pi2[3] = {0, 0, 0};	// ∇φ
-
-				if (kind == MESHELEM_TET) {
-					double g[4][3], vol;
-					for (int c = 0; c < 3; c++) {
-						bv[(e * 3) + c] = jr[(e * 3) + c] = ji[(e * 3) + c] = 0;
-					}
-					if (tet_grad_pub(&Tet[e * 4], g, &vol)) continue;
-					for (int k = 0; k < 6; k++) {
-						const int a = EDGE_NODE3[k][0], b = EDGE_NODE3[k][1];
-						const double cr[3] = {
-							(g[a][1] * g[b][2]) - (g[a][2] * g[b][1]),
-							(g[a][2] * g[b][0]) - (g[a][0] * g[b][2]),
-							(g[a][0] * g[b][1]) - (g[a][1] * g[b][0])};
-						const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
-						for (int c = 0; c < 3; c++) {
-							brv[c] += 2 * wr * cr[c];		// ∇×W_e = 2 cr
-							// 重心での W_e = (∇λ_b - ∇λ_a)/4
-							arv[c] += wr * (g[b][c] - g[a][c]) / 4;
-							aiv[c] += wi * (g[b][c] - g[a][c]) / 4;
-						}
-					}
-					for (int a = 0; a < 4; a++) {
-						for (int c = 0; c < 3; c++) {
-							pr[c] += ur[ne + nd[a]] * g[a][c];
-							pi2[c] += ui[ne + nd[a]] * g[a][c];
-						}
-					}
-				}
-				else {
-					double wc[12][3], cc[12][3];
-					edge_elem_center(e, wc, cc);
-					for (int k = 0; k < nedge; k++) {
-						const double wr = sg[k] * ur[ed[k]], wi = sg[k] * ui[ed[k]];
-						for (int c = 0; c < 3; c++) {
-							brv[c] += wr * cc[k][c];
-							arv[c] += wr * wc[k][c];
-							aiv[c] += wi * wc[k][c];
-						}
-					}
-					if (kind == MESHELEM_HEX) {
-						double gn[8][3];
-						if (!hex_grad_center(e - NTet, gn)) {
-							for (int a = 0; a < 8; a++) {
-								for (int c = 0; c < 3; c++) {
-									pr[c] += ur[ne + nd[a]] * gn[a][c];
-									pi2[c] += ui[ne + nd[a]] * gn[a][c];
-								}
-							}
-						}
-					}
-					else {
-						double gn[6][3];
-						if (!prism_grad_center(e - NTet - NHex, gn)) {
-							for (int a = 0; a < 6; a++) {
-								for (int c = 0; c < 3; c++) {
-									pr[c] += ur[ne + nd[a]] * gn[a][c];
-									pi2[c] += ui[ne + nd[a]] * gn[a][c];
-								}
-							}
-						}
-					}
-				}
-
-				const double sg2 = Material[edge_elem_mat(e)].sigma;
-				for (int c = 0; c < 3; c++) {
-					bv[(e * 3) + c] = brv[c];		// |B| は実部で代表させる
-					// J = -σ(jωA + ∇φ)、jωA = jω(ar + j ai) = -ω ai + j ω ar
-					jr[(e * 3) + c] = -sg2 * ((-omega * aiv[c]) + pr[c]);
-					ji[(e * 3) + c] = -sg2 * ((omega * arv[c]) + pi2[c]);
-				}
-			}
-			field_add_cellvec("B_A_re", bv);
-			field_add_cellvec("J_A_re", jr);
-			field_add_cellvec("J_A_im", ji);
-			free(bv); free(jr); free(ji);
-		}
+		if (FieldOut && (jc == 1) && final) ed_fields(ur, ui, omega, ne, 0);
 
 	}
 	if (final || ierr) break;
@@ -1412,6 +1429,10 @@ int solve_eddy3d_transient(FILE *fp_log)
 	FILE *fcsv = mpi_fopen_out("ofe_transient.csv", "w");
 	if (fcsv) fprintf(fcsv, "t [s],V [V],I [A],W_in [J],W_mag [J],W_joule [J],iter\n");
 	double win = 0, wmag = 0, wjou = 0;
+	// 場の出力 (fieldout = 1) : 終了時刻の B と J (hdf5 = 1 なら刻みごとのスナップショットも)
+	const int snap = (FieldOut && h5_series_open());
+	double *fr = (FieldOut ? (double *)malloc((size_t)n * sizeof(double)) : NULL);
+	double *fi = (FieldOut ? (double *)malloc((size_t)n * sizeof(double)) : NULL);
 	fprintf(fp_log, "  %6s %13s %13s %13s %6s\n", "step", "t [s]", "V [V]", "I [A]", "iter");
 	for (int st = 1; (st <= TransientSteps) && !ierr; st++) {
 		const double t = st * dt;
@@ -1474,7 +1495,25 @@ int solve_eddy3d_transient(FILE *fp_log)
 		if ((st == TransientSteps) || ((st % ((TransientSteps >= 20) ? (TransientSteps / 20) : 1)) == 0)) {
 			fprintf(fp_log, "  %6d %13.6e %13.6e %13.6e %6d\n", st, t, v, cur, it);
 		}
+		if (FieldOut && (snap || (st == TransientSteps))) {
+			// B = ∇×A^{n+1}、J = -σ(ΔA + ∇χ)/Δt (ed_fields の注釈)
+			for (int i = 0; i < ne; i++) {
+				fr[i] = x[i];
+				fi[i] = x[i] - xo[i];
+			}
+			for (int i = 0; i < nn; i++) {
+				fr[ne + i] = x[ne + i] / dt;
+				fi[ne + i] = 0;
+			}
+			field_free();
+			ed_fields(fr, fi, -1 / dt, ne, 1);
+			if (snap) {
+				if (st == 1) h5_field_axis("time [s]");
+				ierr |= h5_add_field(t);
+			}
+		}
 	}
+	free(fr); free(fi);
 	if (fcsv) fclose(fcsv);
 	if (hyst && !ierr) {
 		fprintf(fp_log, "  nonlinear (%d tetrahedra) : fixed-point iterations = %ld (%d steps)\n",

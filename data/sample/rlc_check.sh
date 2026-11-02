@@ -6868,16 +6868,19 @@ grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^awall/{next} /^anal
 gdc=$(awk -F, '$1 == "G" { f = 1; next } f && $1 == "1" { print $2; exit }' "$WORK/rlc.csv")
 compare "voltage step held : I(t_end) == G_dc V (analysis R on the same mesh) [A]" "$ilast" "$gdc" 1e-9
 # (c) 10 kHz の正弦波、4 周期
-grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{print "frequency = 1e4"; next} {print}' > "$WORK/a3t_fd.ofe"
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{print "frequency = 1e4"; print "fieldout = 1"; next} {print}' > "$WORK/a3t_fd.ofe"
 (cd "$WORK" && "$OFE" -n 2 a3t_fd.ofe > /dev/null 2>&1) || { echo "  a3t_fd : the run failed -> NG" >&2; status=1; }
+a3_vec() { awk -v nm="$2" '$1 == "VECTORS" { f = ($2 == nm); next } f && /^[A-Z]/ { f = 0 } f && (NF == 3) { print }' "$1"; }	# a3_vec <vtk> <名前>
+a3_vec "$WORK/ofe_field.vtk" J_A_im > "$WORK/a3t_jim.txt"
 set -- $(awk '/port 1 : I =/ { print $6, $7; exit }' "$WORK/ofe.log")
 yre=$1; yim=$2
 for N in 32 64; do
 	awk -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4; T = 1 / f; s = "waveform ="
 		for (k = 0; k <= 4 * N; k++) { t = k * T / N; s = s sprintf(" %.12e %.15g", t, sin(2 * pi * f * t)) } print s }' > "$WORK/a3t_wf.txt"
 	grep -v '^#' "$SRC/bar_eddy.ofe" | awk -v wf="$WORK/a3t_wf.txt" -v ns=$((4 * N)) '/^frequency/{next}
-		/^analysis/{ while ((getline l < wf) > 0) print l; print "transient = 4e-4 " ns } {print}' > "$WORK/a3t_sin.ofe"
+		/^analysis/{ while ((getline l < wf) > 0) print l; print "transient = 4e-4 " ns; print "fieldout = 1" } {print}' > "$WORK/a3t_sin.ofe"
 	(cd "$WORK" && "$OFE" -n 2 a3t_sin.ofe > /dev/null 2>&1) || { echo "  a3t_sin ($N) : the run failed -> NG" >&2; status=1; }
+	a3_vec "$WORK/ofe_field.vtk" J_A > "$WORK/a3t_j$N.txt"
 	[ "$N" = 64 ] && a3_energy "sine, 64 steps per period"
 	set -- $(awk -F, -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4 } NR > 1 { k = NR - 1
 		if (k > 3 * N) { a += $3 * sin(2 * pi * f * $1); b += $3 * cos(2 * pi * f * $1) } } END { printf "%.12e %.12e", 2 * a / N, 2 * b / N }' "$WORK/ofe_transient.csv")
@@ -6891,6 +6894,59 @@ res=$(awk -v gr="$yre" -v gi="$yim" -v a1="$ar32" -v b1="$ai32" -v a2="$ar64" -v
 	printf "%s (32 steps %.2e, 64 steps %.2e, ratio %.2f; Richardson %.2e)", ok ? "OK" : "NG", e1, e2, q, er }')
 echo "  sine at 10 kHz : steady state -> frequency-domain Y (backward Euler, first order) : $res"
 case "$res" in NG*) status=1 ;; esac
+# (c') 場の出力 (fieldout = 1) : 過渡解析は終了時刻の B = ∇×A^{n+1} と J = -σ(ΔA + ∇χ)/Δt (後退 Euler の刻みの電流密度) を書く。
+#      sin の駆動の 4 周期目の終わり (sin = 0, cos = 1) の J は周波数領域の Im J (J_A_im) に 1 次で近づく (32 -> 64 点で比 1.7〜2.3、
+#      Richardson 2e-3 は電流の検査と同じ根拠、実測 7.7e-2 -> 3.9e-2、比 2.00、Richardson 1.6e-4)。ΔA の項 (符号・1/Δt) は
+#      DC の極限では 0 なのでここでだけ落ちる
+if [ -s "$WORK/a3t_j32.txt" ] && [ -s "$WORK/a3t_j64.txt" ] && [ -s "$WORK/a3t_jim.txt" ]; then
+	res=$(paste "$WORK/a3t_j32.txt" "$WORK/a3t_j64.txt" "$WORK/a3t_jim.txt" | awk '{ for (c = 1; c <= 3; c++) { r = $(c + 6); a = $c - r; b = $(c + 3) - r; q = 2 * $(c + 3) - $c - r
+			if (a < 0) a = -a; if (b < 0) b = -b; if (q < 0) q = -q; if (a > m1) m1 = a; if (b > m2) m2 = b; if (q > mq) mq = q; x = (r < 0) ? -r : r; if (x > mx) mx = x } n++ }
+		END { if ((n == 0) || (mx <= 0) || (m2 <= 0)) { print "NG (no field)"; exit } e1 = m1 / mx; e2 = m2 / mx; er = mq / mx; q = e1 / e2
+		      printf "%s (%d cells, 32 steps %.2e, 64 steps %.2e, ratio %.2f; Richardson %.2e)", ((q >= 1.7) && (q <= 2.3) && (er <= 2e-3)) ? "OK" : "NG", n, e1, e2, q, er }')
+else
+	res="NG (no field output)"
+fi
+echo "  sine at 10 kHz : field J(t = 4T) -> frequency-domain Im J (first order) : $res"
+case "$res" in NG*) status=1 ;; esac
+#      2 次の四面体 (粗い棒、eddy3d_p2.c) と 3 次の六面体 (eddy3d_pr.c) でも同じ (高次の経路は ω を -1/Δt に置き換えて周波数領域の
+#      場の関数を呼ぶので、ω を戻し忘れる・置き換え忘れる誤りは DC の極限では見えずここでだけ落ちる)
+cp "$SRC/bar_tet2c.msh" "$SRC/bar_hex3.msh" "$WORK/"
+for m in bar_tet2c bar_hex3; do
+	grep -v '^#' "$SRC/bar_eddy.ofe" | sed "s/^mesh = .*/mesh = $m.msh/" | awk '/^frequency/{print "frequency = 1e4"; print "fieldout = 1"; next} {print}' > "$WORK/a3s_fd.ofe"
+	(cd "$WORK" && "$OFE" -n 2 a3s_fd.ofe > /dev/null 2>&1) || { echo "  a3s_fd ($m) : the run failed -> NG" >&2; status=1; }
+	a3_vec "$WORK/ofe_field.vtk" J_A_im > "$WORK/a3s_jim.txt"
+	for N in 32 64; do
+		awk -v N="$N" 'BEGIN { pi = atan2(0, -1); f = 1e4; T = 1 / f; s = "waveform ="
+			for (k = 0; k <= 4 * N; k++) { t = k * T / N; s = s sprintf(" %.12e %.15g", t, sin(2 * pi * f * t)) } print s }' > "$WORK/a3t_wf.txt"
+		grep -v '^#' "$SRC/bar_eddy.ofe" | sed "s/^mesh = .*/mesh = $m.msh/" | awk -v wf="$WORK/a3t_wf.txt" -v ns=$((4 * N)) '/^frequency/{next}
+			/^analysis/{ while ((getline l < wf) > 0) print l; print "transient = 4e-4 " ns; print "fieldout = 1" } {print}' > "$WORK/a3s_sin.ofe"
+		(cd "$WORK" && "$OFE" -n 2 a3s_sin.ofe > /dev/null 2>&1) || { echo "  a3s_sin ($m, $N) : the run failed -> NG" >&2; status=1; }
+		a3_vec "$WORK/ofe_field.vtk" J_A > "$WORK/a3s_j$N.txt"
+	done
+	res=$(paste "$WORK/a3s_j32.txt" "$WORK/a3s_j64.txt" "$WORK/a3s_jim.txt" | awk 'NF == 9 { for (c = 1; c <= 3; c++) { r = $(c + 6); a = $c - r; b = $(c + 3) - r; q = 2 * $(c + 3) - $c - r
+			if (a < 0) a = -a; if (b < 0) b = -b; if (q < 0) q = -q; if (a > m1) m1 = a; if (b > m2) m2 = b; if (q > mq) mq = q; x = (r < 0) ? -r : r; if (x > mx) mx = x } n++ }
+		END { if ((n == 0) || (mx <= 0) || (m2 <= 0)) { print "NG (no field)"; exit } e1 = m1 / mx; e2 = m2 / mx; er = mq / mx; q = e1 / e2
+		      printf "%s (%d cells, 32 steps %.2e, 64 steps %.2e, ratio %.2f; Richardson %.2e)", ((q >= 1.7) && (q <= 2.3) && (er <= 2e-3)) ? "OK" : "NG", n, e1, e2, q, er }')
+	echo "  $m : sine at 10 kHz, field J(t = 4T) -> frequency-domain Im J (first order) : $res"
+	case "$res" in NG*) status=1 ;; esac
+done
+#      DC の極限 : 段差を保った終了時刻の B / J が周波数領域の 1 Hz の B_A_re / J_A_re に 1e-7 (電流の DC の検査が 1e-9。1 次の四面体、
+#      2 次の四面体 (粗い棒)、3 次の六面体 = eddy3d.c / eddy3d_p2.c / eddy3d_pr.c の 3 つの経路。実測 2.8e-9 以下)
+cp "$SRC/bar_tet2c.msh" "$SRC/bar_hex3.msh" "$WORK/"
+for m in bar_tet bar_tet2c bar_hex3; do
+	grep -v '^#' "$SRC/bar_eddy.ofe" | sed "s/^mesh = .*/mesh = $m.msh/" > "$WORK/a3f_base.ofe"
+	awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 100"; print "fieldout = 1"} {print}' "$WORK/a3f_base.ofe" > "$WORK/a3f_t.ofe"
+	awk '/^frequency/{print "frequency = 1"; print "fieldout = 1"; next} {print}' "$WORK/a3f_base.ofe" > "$WORK/a3f_f.ofe"
+	(cd "$WORK" && "$OFE" -n 2 a3f_t.ofe > /dev/null 2>&1 && cp ofe_field.vtk a3f_t.vtk) || { echo "  a3f_t ($m) : the run failed -> NG" >&2; status=1; }
+	(cd "$WORK" && "$OFE" -n 2 a3f_f.ofe > /dev/null 2>&1 && cp ofe_field.vtk a3f_f.vtk) || { echo "  a3f_f ($m) : the run failed -> NG" >&2; status=1; }
+	for p in B_A:B_A_re J_A:J_A_re; do
+		a3_vec "$WORK/a3f_t.vtk" "${p%%:*}" > "$WORK/a3f_a.txt"; a3_vec "$WORK/a3f_f.vtk" "${p#*:}" > "$WORK/a3f_b.txt"
+		res=$(paste "$WORK/a3f_a.txt" "$WORK/a3f_b.txt" | awk 'NF == 6 { for (c = 1; c <= 3; c++) { d = $c - $(c + 3); if (d < 0) d = -d; if (d > m) m = d; x = $(c + 3); if (x < 0) x = -x; if (x > mx) mx = x } n++ }
+			END { if ((n == 0) || (mx <= 0)) { print "NG (no field)"; exit } printf "%s (%d cells, %.1e)", (m / mx <= 1e-7) ? "OK" : "NG", n, m / mx }')
+		echo "  $m : voltage step held, field ${p%%:*} == 1 Hz ${p#*:} : $res"
+		case "$res" in NG*) status=1 ;; esac
+	done
+done
 # (d) 弾くべき入力
 grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 10 0.5"} {print}' > "$WORK/a3tx_cn.ofe"
 th_reject "A + transient with theta = 0.5" a3tx_cn.ofe "theta = 1 (backward Euler) only"
@@ -7334,11 +7390,19 @@ compare "order-3 hexahedra, J-A, quasi-static hysteresis loss of the 2nd period 
 for c in bar_hex:hexahedra bar_prism:prisms; do
 	m=${c%%:*}; lab="first-order ${c#*:}"
 	cp "$SRC/$m.msh" "$WORK/"
-	sed "s/^mesh = .*/mesh = $m.msh/" "$WORK/a2nl_lin.ofe" > "$WORK/a1p_lin.ofe"
-	(cd "$WORK" && "$OFE" -n 2 a1p_lin.ofe > /dev/null 2>&1 && cp ofe_transient.csv a1p_lin.csv) || { echo "  a1p_lin ($m) : the run failed -> NG" >&2; status=1; }
+	sed "s/^mesh = .*/mesh = $m.msh/; s/^analysis = /fieldout = 1\nanalysis = /" "$WORK/a2nl_lin.ofe" > "$WORK/a1p_lin.ofe"
+	(cd "$WORK" && "$OFE" -n 2 a1p_lin.ofe > /dev/null 2>&1 && cp ofe_transient.csv a1p_lin.csv && cp ofe_field.vtk a1p_lin.vtk) || { echo "  a1p_lin ($m) : the run failed -> NG" >&2; status=1; }
 	for k in bhl:"straight-line B-H curve" jal:"near-linear J-A"; do
-		sed "s/^mesh = .*/mesh = $m.msh/" "$WORK/a2nl_${k%%:*}.ofe" > "$WORK/a1p_nl.ofe"
+		sed "s/^mesh = .*/mesh = $m.msh/; s/^analysis = /fieldout = 1\nanalysis = /" "$WORK/a2nl_${k%%:*}.ofe" > "$WORK/a1p_nl.ofe"
 		(cd "$WORK" && "$OFE" -n 2 a1p_nl.ofe > /dev/null 2>&1) || { echo "  a1p_nl ($m) : the run failed -> NG" >&2; status=1; }
+		# 場の出力 (pr_fields の次数 1 の六面体・角柱) も eddy3d.c (ed_fields) の線形と 1e-7
+		for f in B_A J_A; do
+			a3_vec "$WORK/a1p_lin.vtk" "$f" > "$WORK/a1p_fa.txt"; a3_vec "$WORK/ofe_field.vtk" "$f" > "$WORK/a1p_fb.txt"
+			res=$(paste "$WORK/a1p_fa.txt" "$WORK/a1p_fb.txt" | awk 'NF == 6 { for (c = 1; c <= 3; c++) { d = $c - $(c + 3); if (d < 0) d = -d; if (d > m) m = d; x = $c; if (x < 0) x = -x; if (x > mx) mx = x } n++ }
+				END { if ((n == 0) || (mx <= 0)) { print "NG (no field)"; exit } printf "%s (%d cells, %.1e)", (m / mx <= 1e-7) ? "OK" : "NG", n, m / mx }')
+			echo "  $lab, ${k#*:} : field $f == linear mur = 50 (eddy3d.c) : $res"
+			case "$res" in NG*) status=1 ;; esac
+		done
 		res=$(paste -d, "$WORK/a1p_lin.csv" "$WORK/ofe_transient.csv" | awk -F, -v nfp="$(awk '/fixed-point iterations =/ { print $(NF - 2) }' "$WORK/ofe.log")" '
 			NR > 1 { d = ($3 - $10) / $3; if (d < 0) d = -d; if (d > m) m = d; n++ }
 			END { ok = "NG"; if ((n == 50) && (m < 1e-7) && (nfp + 0 >= 50) && (nfp + 0 <= 100)) ok = "OK"
@@ -7822,6 +7886,31 @@ case "$h5msg" in
 			case "$res" in NG*) status=1 ;; esac
 		done
 	done
+	# 3 次元渦電流 (A) の過渡解析 : 要素のベクトル J_A のスナップショット ([np][ncell][3]) で同じ 2 つ (最後 == VTK、途中の刻み 5 == 5 刻みで
+	# 止めた実行の VTK)。棒の 10 刻み (段差の電圧)
+	vtk_vec() { awk -v nm="$1" '$1 == "VECTORS" { f = ($2 == nm); next } f && /^[A-Z]/ { f = 0 } f && (NF == 3) { print $1; print $2; print $3 }' "$WORK/ofe_field.vtk"; }
+	grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 10"; print "fieldout = 1"} {print}' > "$WORK/h5s_ak.ofe"
+	awk '/^transient/{ print "transient = 1e-4 5"; next } {print}' "$WORK/h5s_ak.ofe" > "$WORK/h5s_a5.ofe"
+	sed 's/^analysis = /hdf5 = 1\nanalysis = /' "$WORK/h5s_ak.ofe" > "$WORK/h5s_a.ofe"
+	(cd "$WORK" && "$OFE" -n 2 h5s_a5.ofe > /dev/null) || { echo "  h5s_a5 : the run failed -> NG" >&2; status=1; }
+	vtk_vec J_A > "$WORK/h5s_vk_J.txt"
+	(cd "$WORK" && "$OFE" -n 2 h5s_a.ofe > /dev/null) || { echo "  h5s_a : the run failed -> NG" >&2; status=1; }
+	vtk_vec J_A > "$WORK/h5s_vl.txt"
+	nc=$(($(wc -l < "$WORK/h5s_vl.txt") / 3))
+	H5FMT="%.8e"
+	h5v /field/axis > "$WORK/h5s_ax.txt"
+	awk -F, 'NR > 1 { print $1 }' "$WORK/ofe_transient.csv" > "$WORK/h5s_t.txt"
+	same_nums "transient (a) : /field/axis == the t column of ofe_transient.csv" "$WORK/h5s_ax.txt" "$WORK/h5s_t.txt"
+	H5FMT="%.9e"
+	h5v /field/J_A "9,0,0" "1,$nc,3" > "$WORK/h5s_last.txt"
+	same_nums "transient (a) : last field snapshot J_A == ofe_field.vtk" "$WORK/h5s_last.txt" "$WORK/h5s_vl.txt" "%.9e"
+	h5v /field/J_A "4,0,0" "1,$nc,3" > "$WORK/h5s_mid.txt"
+	res=$(awk 'NR == FNR { a[FNR] = $1 + 0; na = FNR; next } { b[FNR] = $1 + 0; nb = FNR }
+		END { if ((na == 0) || (na != nb)) { printf "NG (%d / %d values)", na, nb; exit }
+		      for (i = 1; i <= na; i++) { d = a[i] - b[i]; if (d < 0) d = -d; if (d > m) m = d; x = (b[i] < 0) ? -b[i] : b[i]; if (x > mx) mx = x }
+		      e = (mx > 0) ? m / mx : 1; printf "%s (%d values, %.1e)", (e <= 1e-10) ? "OK" : "NG", na, e }' "$WORK/h5s_mid.txt" "$WORK/h5s_vk_J.txt")
+	echo "  transient (a) : snapshot J_A of step 5 == ofe_field.vtk of a run stopped at step 5 : $res"
+	case "$res" in NG*) status=1 ;; esac
 
 	fi
 	;;
