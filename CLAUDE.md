@@ -512,7 +512,8 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
   `mpi_allgather_rows`)。それ以外は全 rank が直列の順で重複して走るので出力は直列とバイト一致。
   行列ベクトル積を `crs_spmv()` を通さずに書くと分散から漏れる (結果は正しいが遅い) ので、新しい積も
   `crs_spmv()` を使うこと。出力ファイルは `mpi_fopen_out()` で開く (rank > 0 は null デバイス)。
-- **`mpisolve = 2` は行列そのものの行ブロック分散** (自己検証の E / P と `direct = 1` 以外のすべて)。分散する行列は
+- **`mpisolve = 2` は行列そのものの行ブロック分散** (自己検証の E / P 以外のすべて。`direct = 1` は `solver_direct` / `solver_direct_c` の
+  入口で `crs_gather_full` が全体を全 rank に集めて直列と同じ分解をする)。分散する行列は
   `crs_distribute()` (確保済みの行列を自分の行だけに詰める) で**登録したものだけ** (`DIST_MAX` 個)。A-φ は実部と虚部を
   同じ分け方で詰めるので位置が揃う。非構造格子の組み立ては `crs_find` が空の行で −1 を返すので `p >= 0` の検査で飛ぶ
   (**検査の無い書き込みを足さないこと**)。`crs_spmv` / `crs_diag` (持ち主から Allgatherv) / `crs_row_dot` (持ち主が Bcast) / `crs_owns`

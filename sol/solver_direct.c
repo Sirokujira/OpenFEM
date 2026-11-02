@@ -341,7 +341,7 @@ static int64_t skyline_setup(const crs_t *A, const unsigned char *fix, size_t nb
 }
 
 
-int solver_direct(const crs_t *A, const double *b, double *x,
+static int solver_direct_core(const crs_t *A, const double *b, double *x,
 	const unsigned char *fix, FILE *fp_log, const char *label)
 {
 	const int n = (int)A->n;
@@ -503,7 +503,7 @@ Cholesky と違い平方根を取らず、単位下三角 L と対角 D に分�
 L の非対角は skyline に、D は別配列に持つ。Crout 形で行 i を左から埋め、
 途中の t[k] = L_ik D_k を使い回すと D の引き直しが要らない。
 */
-int solver_direct_c(const crs_t *K, const crs_t *M, double omega,
+static int solver_direct_c_core(const crs_t *K, const crs_t *M, double omega,
 	const double *br, const double *bi, double *xr, double *xi,
 	const unsigned char *fix, FILE *fp_log, const char *label)
 {
@@ -653,4 +653,38 @@ int solver_direct_c(const crs_t *K, const crs_t *M, double omega,
 	}
 
 	return (ok ? 0 : -1);
+}
+
+
+/*
+行列を分散したとき (mpisolve = 2) の直接解法 : スカイラインの分解は全体の行列を要るので、各 rank の行ブロックを全 rank に
+集めて (crs_gather_full) から、全 rank が同じ分解を重複して行う (演算は直列と同じなので答えは直列とビット単位で同じ、全 rank の
+解も同じ)。分解の間だけ行列は全体を持つ (組み立てと反復の部分は 1/np のまま)。分散していない行列はそのまま
+*/
+int solver_direct(const crs_t *A, const double *b, double *x,
+	const unsigned char *fix, FILE *fp_log, const char *label)
+{
+	crs_t F;
+	if (!crs_gather_full(A, &F)) return solver_direct_core(A, b, x, fix, fp_log, label);
+	const int ierr = solver_direct_core(&F, b, x, fix, fp_log, label);
+	crs_free(&F);
+	return ierr;
+}
+
+
+int solver_direct_c(const crs_t *K, const crs_t *M, double omega,
+	const double *br, const double *bi, double *xr, double *xi,
+	const unsigned char *fix, FILE *fp_log, const char *label)
+{
+	crs_t FK, FM;
+	if (!crs_gather_full(K, &FK)) return solver_direct_c_core(K, M, omega, br, bi, xr, xi, fix, fp_log, label);
+	if (!crs_gather_full(M, &FM)) {
+		crs_free(&FK);
+		printf("%s\n", "*** direct solver : K is distributed (mpisolve = 2) but M is not");
+		return -1;
+	}
+	const int ierr = solver_direct_c_core(&FK, &FM, omega, br, bi, xr, xi, fix, fp_log, label);
+	crs_free(&FK);
+	crs_free(&FM);
+	return ierr;
 }

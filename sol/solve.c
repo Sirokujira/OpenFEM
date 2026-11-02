@@ -1855,10 +1855,11 @@ int solve(FILE *fp_log)
 	掃引の無い入力と fieldout = 1 は分散する仕事が無い / 場が解いた rank に
 	しか無いので、黙って直列で走らず入力エラーにする。
 	*/
+	// direct = 1 は分解の間だけ行列の全体を全 rank に集めて解く (solver_direct の注釈)
 	if ((msize > 1) && (MpiSolve == 2)
-	 && (Direct || (Analysis & ~(ANALYSIS_C | ANALYSIS_L | ANALYSIS_R | ANALYSIS_A | ANALYSIS_M | ANALYSIS_F)))) {
+	 && (Analysis & ~(ANALYSIS_C | ANALYSIS_L | ANALYSIS_R | ANALYSIS_A | ANALYSIS_M | ANALYSIS_F))) {
 		fprintf(fp_log, "*** mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R / M / F / A "
-			"and thermal (not the self tests E / P, no direct = 1); use mpisolve = 1\n");
+			"and thermal (not the self tests E / P); use mpisolve = 1\n");
 		return 1;
 	}
 	if ((msize > 1) && MpiSolve) {

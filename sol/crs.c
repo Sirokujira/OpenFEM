@@ -192,6 +192,37 @@ int crs_dist_info(const crs_t *A, int64_t *r0, int64_t *r1)
 }
 
 
+// 分散した行列 (mpisolve = 2) の全体を全 rank に集めて F に作る (直接解法の分解のため)。戻り値 0 なら分散していない (F は触らない)。
+// 行の長さを行ブロックの分け方で Allgatherv し (mpi_allgather_rows)、列番号 (double に載せる、2^31 未満なので厳密) と値を
+// rank ごとの非零の数で Allgatherv する。行の中の並びは組み立てたときのまま (直列と同じ)
+int crs_gather_full(const crs_t *A, crs_t *F)
+{
+	const int k = dist_slot(A);
+	if (k < 0) return 0;
+	const int n = (int)A->n;
+	double *len = (double *)calloc((size_t)n + 1, sizeof(double));
+	for (int64_t row = DistR0[k]; row < DistR1[k]; row++) len[row] = (double)(A->rowptr[row + 1] - A->rowptr[row]);
+	mpi_allgather_rows(len, n);
+	F->n = n;
+	F->rowptr = (int64_t *)malloc(((size_t)n + 1) * sizeof(int64_t));
+	F->rowptr[0] = 0;
+	for (int row = 0; row < n; row++) F->rowptr[row + 1] = F->rowptr[row] + (int64_t)len[row];
+	F->nnz = F->rowptr[n];
+	free(len);
+	const int64_t nz = (F->nnz > 0) ? F->nnz : 1;
+	F->col = (int32_t *)malloc((size_t)nz * sizeof(int32_t));
+	F->val = (double *)malloc((size_t)nz * sizeof(double));
+	double *cd = (double *)malloc((size_t)((A->nnz > 0) ? A->nnz : 1) * sizeof(double));
+	double *ca = (double *)malloc((size_t)nz * sizeof(double));
+	for (int64_t q = 0; q < A->nnz; q++) cd[q] = (double)A->col[q];
+	mpi_allgather_nnz(cd, A->nnz, ca, F->rowptr, n);
+	for (int64_t q = 0; q < F->nnz; q++) F->col[q] = (int32_t)ca[q];
+	mpi_allgather_nnz(A->val, A->nnz, F->val, F->rowptr, n);
+	free(cd); free(ca);
+	return 1;
+}
+
+
 void crs_zero(crs_t *A)
 {
 	// IEEE754 の 0.0 は全ビット 0 なので memset で足りる

@@ -1583,6 +1583,28 @@ else
 			|| echo "  mpisolve = 2 with analysis E : rejected -> OK"
 		grep -q "mpisolve = 2 (the matrix distributed over the ranks) supports analysis C / L / R / M / F / A" "$WORK/ofe.log" \
 			|| { echo "  *** it was rejected for a different reason" >&2; status=1; }
+		# 直接解法 (direct = 1) + mpisolve = 2 : 分解の間だけ各 rank の行ブロックを全 rank に集めて (crs_gather_full) 全 rank が同じ分解を
+		# する。実対称 (四面体・構造格子の C の Cholesky) と複素対称 (A-φ の LDLᵀ、gauge = 1) で、行列を分散したうえで ofe.out が直列と
+		# バイト一致すること (集めずに分解する・値を集めない誤りはどちらも 3 ケースすべてで落ちる)
+		cp "$SRC/box_tet.ofe" "$SRC/box_tet.msh" "$SRC/parallel_plate.ofe" "$SRC/bar_eddy.ofe" "$SRC/bar_tet.msh" "$WORK/"
+		awk '/^analysis/{print "mpisolve = 2"; print "direct = 1"} {print}' "$WORK/box_tet.ofe" > "$WORK/mdd_c.ofe"
+		awk '/^analysis/{print "mpisolve = 2"; print "direct = 1"} {print}' "$WORK/parallel_plate.ofe" > "$WORK/mdd_s.ofe"
+		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^analysis/{print "mpisolve = 2"; print "direct = 1"; print "gauge = 1"} {print}' > "$WORK/mdd_a.ofe"
+		for c in mdd_c:1 mdd_s:1 mdd_a:2; do
+			f=${c%%:*}; nd=${c#*:}
+			rm -f "$WORK/ofe.out"
+			(cd "$WORK" && "$OFE" -n 2 "$f.ofe" > /dev/null 2>&1) || { echo "  $f : the serial run failed -> NG" >&2; status=1; }
+			cp "$WORK/ofe.out" "$WORK/mdd_ref.out" 2> /dev/null || true
+			rm -f "$WORK/ofe.out"
+			(cd "$WORK" && mpirun -np 2 "$OFE" -n 2 "$f.ofe" > /dev/null 2>&1) || true
+			k=$(grep -c "the matrix is distributed by rows" "$WORK/ofe.log" || true)
+			if [ -s "$WORK/mdd_ref.out" ] && cmp -s "$WORK/mdd_ref.out" "$WORK/ofe.out" && [ "$k" = "$nd" ]; then
+				echo "  mpisolve = 2 + direct = 1, np = 2 : $f gives a byte-identical ofe.out, $k distributed matrices : OK"
+			else
+				echo "  mpisolve = 2 + direct = 1, np = 2 : $f differs from the serial run (or $k of $nd matrices distributed) -> NG" >&2
+				status=1
+			fi
+		done
 		;;
 	esac
 fi

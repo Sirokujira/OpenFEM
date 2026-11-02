@@ -150,6 +150,24 @@ void mpi_allgather_rows(double *y, int n)
 }
 
 
+// 行ブロックの分け方で分散した CRS の非零の列 (自分の nmine 個) を全体 (all、全体の行の先頭 rowptr) に集める。
+// rank r の非零は全体の rowptr[a_r] .. rowptr[b_r] (a_r, b_r は mpi_row_range の行範囲)
+void mpi_allgather_nnz(const double *mine, int64_t nmine, double *all, const int64_t *rowptr, int n)
+{
+	if (!RowOn) {
+		memcpy(all, mine, (size_t)nmine * sizeof(double));
+		return;
+	}
+	for (int r = 0; r < RowSize; r++) {
+		const int a = (int)(((int64_t)n * r) / RowSize);
+		const int b = (int)(((int64_t)n * (r + 1)) / RowSize);
+		RowDsp[r] = (int)rowptr[a];
+		RowCnt[r] = (int)(rowptr[b] - rowptr[a]);
+	}
+	MPI_Allgatherv(mine, (int)nmine, MPI_DOUBLE, all, RowCnt, RowDsp, MPI_DOUBLE, MPI_COMM_WORLD);
+}
+
+
 // 行 row (n 行の行ブロック分割) を持つ rank
 int mpi_row_owner(int n, int row)
 {
@@ -265,6 +283,13 @@ int mpi_row_owner(int n, int row)
 {
 	(void)n; (void)row;
 	return 0;
+}
+
+
+void mpi_allgather_nnz(const double *mine, int64_t nmine, double *all, const int64_t *rowptr, int n)
+{
+	(void)rowptr; (void)n;
+	memcpy(all, mine, (size_t)nmine * sizeof(double));
 }
 
 
