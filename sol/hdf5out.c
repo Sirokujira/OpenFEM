@@ -27,6 +27,7 @@ hdf5out.c
                        material conductor [ncell]
   /field               axis [np]、節点スカラー [np][nnode]、
                        要素ベクトル [np][ncell][3]
+  /transient           過渡解析 (transient) の時系列 : ofe_transient.csv の列 [nt] (t と各量、単位は属性)
 
 節点・要素の並びは **VTK と同じ (構造格子は x が最内)** にそろえる。
 `/mesh` の属性に `node_order` / `cell_order` と `dims` を書いてあるので、
@@ -524,6 +525,90 @@ int h5_add_field(double axis)
 }
 
 
+/*
+過渡解析の時系列 (/transient)。熱連成・静磁場・3 次元渦電流の過渡解析はどれも刻みごとに
+ofe_transient.csv を書くので (列は解析ごとに違う)、解き終わってからその csv を読んで列ごとに
+1 次元のデータセットにする。列名は見出しの「名前 [単位]」の名前、単位は属性 units。**数値は csv に
+書いた文字列そのもの** (%.8e) を読むので、2 つの出口が同じ数字になる (それが検証の恒等式)。
+*/
+int h5_add_transient(void)
+{
+	if (Hfile < 0) return 0;
+	FILE *fp = fopen(FN_transient, "r");
+	if (fp == NULL) return 1;
+	enum { LINE = 4096, NCOL = 32 };
+	char line[LINE];
+	char name[NCOL][64], unit[NCOL][32];
+	int nc = 0;
+	if (fgets(line, LINE, fp) == NULL) {
+		fclose(fp);
+		return 1;
+	}
+	// 見出し : "t [s],V [V],...,iter"
+	for (char *tok = strtok(line, ",\r\n"); (tok != NULL) && (nc < NCOL); tok = strtok(NULL, ",\r\n")) {
+		while (*tok == ' ') tok++;
+		const char *br = strchr(tok, '[');
+		int ln = (int)((br != NULL) ? (br - tok) : (int)strlen(tok));
+		while ((ln > 0) && (tok[ln - 1] == ' ')) ln--;
+		if (ln < 0) ln = 0;
+		if (ln > 63) ln = 63;
+		memcpy(name[nc], tok, (size_t)ln);
+		name[nc][ln] = '\0';
+		unit[nc][0] = '\0';
+		if (br != NULL) {
+			const char *ee = strchr(br, ']');
+			int lu = (int)((ee != NULL) ? (ee - br - 1) : (int)strlen(br + 1));
+			if (lu < 0) lu = 0;
+			if (lu > 31) lu = 31;
+			memcpy(unit[nc], br + 1, (size_t)lu);
+			unit[nc][lu] = '\0';
+		}
+		nc++;
+	}
+	int cap = 256, nr = 0;
+	double *v = (double *)malloc((size_t)cap * nc * sizeof(double));
+	while (fgets(line, LINE, fp) != NULL) {
+		if (nr >= cap) {
+			cap *= 2;
+			v = (double *)realloc(v, (size_t)cap * nc * sizeof(double));
+		}
+		char *q = line;
+		for (int c = 0; c < nc; c++) {
+			char *e;
+			v[((int64_t)nr * nc) + c] = strtod(q, &e);
+			q = ((*e == ',') ? (e + 1) : e);
+		}
+		nr++;
+	}
+	fclose(fp);
+	const hid_t g = H5Gcreate2(Hfile, "/transient", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+	if (g < 0) {
+		free(v);
+		return 1;
+	}
+	attr_str(g, "axis", "time");
+	attr_str(g, "note", "the columns of ofe_transient.csv (the same numbers, one dataset per column)");
+	int ierr = 0;
+	const hsize_t d1 = (hsize_t)nr;
+	double *col = (double *)malloc((size_t)((nr > 0) ? nr : 1) * sizeof(double));
+	int *icol = (int *)malloc((size_t)((nr > 0) ? nr : 1) * sizeof(int));
+	for (int c = 0; (c < nc) && (nr > 0); c++) {
+		if (name[c][0] == '\0') continue;
+		if (strcmp(name[c], "iter") == 0) {
+			for (int r = 0; r < nr; r++) icol[r] = (int)v[((int64_t)r * nc) + c];
+			ierr |= write_once(g, name[c], H5T_NATIVE_INT, icol, 1, &d1, NULL);
+		}
+		else {
+			for (int r = 0; r < nr; r++) col[r] = v[((int64_t)r * nc) + c];
+			ierr |= write_once(g, name[c], H5T_NATIVE_DOUBLE, col, 1, &d1, ((unit[c][0] != '\0') ? unit[c] : NULL));
+		}
+	}
+	free(col); free(icol); free(v);
+	H5Gclose(g);
+	return ierr;
+}
+
+
 #else		// OFE_HDF5 が無いビルド
 
 
@@ -573,6 +658,12 @@ int h5_add_field(double axis)
 {
 	(void)axis;
 
+	return 0;
+}
+
+
+int h5_add_transient(void)
+{
 	return 0;
 }
 

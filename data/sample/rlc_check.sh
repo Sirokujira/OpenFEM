@@ -6720,6 +6720,35 @@ case "$h5msg" in
 		case "$res" in NG*) status=1 ;; esac
 	done
 
+	# (f) 過渡解析の時系列 (/transient)。熱連成・静磁場 (M)・3 次元渦電流 (A) の 3 つの過渡解析で、ofe_transient.csv の
+	# **すべての列**がデータセットとして入り (名前は見出しの名前)、csv と同じ数字であること (列の取り違え・行の欠けはここで落ちる)
+	cp "$SRC/thermal_transient.ofe" "$SRC/lamination_step.ofe" "$WORK/"
+	sed 's/^analysis = /hdf5 = 1\nanalysis = /' "$SRC/thermal_transient.ofe" > "$WORK/h5t_th.ofe"
+	sed 's/^analysis = /hdf5 = 1\nanalysis = /' "$SRC/lamination_step.ofe" > "$WORK/h5t_m.ofe"
+	grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "transient = 2e-4 10"; print "hdf5 = 1"} {print}' > "$WORK/h5t_a.ofe"
+	for c in th m a; do
+		(cd "$WORK" && "$OFE" -n 2 "h5t_$c.ofe" > /dev/null)
+		ncol=$(head -1 "$WORK/ofe_transient.csv" | awk -F, '{ print NF }')
+		k=0
+		for q in $(seq 1 "$ncol"); do
+			nm=$(head -1 "$WORK/ofe_transient.csv" | awk -F, -v q="$q" '{ s = $q; sub(/ *\[.*/, "", s); print s }')
+			fm="%.8e"
+			[ "$nm" = iter ] && fm="%d"
+			H5FMT="$fm"
+			h5v "/transient/$nm" > "$WORK/h5c.txt"
+			awk -F, -v q="$q" 'NR > 1 { print $q }' "$WORK/ofe_transient.csv" > "$WORK/csvc.txt"
+			r=$(awk -v f="$fm" 'NR == FNR { a[FNR] = sprintf(f, $1 + 0); na = FNR; next } { b[FNR] = sprintf(f, $1 + 0); nb = FNR }
+				END { ok = (na > 0) && (na == nb); for (i = 1; i <= na; i++) if (a[i] != b[i]) ok = 0; print ok ? "OK" : "NG" }' "$WORK/h5c.txt" "$WORK/csvc.txt")
+			[ "$r" = OK ] && k=$((k + 1))
+		done
+		if [ "$k" = "$ncol" ] && [ "$ncol" -ge 6 ]; then
+			echo "  transient ($c) : /transient has all $ncol columns of ofe_transient.csv with the same numbers : OK"
+		else
+			echo "  transient ($c) : /transient matches $k of $ncol columns of ofe_transient.csv -> NG" >&2
+			status=1
+		fi
+	done
+
 	fi
 	;;
 esac

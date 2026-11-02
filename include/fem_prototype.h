@@ -143,6 +143,7 @@ void h5_close(FILE *);
 int  h5_add_sweep(double);
 int  h5_add_hysteresis(int, double, double, double, double, int);
 int  h5_add_field(double);
+int  h5_add_transient(void);
 int  h5_nfield(void);
 
 // crs.c

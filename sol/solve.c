@@ -1774,6 +1774,8 @@ int solve(FILE *fp_log)
 		ierr = solve_one(fp_log);
 		if (!ierr) {
 			ierr |= h5_add_sweep(Freq);
+			// 過渡解析の時系列 (ofe_transient.csv の列) を /transient に
+			if (TransientOn && (mrank == 0)) ierr |= h5_add_transient();
 			// 電流掃引 (ヒステリシス) は既にステップ毎に追記済み。
 			// ここで足すと最後のステップが二重に入るので、まだ 1 点も
 			// 書いていないときだけ「1 点の系列」として書く
