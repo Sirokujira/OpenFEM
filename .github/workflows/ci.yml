@@ -12,7 +12,7 @@ on:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 80
     permissions:
       contents: write   # タグ push 時の Release 添付に使用
     steps:
@@ -78,7 +78,7 @@ jobs:
   # 無効ビルドの検査 (mpirun 配下で弾かれること) はこのジョブの前段で行う
   build-linux-mpi:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
 
@@ -134,7 +134,7 @@ jobs:
 
   build-linux-hdf5:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
 
@@ -175,7 +175,7 @@ jobs:
   # Homebrew の libomp を明示指定する。
   build-macos:
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 80
     permissions:
       contents: write
     steps:
@@ -239,7 +239,7 @@ jobs:
   # 検証スクリプトは Git for Windows の bash (awk 同梱) で実行する。
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 70
+    timeout-minutes: 90
     permissions:
       contents: write
     steps:

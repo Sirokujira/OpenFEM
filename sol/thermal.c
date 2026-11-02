@@ -2361,11 +2361,12 @@ static double th_pfac(void)
 }
 
 
-// 交流の発熱を eddy3d_pr.c で解く格子 : 3 次以上の四面体だけ、または 2 次以上の完全 Lagrange の六面体だけ
+// 交流の発熱を eddy3d_pr.c で解く格子 : 3 次以上の四面体だけ、または 2 次以上の完全 Lagrange の六面体だけ / 角柱だけ
 static int th_pr_mesh(void)
 {
 	if (!MeshMode || (MeshDim != 3)) return 0;
 	if ((TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0)) return 1;
+	if ((TetOrder >= 2) && (NPrism > 0) && ((NTet + NHex + NPyr) == 0) && (PrismNen != 15)) return 1;
 	return ((TetOrder >= 2) && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (HexNen != 20));
 }
 

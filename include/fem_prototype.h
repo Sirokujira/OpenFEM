@@ -32,6 +32,7 @@ int tet_nen(void);
 int tet20_element(int, const double [6], double [TET_NMAX][TET_NMAX], double *);
 int hex_nodes(int, int32_t [ELEM_NMAX]);
 int hex_lattice(int, int [3]);
+int prism_lattice(int, int [4]);
 int prism_nodes(int, int32_t [PRISMP_NMAX]);
 void crs_alloc_tet(crs_t *);
 void crs_alloc_hex(crs_t *);

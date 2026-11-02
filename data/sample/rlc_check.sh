@@ -501,8 +501,8 @@ mesh_reject() {	# mesh_reject <ラベル> <ofe ファイル>
 	fi
 }
 echo "[mesh order] inputs the solver must reject"
-# 辺要素 (E / A) は四面体ならどの次数でも解ける ([A order 2] / [A order 3+])。高次の六面体は A だけ ([A hex order 2+])、
-# 高次の六面体の E と高次の角柱は弾く (h3x_e)
+# 辺要素 (E / A) は四面体ならどの次数でも解ける ([A order 2] / [A order 3+])。高次の六面体・角柱は A だけ ([A hex order 2+] /
+# [A prism order 2+])、高次の六面体・角柱の E は弾く (h3x_e)
 # 次数の混在 (四面体を 1 個だけ 1 次に落とす)
 awk '/^[0-9]+ 11 2 / && !done { print $1, 4, 2, $4, $5, $6, $7, $8, $9; done = 1; next } { print }' \
     "$SRC/box_p2.msh" > "$WORK/mixed.msh"
@@ -1128,9 +1128,10 @@ if ! (cd "$WORK" && "$OFE" -n 2 pyredge.ofe 2>&1 | grep -q "do not support pyram
 	echo "  *** it was rejected for a different reason than the element kind" >&2
 	status=1
 fi
-sed -e 's/^analysis = .*/analysis = E/' -e 's/^material = .*/material = 1.0 1e6/' \
+# (完全 Lagrange の 27 節点の六面体の E は eddy3d_pr.c の自己検証で解く ([A order 3+] の (h))。serendipity の 20 節点は弾く)
+sed -e 's/^analysis = .*/analysis = E/' -e 's/^material = .*/material = 1.0 1e6/' -e 's/box_hex2.msh/box_hex2s.msh/' \
     "$SRC/box_hex2.ofe" > "$WORK/h2edge.ofe"
-mesh_reject "analysis E on an order-2 hex mesh" h2edge.ofe
+mesh_reject "analysis E on an order-2 (20-node serendipity) hex mesh" h2edge.ofe
 
 # ---- 辺要素 : 種別の混在した格子 ----
 #
@@ -1487,13 +1488,15 @@ else
 			fi
 		done
 		# 2 次 (eddy3d_p2.c) と 3 次 (eddy3d_pr.c) の A、1 次と 3 次の A の線形の過渡解析 (K と M を分散、ofe_transient.csv も一致)
-		cp "$SRC/bar_tet2.msh" "$SRC/bar_ho3.msh" "$WORK/"
-		for m in bar_tet2 bar_ho3; do
+		# (高次の六面体・角柱も同じ eddy3d_pr.c の経路 : bar_hex3 と局所の座標系を振り直した x に押し出した角柱 bar_prismx3t)
+		cp "$SRC/bar_tet2.msh" "$SRC/bar_ho3.msh" "$SRC/bar_hex3.msh" "$SRC/bar_prismx3t.msh" "$WORK/"
+		for m in bar_tet2 bar_ho3 bar_hex3 bar_prismx3t; do
 			grep -v '^#' "$WORK/bar_eddy.ofe" | awk -v m="$m.msh" '/^mesh/{print "mesh = " m; next} /^analysis/{print "mpisolve = 2"} {print}' > "$WORK/mu_$m.ofe"
 		done
 		grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^frequency/{next} /^analysis/{print "mpisolve = 2"; print "transient = 2e-4 8"} {print}' > "$WORK/mu_tr.ofe"
 		awk '/^mesh/{print "mesh = bar_ho3.msh"; next} {print}' "$WORK/mu_tr.ofe" > "$WORK/mu_tr3.ofe"
-		for c in bar_tet2 bar_ho3 tr tr3; do
+		awk '/^mesh/{print "mesh = bar_prismx3t.msh"; next} {print}' "$WORK/mu_tr.ofe" > "$WORK/mu_trp.ofe"
+		for c in bar_tet2 bar_ho3 bar_hex3 bar_prismx3t tr tr3 trp; do
 			rm -f "$WORK/ofe.out" "$WORK/ofe_transient.csv" "$WORK/mu_ref.csv"
 			(cd "$WORK" && "$OFE" -n 2 "mu_$c.ofe" > /dev/null 2>&1) || { echo "  mpisolve = 2 $c : the serial run failed -> NG" >&2; status=1; }
 			cp "$WORK/ofe.out" "$WORK/mu_ref.out" 2> /dev/null || true
@@ -4386,8 +4389,8 @@ awk '/^\$Elements/ { e = 1; print; next } /^\$EndElements/ { e = 0 }
 sed -e "s/box_hex2.msh/h3x_t6.msh/" "$SRC/box_hex2.ofe" > "$WORK/h3x_t6.ofe"
 mesh_reject "prism40 with a 6-node electrode triangle" h3x_t6.ofe
 (cd "$WORK" && "$OFE" -n 2 h3x_t6.ofe 2>&1 | grep -q "not a 10-node triangle") || { echo "  *** rejected for a different reason" >&2; status=1; }
-sed -e "s/box_hex2.msh/box_hex3.msh/" -e "s/^analysis.*/analysis = E/" "$SRC/box_hex2.ofe" > "$WORK/h3x_e.ofe"
-mesh_reject "analysis E on a hexa64 mesh" h3x_e.ofe
+sed -e "s/box_hex2.msh/box_hex2s.msh/" -e "s/^analysis.*/analysis = E/" "$SRC/box_hex2.ofe" > "$WORK/h3x_e.ofe"
+mesh_reject "analysis E on a 20-node serendipity hex mesh (hexa64 and other full Lagrange hexahedra are solved by [A order 3+] (h))" h3x_e.ofe
 (cd "$WORK" && "$OFE" -n 2 h3x_e.ofe 2>&1 | grep -q "need a first-order mesh") || { echo "  *** rejected for a different reason" >&2; status=1; }
 
 # ---- 4 次の六面体 (125 節点、gmsh の hexa125) と角柱 (75 節点、prism75) ----
@@ -6092,13 +6095,23 @@ pf=$(awk -v r="$(vtk int2 J_A_re)" -v m="$(vtk int2 J_A_im)" 'BEGIN{ printf "%.1
 pt=$(awk '/port 1 : I =/{ printf "%.10e", 0.5 * $6 }' "$WORK/ofe.log")
 compare "order 3, field output : ohmic loss from the field == 1/2 Re(V I) [W]" "$pf" "$pt" 1e-6
 # (h)
-for m in box_p3 box_p4 box_p5 box_p6 box_p7; do cp "$SRC/$m.msh" "$WORK/"; done
+for m in box_p3 box_p4 box_p5 box_p6 box_p7 box_hex2 box_hex3 box_hex4 box_hex5 box_prism2 box_prism3 box_prism4 box_prism5; do cp "$SRC/$m.msh" "$WORK/"; done
 cp "$SRC/edge_test.ofe" "$SRC/edge_test_aniso.ofe" "$WORK/"
 awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
 	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
 	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
 	{ print }' "$WORK/box_p3.msh" > "$WORK/box_p3_rot.msh"
-for c in "edge_test box_p3 3" "edge_test_aniso box_p3 3" "edge_test box_p3_rot 3" "edge_test box_p4 4" "edge_test box_p5 5" "edge_test box_p6 6" "edge_test box_p7 7"; do
+# 高次の六面体 (部分辺の Nedelec) と角柱 (層の三角形の Nedelec + ζ の部分辺) も同じ恒等式 : アフィンな要素で Q_{p−1,p,p} x ... /
+# ND_p(三角形) ⊗ P_p + P_p ⊗ P_{p−1} ẑ は P_{p−1}³ ⊕ r × P̃_{p−1}³ を含む。剛体回転と異方性の ν は 3 次で
+for m in box_hex3 box_prism3; do
+	awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+		/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+		f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+		{ print }' "$WORK/$m.msh" > "$WORK/${m}_rot.msh"
+done
+for c in "edge_test box_p3 3" "edge_test_aniso box_p3 3" "edge_test box_p3_rot 3" "edge_test box_p4 4" "edge_test box_p5 5" "edge_test box_p6 6" "edge_test box_p7 7" \
+	"edge_test box_hex2 2" "edge_test box_hex3 3" "edge_test_aniso box_hex3 3" "edge_test box_hex3_rot 3" "edge_test box_hex4 4" "edge_test box_hex5 5" \
+	"edge_test box_prism2 2" "edge_test box_prism3 3" "edge_test_aniso box_prism3 3" "edge_test box_prism3_rot 3" "edge_test box_prism4 4" "edge_test box_prism5 5"; do
 	set -- $c
 	sed "s/^mesh = .*/mesh = $2.msh/" "$WORK/$1.ofe" > "$WORK/pre_$1_$2.ofe"
 	(cd "$WORK" && "$OFE" -n 2 "pre_$1_$2.ofe" > /dev/null 2>&1) || true
@@ -6300,6 +6313,121 @@ compare "hexahedra order 3, nonlinear layer, I = 250 A : L == self-consistent cl
 # (i)
 grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_hex3.msh"; next} /^frequency/{next} /^analysis/{print "gauge = 1"; print "transient = 1e-6 4"} {print}' > "$WORK/hxx_tr.ofe"
 th_reject "order-3 hexahedra, A transient with gauge = 1" hxx_tr.ofe "supports gauge = 0 and the iterative solver only in the time domain"
+
+# ---- 高次の角柱の辺要素 (analysis = A、18 / 40 / 75 / 126 節点、eddy3d_pr.c の角柱) ----
+#
+# 層ごとの三角形の Nedelec (AFW の λ^α φ_σ、四面体の面と同じ) x ℓ_k(ζ) と、ζ 方向の部分辺の histopolation e_k(ζ) x 三角形の
+# Lagrange。格子は gmsh_bar_prism.py が x-z の長方形を三角形で切って y に 1 層で押し出したもの (bar_prismy*、場が三角形の
+# 面内で変わる。h = 0.25 mm、粗い方は h = 0.5 mm) と、x-y を切って z に押し出したもの (bar_prismz3、場が ζ 方向に変わる)。
+#   (a) 100 Hz : 3 次は DC の場が空間に入るので 1e-7 (2 次は三角形の 2 次の Nedelec に z² x̂ が入らないので入らない)
+#   (b) 100 kHz : 2 次は 1e-2、3 次は 1e-4 以内で 2 次より 30 倍よい (実測 +3.0e-3 / −2.4e-5、126 倍 / 56 倍)
+#   (c) ζ 方向に押し出した格子 (ζ の部分辺と層の関数の ℓ_k' の項が効く) : 100 kHz の 3 次が 2e-4
+#   (d) 要素ごとに局所の座標系を参照角柱の対称で振り直した格子 (gmsh が 1 次で付け替えてから次数を上げる) と剛体回転した格子で 8 桁一致。
+#       (d') 電流の向きに押し出した格子 (ζ の部分辺に A_x と ∇φ が載る) とその振り直しでも 8 桁一致
+#   (e) 空気層 (2 材料) : 3 次が 1e-4 以内で 2 次より 30 倍よい (実測 −2.7e-5 / +2.2e-5)
+#   (f) 場の出力 (1 Hz、中心の B・J)、(g) B-H の層の閉形式、(h) 過渡解析と交流の発熱の恒等式、(i) ゲージ固定と直接解法
+echo "[A prism order 2+] 3-D eddy current on prisms of order 2 and up (layered triangle Nedelec + zeta sub-edges)"
+for m in bar_prismy2f bar_prismy3f bar_prismy3ft bar_air_prismy2f bar_air_prismy3f bar_prismz3 bar_prismy3 bar_air_prismy3 bar_prismx3 bar_prismx3t; do cp "$SRC/$m.msh" "$WORK/"; done
+# (a) (b)
+p2_case "prisms order 3, 100 Hz" bar_prismy3f.msh 1e2 1e-7
+p2_case "prisms order 2, 100 kHz" bar_prismy2f.msh 1e5 1e-2
+set -- $(pr_err "$P2R" "$P2L" "$hbre" "$hble"); q2r=$1; q2l=$2
+p2_case "prisms order 3, 100 kHz" bar_prismy3f.msh 1e5 1e-4
+qr3=$P2R; ql3=$P2L
+set -- $(pr_err "$P2R" "$P2L" "$hbre" "$hble"); q3r=$1; q3l=$2
+pr_ratio "prisms : order 3 beats order 2 at 100 kHz" "$q2r" "$q2l" "$q3r" "$q3l" 30
+# (c)
+p2_case "prisms order 3, extruded along the field gradient (zeta), 100 kHz" bar_prismz3.msh 1e5 2e-4
+# (d)
+p2_case "prisms order 3, local frames rotated per element, 100 kHz" bar_prismy3ft.msh 1e5 1e-4
+res=$(awk -v a="$P2R" -v b="$qr3" -v c="$P2L" -v d="$ql3" 'BEGIN { x = a / b - 1; y = c / d - 1; if (x < 0) x = -x; if (y < 0) y = -y
+	printf "%s (%.1e, %.1e)", ((x < 1e-8) && (y < 1e-8)) ? "OK" : "NG", x, y }')
+echo "  prisms order 3, local frames rotated per element : R, L == the original numbering : $res"
+case "$res" in NG*) status=1 ;; esac
+awk 'BEGIN { a = 0.5; b = 0.7; ca = cos(a); sa = sin(a); cb = cos(b); sb = sin(b) }
+	/^\$Nodes/ { f = 1; print; next } /^\$EndNodes/ { f = 0 }
+	f && NF == 4 { x = $2; y = $3; z = $4; x1 = ca * x - sa * y; y1 = sa * x + ca * y; y2 = cb * y1 - sb * z; z2 = sb * y1 + cb * z; printf "%s %.17g %.17g %.17g\n", $1, x1, y2, z2; next }
+	{ print }' "$WORK/bar_prismy3f.msh" > "$WORK/bar_prismy3f_rot.msh"
+p2_case "prisms order 3, rigidly rotated mesh, 100 kHz" bar_prismy3f_rot.msh 1e5 1e-4
+res=$(awk -v a="$P2R" -v b="$qr3" -v c="$P2L" -v d="$ql3" 'BEGIN { x = a / b - 1; y = c / d - 1; if (x < 0) x = -x; if (y < 0) y = -y
+	printf "%s (%.1e, %.1e)", ((x < 1e-8) && (y < 1e-8)) ? "OK" : "NG", x, y }')
+echo "  prisms order 3, rigidly rotated mesh : R, L == axis-aligned mesh : $res"
+case "$res" in NG*) status=1 ;; esac
+# (d') 電流の向き (x) に押し出した格子 (bar_prismx3、電極は三角形の面)。y / z に押し出した格子では A に ζ 成分が無く ζ 方向の
+#      部分辺の係数が全部 0 なので、**その向きの符号を全部 +1 にする誤りが等価** (実測、全検査が通った)。ここでは A_x と ∇φ が
+#      ζ の部分辺に載るので、局所の座標系を振り直した格子 (bar_prismx3t、21 / 64 個の ζ が逆向き) との一致で見る
+p2_case "prisms order 3, extruded along the current (x), 100 kHz" bar_prismx3.msh 1e5 1e-4
+xr3=$P2R; xl3=$P2L
+p2_case "prisms order 3, extruded along x, local frames rotated per element, 100 kHz" bar_prismx3t.msh 1e5 1e-4
+res=$(awk -v a="$P2R" -v b="$xr3" -v c="$P2L" -v d="$xl3" 'BEGIN { x = a / b - 1; y = c / d - 1; if (x < 0) x = -x; if (y < 0) y = -y
+	printf "%s (%.1e, %.1e)", ((x < 1e-8) && (y < 1e-8)) ? "OK" : "NG", x, y }')
+echo "  prisms order 3, extruded along x, local frames rotated per element : R, L == the original numbering : $res"
+case "$res" in NG*) status=1 ;; esac
+# (e)
+for o in 2 3; do
+	grep -v '^#' "$SRC/bar_air.ofe" | awk -v m="bar_air_prismy${o}f.msh" '/^mesh/{print "mesh = " m; next} /^frequency/{print "frequency = 1e5"; next} {print}' > "$WORK/pxa$o.ofe"
+	set -- $(p2_rl "pxa$o.ofe")
+	eval "qar$o=\$1; qal$o=\$2"
+done
+set -- $(pr_err "$qar2" "$qal2" 4.7930357804e-04 9.7419014024e-10) $(pr_err "$qar3" "$qal3" 4.7930357804e-04 9.7419014024e-10)
+compare "prisms order 3, air layer (2 materials), 100 kHz : R [ohm]" "$qar3" 4.7930357804e-04 1e-4
+compare "prisms order 3, air layer (2 materials), 100 kHz : L [H]" "$qal3" 9.7419014024e-10 1e-4
+pr_ratio "prisms : air layer, order 3 beats order 2" "$1" "$2" "$3" "$4" 30
+# (f) 1 Hz : 損失の恒等式は要素の中心の 1 点の |J|² で積分するので、100 Hz のわずかな表皮効果の不均一でこの粗い角柱では
+#     −1.6e-6 になる (1 Hz では 1.9e-9。積分点の近似で、要素の誤りではない)
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_prismy3.msh"; next} /^frequency/{print "frequency = 1"; next} /^analysis = A/{print "fieldout = 1"} {print}' > "$WORK/px_fld.ofe"
+(cd "$WORK" && "$OFE" -n 2 px_fld.ofe > /dev/null 2>&1) || { echo "  px_fld : the run failed -> NG" >&2; status=1; }
+compare "prisms order 3, field output : volume of the cells [m^3]" "$(vtk vol J_A_re)" 5.0e-10 1e-9
+compare "prisms order 3, field output : |J| max (sigma V / L) [A/m^2]" "$(vtk vmax J_A_re)" 2.9e10 1e-4
+compare "prisms order 3, field output : |J| min [A/m^2]" "$(vtk vmin J_A_re)" 2.9e10 1e-4
+compare "prisms order 3, field output : mean J_x (signed) [A/m^2]" "$(vtk mean0 J_A_re)" -2.9e10 1e-4
+pf=$(awk -v r="$(vtk int2 J_A_re)" -v m="$(vtk int2 J_A_im)" 'BEGIN{ printf "%.10e", (r + m) / (2 * 5.8e7) }')
+pt=$(awk '/port 1 : I =/{ printf "%.10e", 0.5 * $6 }' "$WORK/ofe.log")
+compare "prisms order 3, field output : ohmic loss from the field == 1/2 Re(V I) [W]" "$pf" "$pt" 1e-7
+# (g)
+grep -v '^#' "$WORK/bar_air_bh.ofe" | sed -e 's/^mesh = .*/mesh = bar_air_prismy3.msh/' -e "s/^current = .*/current = 250/" > "$WORK/pxbh.ofe"
+set -- $(p2_rl pxbh.ofe) $(awk -v f=1e2 -v mode=nl -v I=250 -f "$SRC/bar_layer.awk")
+compare "prisms order 3, nonlinear layer, I = 250 A : R == self-consistent closed form [ohm]" "$1" "$3" 1e-7
+compare "prisms order 3, nonlinear layer, I = 250 A : L == self-consistent closed form [H]" "$2" "$4" 1e-7
+# (h) 過渡解析 (電圧の段差 : 仕事の恒等式と DC の極限) と交流の発熱 (1 Hz == DC の熱連成、損失の恒等式)
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_prismy3.msh"; next} /^frequency/{next} /^analysis/{print "transient = 2e-4 50"} {print}' > "$WORK/px_tr.ofe"
+(cd "$WORK" && "$OFE" -n 2 px_tr.ofe > /dev/null 2>&1) || { echo "  px_tr : the run failed -> NG" >&2; status=1; }
+res=$(awk '/^  energy : terminals/ { a = $5 + 0; b = $9 + 0; c = $12 + 0 }
+	END { if (a == 0) { printf "NG (no energy line)"; exit }
+	      d = (a - b - c) / a; if (d < 0) d = -d
+	      printf "%s (%.1e)", (d < 1e-8) ? "OK" : "NG", d }' "$WORK/ofe.log")
+echo "  prisms order 3, voltage step : terminal work = magnetic work + joule loss : $res"
+case "$res" in NG*) status=1 ;; esac
+compare "prisms order 3, voltage step held : I(t_end) == G_dc V [A]" "$(awk -F, 'NR > 1 { i = $3 } END { print i }' "$WORK/ofe_transient.csv")" 7250 1e-9
+sed 's/^mesh = .*/mesh = bar_prismy3.msh/' "$SRC/thermal_ac.ofe" > "$WORK/pxh.ofe"
+awk '/^frequency/{next} /^awall/{next} /^analysis/{print "analysis = R"; next} /^thermal/{print "thermal = 7.5"; next} {print}' "$WORK/pxh.ofe" > "$WORK/pxh_dc.ofe"
+(cd "$WORK" && "$OFE" -n 2 pxh_dc.ofe > /dev/null 2>&1) || { echo "  pxh_dc : the run failed -> NG" >&2; status=1; }
+rdcq=$(awk '/^  R = / { print $3; exit }' "$WORK/ofe.log"); tdcq=$(awk '/^  T_max = / { print $3; exit }' "$WORK/ofe.log")
+awk '/^frequency/{print "frequency = 1"; next} /^thermal/{print "thermal = 10.606601717798213"; next} {print}' "$WORK/pxh.ofe" > "$WORK/pxh_lf.ofe"
+(cd "$WORK" && "$OFE" -n 2 pxh_lf.ofe > /dev/null 2>&1) || { echo "  pxh_lf : the run failed -> NG" >&2; status=1; }
+compare "prisms order 3 : AC heating at 1 Hz (7.5 sqrt 2 A peak) == DC thermal (7.5 A) : R [ohm]" "$(awk '/^  R = / { print $3; exit }' "$WORK/ofe.log")" "$rdcq" 1e-8
+compare "prisms order 3 : AC heating at 1 Hz == DC thermal : T_max [degC]" "$(awk '/^  T_max = / { print $3; exit }' "$WORK/ofe.log")" "$tdcq" 1e-8
+# (i) ゲージ固定 (gauge = 1) と直接解法 : 節点を三角形の格子点の種類 (頂点 / 辺の泡 / 面の泡) に分け、下から順に ζ の部分辺の木・
+#     層の辺の木 (p 個を全部 0)・辺の泡の行 (GTe)・面の泡の行 (GTf) を 0 にする。gauge = 0 と一致し、LDLᵀ のピボットに零空間が
+#     残らない (y に押し出した格子は層の辺・面の行を、x に押し出した格子は ζ の部分辺だけを使う)。時間領域のゲージは弾く
+for c in "bar_air bar_air_prismy2f" "bar_air bar_air_prismy3" "bar_eddy bar_prismx3t"; do
+	set -- $c
+	[ -f "$WORK/$1.ofe" ] || cp "$SRC/$1.ofe" "$WORK/"
+	for g in 0 1 2; do
+		grep -v '^#' "$WORK/$1.ofe" | awk -v m="$2.msh" -v g="$g" '/^mesh/{print "mesh = " m; next} /^frequency/{print "frequency = 1e5"; next}
+			/^analysis/{ if (g > 0) print "gauge = 1"; if (g > 1) print "direct = 1" } {print}' > "$WORK/pxg_$2_$g.ofe"
+	done
+	set -- "$2" $(p2_rl "pxg_$2_0.ofe") $(p2_rl "pxg_$2_1.ofe")
+	compare "prisms, $1 : gauge = 1 (zeta / layer trees + bubble rows, iterative) == gauge = 0 : R [ohm]" "$4" "$2" 1e-7
+	compare "prisms, $1 : gauge = 1 (zeta / layer trees + bubble rows, iterative) == gauge = 0 : L [H]" "$5" "$3" 1e-7
+	m=$1; r0=$2; l0=$3
+	set -- $(p2_rl "pxg_${m}_2.ofe")
+	pv_check "prisms, $m : gauge = 1 + direct = 1"
+	compare "prisms, $m : gauge = 1 + direct = 1 == gauge = 0 : R [ohm]" "$1" "$r0" 1e-6
+	compare "prisms, $m : gauge = 1 + direct = 1 == gauge = 0 : L [H]" "$2" "$l0" 1e-6
+done
+grep -v '^#' "$WORK/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_prismy3.msh"; next} /^frequency/{next} /^analysis/{print "gauge = 1"; print "transient = 1e-6 4"} {print}' > "$WORK/pxx_g.ofe"
+th_reject "order-3 prisms, A transient with gauge = 1" pxx_g.ofe "supports gauge = 0 and the iterative solver only in the time domain"
 
 # ---- 3 次元渦電流の過渡解析 (analysis = A + transient、後退 Euler、電圧駆動) ----
 #

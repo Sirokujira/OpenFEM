@@ -1450,7 +1450,8 @@ static int solve_one(FILE *fp_log)
 
 	// 辺要素の自己検証 (3 次元渦電流の基盤。他の解析とは独立に走る)
 	if (Analysis & ANALYSIS_E) {
-		ierr |= ((MeshMode && (TetOrder >= 3)) ? solve_edge_test_pr(fp_log)
+		// 3 次以上の四面体と 2 次以上の (完全 Lagrange の) 六面体・角柱は eddy3d_pr.c
+		ierr |= ((MeshMode && ((TetOrder >= 3) || ((TetOrder >= 2) && ((NHex + NPrism) > 0)))) ? solve_edge_test_pr(fp_log)
 		      : (MeshMode && (TetOrder == 2)) ? solve_edge_test_p2(fp_log) : solve_edge_test(fp_log));
 		if (Analysis == ANALYSIS_E) return ierr;
 	}
@@ -1645,18 +1646,18 @@ static int solve_one(FILE *fp_log)
 				HaveF = 1;
 			}
 		}
-		else if (TransientOn && MeshMode && (TetOrder == 2) && (NHex == 0)) {
+		else if (TransientOn && MeshMode && (TetOrder == 2) && ((NHex + NPrism) == 0)) {
 			ierr |= solve_eddy3d_p2_transient(fp_log);
 		}
 		else if (TransientOn && MeshMode && (TetOrder >= 2)) {
-			// 3 次以上の四面体と、2 次以上の (完全 Lagrange の) 六面体
+			// 3 次以上の四面体と、2 次以上の (完全 Lagrange の) 六面体・角柱
 			ierr |= solve_eddy3d_pr_transient(fp_log);
 		}
 		else if (TransientOn) {
 			ierr |= solve_eddy3d_transient(fp_log);
 		}
-		else if (MeshMode && ((TetOrder >= 3) || ((TetOrder >= 2) && (NHex > 0)))) {
-			// 3 次以上の四面体と、2 次以上の (完全 Lagrange の) 六面体
+		else if (MeshMode && ((TetOrder >= 3) || ((TetOrder >= 2) && ((NHex + NPrism) > 0)))) {
+			// 3 次以上の四面体と、2 次以上の (完全 Lagrange の) 六面体・角柱
 			ierr |= solve_eddy3d_pr(fp_log);
 		}
 		else if (MeshMode && (TetOrder == 2)) {

@@ -250,11 +250,16 @@ static int setup_unstruct(void)
 	// 高次の六面体 (27 / 64 / 125 / 216 節点、完全 Lagrange) だけの格子の A は部分辺の Nedelec 要素 (eddy3d_pr.c の六面体)。
 	// 四面体の 3 次以上と同じ範囲 (周波数領域・過渡解析・交流の発熱、B-H 曲線、過渡解析の J-A、周波数領域のゲージ固定・直接解法・
 	// 場の出力)。E・serendipity・混在は弾く
-	else if ((TetOrder >= 2) && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (HexNen != 20) && (Analysis & ANALYSIS_A)
-		&& !(Analysis & ANALYSIS_E)) {
-		int ja = 0;
+	else if ((TetOrder >= 2) && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (HexNen != 20)
+		&& (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+		int ja = 0, nl = 0;
 		for (int m = 0; m < NMaterial; m++) {
 			if (Material[m].ja.on) ja = 1;
+			if (Material[m].ja.on || (Material[m].nbh[0] > 0)) nl = 1;
+		}
+		if (nl && (Analysis & ANALYSIS_E)) {
+			printf("*** analysis E (edge self test) on a high-order hexahedral mesh supports linear materials only\n");
+			return 1;
 		}
 		if (ja && (ThermalOn || !TransientOn)) {
 			printf("*** analysis A on a high-order hexahedral mesh (order-%d sub-edge Nedelec) supports ja (hysteresis) "
@@ -267,10 +272,35 @@ static int setup_unstruct(void)
 			return 1;
 		}
 	}
+	// 高次の角柱 (18 / 40 / 75 / 126 節点、完全 Lagrange) だけの格子の A は層ごとの三角形の Nedelec と ζ 方向の部分辺 (eddy3d_pr.c の
+	// 角柱)。六面体と同じ範囲から、ゲージ固定と直接解法を除く (面内の勾配が ±1 の接続行列でないので木で零空間が消えない)
+	else if ((TetOrder >= 2) && (NPrism > 0) && ((NTet + NHex + NPyr) == 0) && (PrismNen != 15)
+		&& (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+		int ja = 0, nl = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.on) ja = 1;
+			if (Material[m].ja.on || (Material[m].nbh[0] > 0)) nl = 1;
+		}
+		if (nl && (Analysis & ANALYSIS_E)) {
+			printf("*** analysis E (edge self test) on a high-order prism mesh supports linear materials only\n");
+			return 1;
+		}
+		if (ja && (ThermalOn || !TransientOn)) {
+			printf("*** analysis A on a high-order prism mesh (order-%d Nedelec) supports ja (hysteresis) "
+				"materials only in the time domain without thermal\n", TetOrder);
+			return 1;
+		}
+		if ((GaugeTree || Direct) && (TransientOn || ThermalOn)) {
+			printf("*** analysis A on a high-order prism mesh (order-%d Nedelec) supports gauge = 0 and the iterative "
+				"solver only in the time domain / with thermal\n", TetOrder);
+			return 1;
+		}
+	}
 	else if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
 		// "need a first-order mesh" は rlc_check.sh が理由として grep する (3 次 / 4 次 / 2 次の六面体)
 		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh "
-			"(or a mesh of tetrahedra only for a high order)");
+			"(or, for a high order, a mesh of tetrahedra only, or of full Lagrange hexahedra / prisms only: "
+			"not 20-node / 15-node serendipity elements or mixed kinds)");
 		return 1;
 	}
 	// 10 節点の四面体も組み立てで積分点の det J の符号が揃わない要素を飛ばす (tet10_element が 1 を

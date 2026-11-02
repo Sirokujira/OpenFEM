@@ -3049,6 +3049,7 @@ int hex_lattice(int a, int ix[3])
 
 
 
+
 // 1 次元の p 次 Lagrange (等間隔の節点 x_i = -1 + 2i/p) の値 v と微分 d
 static void lagp(int p, int i, double x, double *v, double *d)
 {
@@ -4140,6 +4141,25 @@ static int prism2_element(int e, const double c[6], double ke[PRISMP_NMAX][PRISM
 
 
 // 要素中心 (u = v = 1/3, ζ = 0) での勾配 (場の出力用)
+// 角柱の局所節点 a の格子位置 : 三角形の多重指数 al[0..2] (和 p、λ0 = 1 − u − v, λ1 = u, λ2 = v) と ζ の位置 al[3] (0..p)。
+// 戻り値は次数 p (完全 Lagrange の 18 / 40 / 75 / 126 節点。serendipity の 15 節点と 1 次の 6 節点は 0)
+int prism_lattice(int a, int al[4])
+{
+	const int p = prismp_order(PrismNen);
+	if (p) {
+		const signed char *s = prismp_a(p, a);
+		for (int c = 0; c < 4; c++) al[c] = s[c];
+		return p;
+	}
+	if (PrismNen != 18) return 0;
+	// tri6 の基底番号 (頂点 0, 1, 2、辺 (0,1) (1,2) (2,0)) -> 多重指数
+	static const signed char T6[6][3] = {{2, 0, 0}, {0, 2, 0}, {0, 0, 2}, {1, 1, 0}, {0, 1, 1}, {1, 0, 1}};
+	for (int c = 0; c < 3; c++) al[c] = T6[PRISM2_T[a]][c];
+	al[3] = PRISM2_Z[a] + 1;
+	return 2;
+}
+
+
 int prism2_grad_center(int e, double g[PRISMP_NMAX][3], int *nen)
 {
 	int32_t nd[PRISMP_NMAX];
