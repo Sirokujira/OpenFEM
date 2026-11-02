@@ -5837,9 +5837,9 @@ th_run mt2_q200.ofe; q200=$(mt_b)
 #     Richardson の残りは 1 次 (間隙 40 分割) の +4.4e-5 に対し 2 次 (10 分割) は 1.9e-6 なので 1e-5 で 1 次と区別する
 compare "order 2, lamination step : B_mean, Richardson 2 B(200) - B(100) vs Fourier series [T]" \
 	"$(awk -v a="$q100" -v b="$q200" 'BEGIN { printf "%.12e", 2 * b - a }')" "$bex" 1e-5
-#     J-A + 渦電流 はベクトル J-A で : スカラーの J-A は ν = H/B を ∇A 全体に掛けるので、電流が 0 を横切った直後に B ≈ 0 で H ≠ 0
-#     (保磁力) の点があると離散の横成分で残差が特異になり、固定点が 1e-8〜1e-6 で停滞する (2 次の格子と細かい 1 次の格子で実測。
-#     ベクトル J-A は割り算をしないので同じ格子で収束する)
+#     J-A + 渦電流 はベクトル J-A で : スカラーの J-A は電流が 0 を横切った直後に固定点が 1e-8〜1e-6 で停滞する (2 次の格子と細かい
+#     1 次の格子で実測。原因は未解明 — B ≈ 0 の点の横成分を微分磁気抵抗率にする修正では変わらなかった。ベクトル J-A は同じ格子で
+#     収束する)
 mt2_je lam2d_p2.msh 1 1 mt2_jeq.ofe
 mt2_csv mt2_jeq.ofe mt2_jeq; mt_energy "order 2, vector J-A + eddy currents" 1e-9; lq=$(mt2_loss)
 mt2_cmp "order 2 (vector J-A) == structured plate_line_ja_eddy : B_mean(t)" mt2_jeq mt2_st 1e-5
