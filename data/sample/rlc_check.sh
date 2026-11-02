@@ -54,7 +54,7 @@
 #   direct F/A     : 複素対称系の直接解法 (LDL^T)。反復解法と一致すること
 #                    (F の構造格子・三角形格子、3 次元 A-φ) + 分解の残差が
 #                    小さいこと + ゲージ固定なしの A を弾くこと
-#   gmsh 4.1       : 同じ形状を Gmsh 2.2 と 4.1 で書いた結果が完全一致すること
+#   gmsh 4.1       : 同じ形状を Gmsh 2.2 と 4.1 で書いた結果が完全一致すること (3.0 は [gmsh binary] の節)
 #                    (+ $Entities 欠落と、ヘッダだけバイナリを名乗る
 #                    ファイルを弾くこと)
 #   plate2d_p2     : 断面 2 次元の 2 次要素 (6 節点三角形)。導体内の Az が厳密に
@@ -1696,6 +1696,48 @@ else
 	echo "  order-2 hexahedra, ASCII 4.1 : differ -> NG" >&2
 	status=1
 fi
+
+# Gmsh 3.0 (gmsh 4.15.2 に `Mesh.MshFileVersion = 3` で書かせたもの、ASCII とバイナリ)。4.1 と同じく物理タグはエンティティに
+# 付くが、エンティティの行 (外接直方体が無く、境界が物理タグより前) と節点・要素の行 (1 行 1 個、要素は自分の節点数を持つ) が違う。
+# 基準は同じ変換の元の 2.2 (*_bin.msh)。ファイルの版を先に確かめる (2.2 に差し替えても一致検査は通るので)
+fmt_same() {	# fmt_same <ラベル> <$WORK の .ofe> <基準の .msh> <比べる .msh> <比べる側の $MeshFormat の版>
+	if ! sed -n 2p "$WORK/$4" | grep -qa "^$5 "; then
+		echo "  $1 : $4 is not a Gmsh $5 file -> NG" >&2; status=1; return
+	fi
+	sed "s/^mesh = .*/mesh = $3/" "$WORK/$2" > "$WORK/fm_a.ofe"
+	sed "s/^mesh = .*/mesh = $4/" "$WORK/$2" > "$WORK/fm_b.ofe"
+	rm -f "$WORK/rlc.csv"
+	(cd "$WORK" && "$OFE" -n 2 fm_a.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  $1 : the reference run failed -> NG" >&2; status=1; return; }
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/fm_a.csv"
+	rm -f "$WORK/rlc.csv"
+	(cd "$WORK" && "$OFE" -n 2 fm_b.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  $1 : the run failed -> NG" >&2; status=1; return; }
+	grep -v '^title' "$WORK/rlc.csv" > "$WORK/fm_b.csv"
+	if cmp -s "$WORK/fm_a.csv" "$WORK/fm_b.csv"; then
+		echo "  $1 : identical to $3 -> OK"
+	else
+		echo "  $1 : differs from $3 -> NG" >&2
+		diff "$WORK/fm_a.csv" "$WORK/fm_b.csv" | head -4 >&2
+		status=1
+	fi
+}
+for c in box_tet:box_bin:box plate2d_dc:plate2d_bin:plate2d box_p2:box_p2_bin:box_p2 box_hexpyrtet:box_hexpyrtet_bin:box_hexpyrtet box_hex2:box_hex2_bin:box_hex2; do
+	o=${c%%:*}; r=${c#*:}; m=${r#*:}; r=${r%%:*}
+	cp "$SRC/$o.ofe" "$WORK/"
+	fmt_same "$o, ASCII 3.0" "$o.ofe" "$r.msh" "${m}_3.msh" 3
+	fmt_same "$o, binary 3.0" "$o.ofe" "$r.msh" "${m}_bin_3.msh" 3
+done
+# **面が複数の物理グループに属する格子** (gmsh_bar_hex.py の 3 次の六面体の棒。電極の面は awall にも入っている)。2.2 は面を
+# グループごとに別の要素として書くが、3.0 / 4.1 はエンティティに物理タグを並べるので、**グループごとに格納しないと awall が
+# 黙って落ちる** (以前の 4.1 の読み手は最初のタグだけを使い、100 kHz の R が +27% になっていた)。幾何から切った格子なので
+# エンティティに境界の並びもある。g22 / g41 / g3 は同じ gmsh のセッションで書いたもの、c22 / cb3 / cb41 はその 2.2 を gmsh に
+# 読み直させて書いたもの (読み直すと面が 2 重になるので、基準も同じ変換の 2.2)
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^frequency/{print "frequency = 1e5"; next} {print}' > "$WORK/fm_bar.ofe"
+fmt_same "faces in two physical groups, ASCII 4.1" fm_bar.ofe bar_hex3_g22.msh bar_hex3_g41.msh 4.1
+fmt_same "faces in two physical groups, ASCII 3.0" fm_bar.ofe bar_hex3_g22.msh bar_hex3_g3.msh 3
+fmt_same "faces in two physical groups, binary 3.0" fm_bar.ofe bar_hex3_c22.msh bar_hex3_cb3.msh 3
+fmt_same "faces in two physical groups, binary 4.1" fm_bar.ofe bar_hex3_c22.msh bar_hex3_cb41.msh 4.1
+set -- $(awk -v f=1e5 -f "$SRC/bar_eddy_z.awk")
+compare "faces in two physical groups (binary 4.1) : R == 1-D exact solution [ohm]" "$(awk -F, '$1 == "Rf" { f = 1; next } f && $1 == "1" { print $2; exit }' "$WORK/fm_b.csv")" "$1" 2e-4
 
 # 逆エンディアンのファイルは**読み違えずに落ちること**。バイト入れ替えは
 # 手元で検証できないので実装せず、はっきり断る方を選んでいる
