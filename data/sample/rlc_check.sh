@@ -1732,7 +1732,10 @@ fi
 # 付くが、エンティティの行 (外接直方体が無く、境界が物理タグより前) と節点・要素の行 (1 行 1 個、要素は自分の節点数を持つ) が違う。
 # 基準は同じ変換の元の 2.2 (*_bin.msh)。ファイルの版を先に確かめる (2.2 に差し替えても一致検査は通るので)
 fmt_same() {	# fmt_same <ラベル> <$WORK の .ofe> <基準の .msh> <比べる .msh> <比べる側の $MeshFormat の版>
-	if ! sed -n 2p "$WORK/$4" | grep -qa "^$5 "; then
+	if [ "$5" = 1 ]; then
+		# 1.x には $MeshFormat が無く、先頭が $NOD
+		if ! sed -n 1p "$WORK/$4" | grep -qa '^\$NOD'; then echo "  $1 : $4 is not a Gmsh 1.x file -> NG" >&2; status=1; return; fi
+	elif ! sed -n 2p "$WORK/$4" | grep -qa "^$5 "; then
 		echo "  $1 : $4 is not a Gmsh $5 file -> NG" >&2; status=1; return
 	fi
 	sed "s/^mesh = .*/mesh = $3/" "$WORK/$2" > "$WORK/fm_a.ofe"
@@ -1756,7 +1759,14 @@ for c in box_tet:box_bin:box plate2d_dc:plate2d_bin:plate2d box_p2:box_p2_bin:bo
 	cp "$SRC/$o.ofe" "$WORK/"
 	fmt_same "$o, ASCII 3.0" "$o.ofe" "$r.msh" "${m}_3.msh" 3
 	fmt_same "$o, binary 3.0" "$o.ofe" "$r.msh" "${m}_bin_3.msh" 3
+	fmt_same "$o, ASCII 1.x" "$o.ofe" "$r.msh" "${m}_1.msh" 1
 done
+# Gmsh 1.x ($NOD / $ELM、gmsh 4.15.2 の `-format msh1` で *_bin.msh から書かせたもの)。要素の行は「id 型 物理タグ 幾何タグ 節点数 節点...」で、
+# 物理タグと幾何タグを取り違えると box_hex2_1 の電極の面 (物理 10 / 11、幾何 1 / 26) が消えて落ちる (他の 4 つは両方が同じ番号で等価)。
+# 行の節点数が型と食い違うファイル (手で壊したもの) は理由をつけて弾く
+awk 'BEGIN { f = 0 } /^\$ELM/ { f = 1; print; getline; print; next } f && !d && ($2 == 4) { $5 = 5; d = 1 } { print }' "$WORK/box_1.msh" > "$WORK/box_1_bad.msh"
+sed 's/^mesh = .*/mesh = box_1_bad.msh/' "$SRC/box_tet.ofe" > "$WORK/v1_bad.ofe"
+th_reject "Gmsh 1.x element line whose node count disagrees with its type" v1_bad.ofe "nodes in the \$ELM line"
 # **面が複数の物理グループに属する格子** (gmsh_bar_hex.py の 3 次の六面体の棒。電極の面は awall にも入っている)。2.2 は面を
 # グループごとに別の要素として書くが、3.0 / 4.1 はエンティティに物理タグを並べるので、**グループごとに格納しないと awall が
 # 黙って落ちる** (以前の 4.1 の読み手は最初のタグだけを使い、100 kHz の R が +27% になっていた)。幾何から切った格子なので
@@ -1770,14 +1780,35 @@ fmt_same "faces in two physical groups, binary 4.1" fm_bar.ofe bar_hex3_c22.msh 
 set -- $(awk -v f=1e5 -f "$SRC/bar_eddy_z.awk")
 compare "faces in two physical groups (binary 4.1) : R == 1-D exact solution [ohm]" "$(awk -F, '$1 == "Rf" { f = 1; next } f && $1 == "1" { print $2; exit }' "$WORK/fm_b.csv")" "$1" 2e-4
 
-# 逆エンディアンのファイルは**読み違えずに落ちること**。バイト入れ替えは
-# 手元で検証できないので実装せず、はっきり断る方を選んでいる
-sed 's/^mesh = .*/mesh = bin_swapped.msh/' "$SRC/box_tet.ofe" > "$WORK/binsw.ofe"
-mesh_reject "binary Gmsh with the opposite byte order" binsw.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 binsw.ofe 2>&1 | grep -q "opposite byte order"); then
-	echo "  *** it was rejected for a different reason than the byte order" >&2
-	status=1
-fi
+# 逆エンディアンのファイル (*_sw.msh) : gmsh が書いたバイナリの数値を gmsh_swap_endian.py が自然な幅 (int32 / size_t / double) ごとに
+# 並べ替えたもの (手元に別のエンディアンの gmsh が無いので。変換は 2 回かけると元に戻ることを自分で確かめ、並びを読み違えると節の終わりで
+# 止まる)。マーカーが逆順の 1 ならバイト入れ替えで読み、元のファイルと rlc.csv がバイト一致すること。2.2 / 3.0 / 4.1、三角形・2 次・
+# 種別の混在・面が複数の物理グループに属する 3 次の六面体 (4.1 の size_t の表・3.0 の節点のエンティティの int32 も入れ替わる)
+sw_same() {	# sw_same <ラベル> <$WORK の .ofe> <元の .msh> <版>
+	m=${3%.msh}
+	if [ "$(head -c 40 "$WORK/${m}_sw.msh" | od -An -tx1 | tr -d ' \n' | grep -o '0a000000010a' | head -1)" != "0a000000010a" ]; then
+		echo "  $1 : ${m}_sw.msh does not carry the big-endian marker -> NG" >&2; status=1; return
+	fi
+	fmt_same "$1" "$2" "$3" "${m}_sw.msh" "$4"
+	if ! (cd "$WORK" && "$OFE" -n 2 fm_b.ofe 2>&1 | grep -q "opposite byte order (read with byte swapping)"); then
+		echo "  $1 : the log does not say the file was byte-swapped -> NG" >&2; status=1
+	fi
+}
+for f in box_tet plate2d_dc box_p2 box_hexpyrtet box_hex2; do cp "$SRC/$f.ofe" "$WORK/"; done
+sw_same "opposite byte order, binary 2.2 (tetrahedra)" box_tet.ofe box_bin_22.msh 2.2
+sw_same "opposite byte order, binary 4.1 (tetrahedra)" box_tet.ofe box_bin_41.msh 4.1
+sw_same "opposite byte order, binary 3.0 (tetrahedra)" box_tet.ofe box_bin_3.msh 3
+sw_same "opposite byte order, binary 2.2 (triangles)" plate2d_dc.ofe plate2d_bin_22.msh 2.2
+sw_same "opposite byte order, binary 4.1 (triangles)" plate2d_dc.ofe plate2d_bin_41.msh 4.1
+sw_same "opposite byte order, binary 4.1 (order-2 tetrahedra)" box_p2.ofe box_p2_bin_41.msh 4.1
+sw_same "opposite byte order, binary 2.2 (hex-pyramid-tet mix)" box_hexpyrtet.ofe box_hexpyrtet_bin_22.msh 2.2
+sw_same "opposite byte order, binary 4.1 (order-2 hexahedra)" box_hex2.ofe box_hex2_bin_41.msh 4.1
+sw_same "opposite byte order, binary 4.1 (faces in two physical groups)" fm_bar.ofe bar_hex3_cb41.msh 4.1
+sw_same "opposite byte order, binary 3.0 (faces in two physical groups)" fm_bar.ofe bar_hex3_cb3.msh 3
+# マーカーがどちらの順でも 1 でないファイル (手で壊したもの) は読み違えずに落ちること
+printf '$MeshFormat\n2.2 1 8\n\002\000\000\000\n$EndMeshFormat\n' > "$WORK/bin_badmarker.msh"
+sed 's/^mesh = .*/mesh = bin_badmarker.msh/' "$SRC/box_tet.ofe" > "$WORK/binbm.ofe"
+th_reject "binary Gmsh with an invalid endianness marker" binbm.ofe "invalid endianness marker"
 # **知らない要素型はバイナリでは読み飛ばせない** (1 要素 1 行の ASCII と違い、
 # 節点数が分からないと何バイト進めばよいか決まらない)。黙って誤読しないこと
 sed 's/^mesh = .*/mesh = bin_unknown_type.msh/' "$SRC/box_tet.ofe" > "$WORK/binut.ofe"

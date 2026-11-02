@@ -509,6 +509,8 @@ sh data/sample/rlc_check.sh "$PWD/bin/ofe" "$PWD/bin/ofe_post" /tmp/rlc-check
   落ちる。Gmsh バイナリは gmsh 自身に変換させたものを置いてある。
   なお gmsh は変換のたびに節点を振り直すので、比較する ASCII 側も**同じ変換で
   出したもの**でないと丸めの順序が変わって一致しない。
+  **例外は別のエンディアンのバイナリ** (手元に別のエンディアンの gmsh が無い): gmsh が書いたファイルを `gmsh_swap_endian.py`
+  (マニュアルの並びから独立に書き、2 回かけると元に戻ることを自分で確かめる) で入れ替えて作る。1.x は gmsh の `-format msh1`。
 - **`mpisolve = 1` は疎行列ベクトル積 `crs_spmv()` の行ブロック分割** (`mpi_row_range` /
   `mpi_allgather_rows`)。それ以外は全 rank が直列の順で重複して走るので出力は直列とバイト一致。
   行列ベクトル積を `crs_spmv()` を通さずに書くと分散から漏れる (結果は正しいが遅い) ので、新しい積も

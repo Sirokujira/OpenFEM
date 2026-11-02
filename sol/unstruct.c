@@ -845,7 +845,9 @@ static int elem_finish(void)
 }
 
 
-static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
+// v1 : Gmsh 1.x の $ELM。行は「id 型 物理タグ 幾何タグ 節点数 節点...」で、2.2 の「id 型 タグ数 タグ... 節点...」の
+// タグ数が無い代わりに節点数がある。物理タグの位置 (3 番目) は 2.2 の最初のタグと同じ
+static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid, int v1)
 {
 	char line[MESH_LINE];
 
@@ -869,9 +871,9 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		if (nv < 4) continue;
 
 		const int type = (int)v[1];
-		const int ntag = (int)v[2];
+		const int ntag = (v1 ? 2 : (int)v[2]);
 		if (nv < 3 + ntag) continue;
-		const int tag = ((ntag > 0) ? (int)v[3] : 0);
+		const int tag = (v1 ? (int)v[2] : (ntag > 0) ? (int)v[3] : 0);
 		const int off = 3 + ntag;
 
 		// 節点数 : 四面体 (型 4 / 11) と三角形 (型 2 / 9)
@@ -888,6 +890,10 @@ static int read_elements(FILE *fp, const int32_t *idmap, int32_t maxid)
 		              : (type == 94) ? 216 : (type == 106) ? 126 : (type == 38) ? 36 : 0);
 		if (nn == 0) continue;			// 点・線分など、使わない要素型
 		if (nv < off + nn) continue;
+		if (v1 && (v[4] != nn)) {
+			printf("*** mesh : element %d of type %d has %ld nodes in the $ELM line (expected %d)\n", e + 1, type, v[4], nn);
+			return 1;
+		}
 
 		// 節点番号を先に解決する (未解決なら打ち切り。ここで continue すると
 		// 配列の該当要素が未初期化のまま確定し、setup_unstruct() が
@@ -1135,10 +1141,11 @@ static int read_elements_v41(FILE *fp, const int32_t *idmap, int32_t maxid)
 ASCII との違いは「データの並べ方」だけなので、格納 (elem_store / elem_finish)
 と物理タグの解決 (ent_phys) は共通のものをそのまま使う。
 
-**エンディアンは変換しない。** $MeshFormat の直後に書かれている int32 が 1 と
-読めるかどうかで判定し、違えば「別エンディアンの格子は非対応」と言って落とす。
-黙って読み違えるより落ちる方がよく、手元で検証できない変換を書いても
-「動くつもりのコード」が増えるだけになる。
+**別のエンディアンのファイルはバイト入れ替えで読む。** $MeshFormat の直後に書かれている int32 が 1 なら同じ、
+バイト順を逆にした 1 なら別のエンディアン (BinSwap)、どちらでもなければ落とす。gmsh の書き出しは数を自然な幅
+(int32 / size_t / double) のまま並べるだけなので、読み込み (rd_arr) で幅ごとに入れ替えれば済む。検証用のファイルは
+gmsh が書いたバイナリを gmsh_swap_endian.py (gmsh のマニュアルの並びから独立に書いた変換、2 回かけると元に戻る) で
+入れ替えたもので、元のファイルと rlc.csv がバイト一致する (2.2 / 3.0 / 4.1)。
 
   2.2 : $Nodes / $Elements の**個数だけが ASCII 行**で、以降はバイナリ。
         節点は (int32 tag, double x, y, z) の並び。要素は**型ごとのブロック**で、
@@ -1185,19 +1192,38 @@ static int gmsh_nnode(long type)
 }
 
 
-static int rd_raw(FILE *fp, void *p, size_t n)
+// 別のエンディアンのファイル ($MeshFormat の直後の int32 が 1 をバイト順を逆にした値) なら 1。数値はすべて w バイトの単位で
+// 読み込み後に並べ替える (int32 / size_t / double。gmsh の書き出しはどれも自然な幅のまま並べるだけなので単位で入れ替えれば済む)
+static int BinSwap = 0;
+
+static void swap_items(void *p, size_t count, size_t w)
 {
-	return (fread(p, 1, n, fp) != n);
+	unsigned char *b = (unsigned char *)p;
+	for (size_t i = 0; i < count; i++, b += w) {
+		for (size_t k = 0; k < (w / 2); k++) {
+			const unsigned char t = b[k];
+			b[k] = b[w - 1 - k];
+			b[w - 1 - k] = t;
+		}
+	}
+}
+
+// count 個の w バイトの数 (int32 / int64 / size_t / double)
+static int rd_arr(FILE *fp, void *p, size_t count, size_t w)
+{
+	if (fread(p, w, count, fp) != count) return 1;
+	if (BinSwap) swap_items(p, count, w);
+	return 0;
 }
 
 static int rd_i32(FILE *fp, int32_t *v)
 {
-	return rd_raw(fp, v, 4);
+	return rd_arr(fp, v, 1, 4);
 }
 
 static int rd_i64(FILE *fp, int64_t *v)
 {
-	return rd_raw(fp, v, 8);
+	return rd_arr(fp, v, 1, 8);
 }
 
 
@@ -1222,7 +1248,7 @@ static int read_nodes_bin22(FILE *fp, int32_t **idmap, int32_t *maxid)
 	int32_t mx = 0;
 	for (int i = 0; i < nn; i++) {
 		double xyz[3];
-		if (rd_i32(fp, &id[i]) || rd_raw(fp, xyz, 3 * sizeof(double))) {
+		if (rd_i32(fp, &id[i]) || rd_arr(fp, xyz, 3, sizeof(double))) {
 			printf("*** mesh : truncated binary node %d\n", i + 1);
 			free(id);
 			return 1;
@@ -1330,7 +1356,7 @@ static int read_entities_bin41(FILE *fp)
 			double b[6];
 			// 点は座標 3 個、それ以外は外接直方体 6 個
 			const int nb = ((d == 0) ? 3 : 6);
-			if (rd_i32(fp, &tag) || rd_raw(fp, b, (size_t)nb * sizeof(double))) return 1;
+			if (rd_i32(fp, &tag) || rd_arr(fp, b, (size_t)nb, sizeof(double))) return 1;
 			int64_t np = 0;
 			if (rd_i64(fp, &np)) return 1;
 			int pts[ENT_PMAX], k = 0;
@@ -1384,13 +1410,13 @@ static int read_nodes_bin41(FILE *fp, int32_t **idmap, int32_t *maxid)
 			return 1;
 		}
 		// ブロック内は「節点番号がまとめて、そのあと座標がまとめて」
-		if (rd_raw(fp, &tags[k], (size_t)cnt * sizeof(int64_t))) {
+		if (rd_arr(fp, &tags[k], (size_t)cnt, sizeof(int64_t))) {
 			free(map); free(tags);
 			return 1;
 		}
 		for (int64_t i = 0; i < cnt; i++) {
 			double xyz[3];
-			if (rd_raw(fp, xyz, 3 * sizeof(double))) {
+			if (rd_arr(fp, xyz, 3, sizeof(double))) {
 				free(map); free(tags);
 				return 1;
 			}
@@ -1592,7 +1618,7 @@ static int read_nodes_v3(FILE *fp, int bin, int32_t **idmap, int32_t *maxid)
 		if (bin) {
 			double xyz[3];
 			int32_t ent = 0;
-			if (rd_i32(fp, &id[i]) || rd_raw(fp, xyz, 3 * sizeof(double)) || rd_i32(fp, &ent)) {
+			if (rd_i32(fp, &id[i]) || rd_arr(fp, xyz, 3, sizeof(double)) || rd_i32(fp, &ent)) {
 				printf("*** mesh : truncated binary node %ld\n", i + 1);
 				free(id);
 				return 1;
@@ -1709,6 +1735,7 @@ static int mesh_read_binary(const char *fname, int v41, int v3)
 	int have_nodes = 0, have_elements = 0;
 
 	NEnt = 0;
+	BinSwap = 0;
 
 	FILE *fp = fopen(fname, "rb");
 	if (fp == NULL) {
@@ -1728,10 +1755,19 @@ static int mesh_read_binary(const char *fname, int v41, int v3)
 				ierr = 1;
 				break;
 			}
-			// 直後の int32 が 1 なら同じエンディアン
+			// 直後の int32 が 1 なら同じエンディアン、バイト順を逆にした 1 (0x01000000) なら別のエンディアン
 			int32_t one = 0;
 			if (rd_i32(fp, &one)) { ierr = 1; break; }
 			if (one != 1) {
+				int32_t sw = one;
+				swap_items(&sw, 1, 4);
+				if (sw == 1) {
+					BinSwap = 1;
+					printf("%s\n", "mesh : the binary file has the opposite byte order (read with byte swapping)");
+					int c = fgetc(fp);
+					if (c != '\n') ungetc(c, fp);
+					continue;
+				}
 				// マーカーの 4 バイトが全部印字可能なら、ヘッダだけ
 				// バイナリを名乗って中身が ASCII のファイル (手で書き換えた
 				// もの) である可能性が高い。原因の違う 2 つを同じ文言で
@@ -1747,9 +1783,8 @@ static int mesh_read_binary(const char *fname, int v41, int v3)
 						"must be 0 for ASCII files)");
 				}
 				else {
-					printf("*** mesh : the binary file has the opposite byte order "
-						"(endianness marker = %d); convert it with gmsh on this "
-						"machine\n", (int)one);
+					printf("*** mesh : the binary file has an invalid endianness marker (%d; "
+						"expected 1 in either byte order)\n", (int)one);
 				}
 				ierr = 1;
 				break;
@@ -1789,6 +1824,7 @@ static int mesh_read_binary(const char *fname, int v41, int v3)
 
 	fclose(fp);
 	free(idmap);
+	BinSwap = 0;
 
 	if (!ierr && (!have_nodes || !have_elements)) {
 		printf("%s\n", "*** mesh : $Nodes or $Elements is missing");
@@ -1823,7 +1859,7 @@ int mesh_read(const char *fname)
 			else if (line[0] == '3') v3 = 1;
 			else if (line[0] == '4') v41 = 1;
 			else {
-				printf("*** mesh : only Gmsh format 2.x / 3.0 / 4.x is supported (got %s)", line);
+				printf("*** mesh : only Gmsh format 1.x / 2.x / 3.0 / 4.x is supported (got %s)", line);
 				ierr = 1;
 				break;
 			}
@@ -1865,7 +1901,23 @@ int mesh_read(const char *fname)
 			}
 			ierr = (v3 ? read_elements_v3(fp, 0, idmap, maxid)
 			      : v41 ? read_elements_v41(fp, idmap, maxid)
-			            : read_elements(fp, idmap, maxid));
+			            : read_elements(fp, idmap, maxid, 0));
+			if (ierr) break;
+			have_elements = 1;
+		}
+		// Gmsh 1.x : $MeshFormat が無く、節は $NOD / $ELM (大文字。2.2 の $Nodes とは綴りが違う)。節点の行は 2.2 と同じ
+		else if (!strncmp(line, "$NOD", 4) && ((line[4] == '\n') || (line[4] == '\r') || (line[4] == '\0'))) {
+			ierr = read_nodes(fp, &idmap, &maxid);
+			if (ierr) break;
+			have_nodes = 1;
+		}
+		else if (!strncmp(line, "$ELM", 4) && ((line[4] == '\n') || (line[4] == '\r') || (line[4] == '\0'))) {
+			if (!have_nodes) {
+				printf("%s\n", "*** mesh : $ELM before $NOD");
+				ierr = 1;
+				break;
+			}
+			ierr = read_elements(fp, idmap, maxid, 1);
 			if (ierr) break;
 			have_elements = 1;
 		}
@@ -1875,7 +1927,7 @@ int mesh_read(const char *fname)
 	free(idmap);
 
 	if (!ierr && (!have_nodes || !have_elements)) {
-		printf("%s\n", "*** mesh : $Nodes or $Elements is missing");
+		printf("%s\n", "*** mesh : $Nodes or $Elements ($NOD / $ELM for Gmsh 1.x) is missing");
 		ierr = 1;
 	}
 
