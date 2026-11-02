@@ -1675,6 +1675,13 @@ int input_data(FILE *fp)
 				return 1;
 			}
 			for (int m = 0; m < NMaterial; m++) {
+				// J-A (ヒステリシス) は熱連成の交流の発熱では解かない。**この検査が無いと J-A の材料が黙って
+				// 線形 (μr = 1) として解かれていた** (thermal + A + transient + ja が normal end になった、実測)
+				if (Material[m].ja.on) {
+					printf("%s\n", "*** thermal (AC heating) does not support ja (hysteresis) materials; "
+						"use a bh curve, or solve the hysteresis without thermal");
+					return 1;
+				}
 				if ((Material[m].nbh[0] > 0) && (Analysis == ANALYSIS_F)) {
 					printf("%s\n", "*** thermal with analysis F supports linear "
 						"materials only (remove bh; bh with thermal is supported for analysis A)");

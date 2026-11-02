@@ -676,6 +676,47 @@ static void p2_fields(void)
 }
 
 
+// ν の更新の 1 段 : いまの解 (P2.ur / ui) の B から H を独立変数にした ν = |H|/B(|H|) を積分点ごとに作り、
+// Anderson 加速の入力を aay / aaf に入れる。戻り値は max |Δν| / ν (周波数領域と交流の発熱で共有)
+static double p2_nu_update(const double *nuq, double *aay, double *aaf, int nq)
+{
+	const int nt = NTet;
+	double dmax = 0;
+	for (int e = 0; e < nt; e++) {
+		const material_t *mt = &Material[elem3d_mat(e)];
+		const int64_t o = (int64_t)e * nq;
+		if (mt->nbh[0] <= 0) {
+			for (int q = 0; q < nq; q++) aay[o + q] = aaf[o + q] = 0;
+			continue;
+		}
+		int32_t dof[P2_NDOF];
+		double sgn[P2_NDOF];
+		p2_dofs(e, P2.fe, P2.ne, P2.nf, P2.nn, dof, sgn);
+		for (int q = 0; q < nq; q++) {
+			double wv[20][3], wc[20][3], pn[10], pg[10][3], w;
+			double bre[3] = {0, 0, 0}, bim[3] = {0, 0, 0};
+			if (!p2_basis(e, q, wv, wc, pn, pg, &w)) {
+				for (int k = 0; k < 20; k++) {
+					const double ar = sgn[k] * P2.ur[dof[k]], ai = sgn[k] * P2.ui[dof[k]];
+					for (int c = 0; c < 3; c++) {
+						bre[c] += ar * wc[k][c];
+						bim[c] += ai * wc[k][c];
+					}
+				}
+			}
+			const double b2 = dot3(bre, bre) + dot3(bim, bim);
+			const double hm = nuq[o + q] * sqrt(b2);
+			const double nun = ((hm > 0) ? (hm / bh_b_of_h(mt, 0, hm)) : bh_nu(mt, 0, 0));
+			const double dn = fabs(nun - nuq[o + q]) / nun;
+			if (dn > dmax) dmax = dn;
+			aay[o + q] = log(nuq[o + q]);
+			aaf[o + q] = log(nun) - aay[o + q];
+		}
+	}
+	return dmax;
+}
+
+
 int solve_eddy3d_p2(FILE *fp_log)
 {
 	const int np = NPort, nt = NTet;
@@ -748,38 +789,7 @@ int solve_eddy3d_p2(FILE *fp_log)
 	if (final || ierr) break;
 
 	// ν の更新 (H を独立変数にする) と Anderson 加速 (ln ν)。B は組み立てと同じ積分点で
-	double dmax = 0;
-	for (int e = 0; e < nt; e++) {
-		const material_t *mt = &Material[elem3d_mat(e)];
-		const int64_t o = (int64_t)e * nq;
-		if (mt->nbh[0] <= 0) {
-			for (int q = 0; q < nq; q++) aay[o + q] = aaf[o + q] = 0;
-			continue;
-		}
-		int32_t dof[P2_NDOF];
-		double sgn[P2_NDOF];
-		p2_dofs(e, P2.fe, P2.ne, P2.nf, P2.nn, dof, sgn);
-		for (int q = 0; q < nq; q++) {
-			double wv[20][3], wc[20][3], pn[10], pg[10][3], w;
-			double bre[3] = {0, 0, 0}, bim[3] = {0, 0, 0};
-			if (!p2_basis(e, q, wv, wc, pn, pg, &w)) {
-				for (int k = 0; k < 20; k++) {
-					const double ar = sgn[k] * P2.ur[dof[k]], ai = sgn[k] * P2.ui[dof[k]];
-					for (int c = 0; c < 3; c++) {
-						bre[c] += ar * wc[k][c];
-						bim[c] += ai * wc[k][c];
-					}
-				}
-			}
-			const double b2 = dot3(bre, bre) + dot3(bim, bim);
-			const double hm = nuq[o + q] * sqrt(b2);
-			const double nun = ((hm > 0) ? (hm / bh_b_of_h(mt, 0, hm)) : bh_nu(mt, 0, 0));
-			const double dn = fabs(nun - nuq[o + q]) / nun;
-			if (dn > dmax) dmax = dn;
-			aay[o + q] = log(nuq[o + q]);
-			aaf[o + q] = log(nun) - aay[o + q];
-		}
-	}
+	const double dmax = p2_nu_update(nuq, aay, aaf, nq);
 	anderson_step(nqt, aay, aaf, aayp, aafp, aady, aadf, P2_AAM, &aan, NlRelax);
 	for (int e = 0; e < nt; e++) {
 		if (Material[elem3d_mat(e)].nbh[0] <= 0) continue;
@@ -1555,10 +1565,42 @@ int solve_edge_test_p2(FILE *fp_log)
 }
 
 
+// 交流の発熱の非線形 (B-H) : 積分点ごとの ν と Anderson の作業域 (熱連成の回をまたいで持ち越す。無ければ NULL)
+static double *HNuq, *HAay, *HAaf, *HAayp, *HAafp, *HAady, *HAadf;
+static int HNlTotal;
+
+
 int eddy3d_p2_heat_open(FILE *fp_log)
 {
 	fprintf(fp_log, "  AC heating (analysis = A, second-order Nedelec) : frequency = %.6e [Hz]\n", Freq);
-	return p2_open(fp_log);
+	if (p2_open(fp_log)) return 1;
+	HNuq = NULL;
+	HNlTotal = 0;
+	int nlf = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh[0] > 0) nlf = 1;
+	}
+	if (nlf) {
+		const int nq = elem3d_nip(0);
+		const size_t nqt = (size_t)NTet * (size_t)nq;
+		HNuq  = (double *)malloc(nqt * sizeof(double));
+		HAay  = (double *)malloc(nqt * sizeof(double));
+		HAaf  = (double *)malloc(nqt * sizeof(double));
+		HAayp = (double *)malloc(nqt * sizeof(double));
+		HAafp = (double *)malloc(nqt * sizeof(double));
+		HAady = (double *)malloc(nqt * P2_AAM * sizeof(double));
+		HAadf = (double *)malloc(nqt * P2_AAM * sizeof(double));
+		for (int e = 0; e < NTet; e++) {
+			const material_t *mt = &Material[elem3d_mat(e)];
+			for (int q = 0; q < nq; q++) HNuq[((int64_t)e * nq) + q] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0) : 0);
+		}
+		P2.nuq = HNuq;
+		P2.nq = nq;
+		fprintf(fp_log, "  nonlinear (B-H) : effective reluctivity at %d points per element, solved to convergence in "
+			"every thermal iteration (maxiter = %d, tol = %.1e); the thermal tolerance is at least 10 x that\n",
+			nq, NlMaxiter, NlTol);
+	}
+	return 0;
 }
 
 
@@ -1567,25 +1609,50 @@ int eddy3d_p2_heat_solve(FILE *fp_log, const double *sigelem, double cur, double
 {
 	const int ne = P2.ne, nf = P2.nf, nn = P2.nn, nt = NTet, n = P2.n;
 	const double omega = P2.omega;
-	if (p2_assemble(fp_log, sigelem)) return 1;
-	char label[64];
-	sprintf(label, "A%d", it);
-	double qr[MAXPORT], qi[MAXPORT];
-	if (p2_solve_port(fp_log, 1, NULL, label, qr, qi)) return 1;
-	const double ir = qr[1], ii = qi[1];
-	const double den = (ir * ir) + (ii * ii);
-	if (den <= 0) {
-		fprintf(fp_log, "*** thermal : no current flows through the port\n");
-		return 1;
+	double ir = 0, ii = 0, den = 0;
+	int aan = 0;		// Anderson の履歴は σ(T) が変わるたびに捨てる
+	// 非線形 (B-H) なら 1 次の eddy3d_heat_solve と同じく、いまの σ(T) で ν が動かなくなるまで解き直す
+	for (int nlit = 1; ; nlit++) {
+		if (p2_assemble(fp_log, sigelem)) return 1;
+		char label[64];
+		sprintf(label, "A%d", it);
+		double qr[MAXPORT], qi[MAXPORT];
+		if (p2_solve_port(fp_log, 1, NULL, label, qr, qi)) return 1;
+		ir = qr[1];
+		ii = qi[1];
+		den = (ir * ir) + (ii * ii);
+		if (den <= 0) {
+			fprintf(fp_log, "*** thermal : no current flows through the port\n");
+			return 1;
+		}
+		// 端子電流が cur (実数) になるよう s = cur / I_V 倍する
+		const double sr = cur * ir / den, si = -cur * ii / den;
+		for (int i = 0; i < n; i++) {
+			const double xr = P2.ur[i], xi = P2.ui[i];
+			P2.ur[i] = (sr * xr) - (si * xi);
+			P2.ui[i] = (sr * xi) + (si * xr);
+		}
+		if (HNuq == NULL) break;
+		const double dmax = p2_nu_update(HNuq, HAay, HAaf, P2.nq);
+		HNlTotal++;
+		if (dmax < NlTol) break;
+		if (nlit >= NlMaxiter) {
+			fprintf(fp_log, "*** thermal : the effective reluctivity did not converge in %d iterations "
+				"(thermal iteration %d, max dnu/nu = %.3e)\n", NlMaxiter, it, dmax);
+			return 1;
+		}
+		const int64_t nqt = (int64_t)nt * P2.nq;
+		anderson_step(nqt, HAay, HAaf, HAayp, HAafp, HAady, HAadf, P2_AAM, &aan, NlRelax);
+		for (int e = 0; e < nt; e++) {
+			if (Material[elem3d_mat(e)].nbh[0] <= 0) continue;
+			for (int q = 0; q < P2.nq; q++) HNuq[((int64_t)e * P2.nq) + q] = exp(HAay[((int64_t)e * P2.nq) + q]);
+		}
 	}
 	*zr = Volt * ir / den;
 	*zi = -Volt * ii / den;
-	// 端子電流が cur (実数) になるよう s = cur / I_V 倍する
-	const double sr = cur * ir / den, si = -cur * ii / den;
-	for (int i = 0; i < n; i++) {
-		const double xr = P2.ur[i], xi = P2.ui[i];
-		P2.ur[i] = (sr * xr) - (si * xi);
-		P2.ui[i] = (sr * xi) + (si * xr);
+	if (HNuq != NULL) {
+		fprintf(fp_log, "  thermal iteration %d : effective reluctivity converged (%d B-H iterations so far)\n",
+			it, HNlTotal);
 	}
 	for (int i = 0; i < nn; i++) f[i] = 0;
 	for (int e = 0; e < nt; e++) {
@@ -1627,5 +1694,7 @@ int eddy3d_p2_heat_solve(FILE *fp_log, const double *sigelem, double cur, double
 
 void eddy3d_p2_heat_close(void)
 {
+	free(HNuq); free(HAay); free(HAaf); free(HAayp); free(HAafp); free(HAady); free(HAadf);
+	HNuq = HAay = HAaf = HAayp = HAafp = HAady = HAadf = NULL;
 	p2_close();
 }

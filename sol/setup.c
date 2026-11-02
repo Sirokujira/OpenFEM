@@ -214,11 +214,11 @@ static int setup_unstruct(void)
 		int nl = 0;
 		for (int m = 0; m < NMaterial; m++) {
 			const int nonl = (Material[m].ja.on || (Material[m].nbh[0] > 0));
-			if (nonl && (ThermalOn || (Analysis & ANALYSIS_E))) nl = 1;
-			if (Material[m].ja.on && !TransientOn) nl = 1;
+			if (nonl && (Analysis & ANALYSIS_E)) nl = 1;
+			if (Material[m].ja.on && (ThermalOn || !TransientOn)) nl = 1;
 		}
 		const char *why = NULL;
-		if (nl) why = "linear materials with thermal or analysis E (bh / ja : A only, ja with transient)";
+		if (nl) why = "linear materials with analysis E (bh : A, also with thermal; ja : A with transient, no thermal)";
 		else if ((GaugeTree || Direct) && (TransientOn || ThermalOn || (Analysis & ANALYSIS_E)))
 			why = "gauge = 0 and the iterative solver in the time domain / with thermal";
 		if (why != NULL) {
@@ -234,11 +234,11 @@ static int setup_unstruct(void)
 		int nl = 0;
 		for (int m = 0; m < NMaterial; m++) {
 			const int nonl = (Material[m].ja.on || (Material[m].nbh[0] > 0));
-			if (nonl && (ThermalOn || (Analysis & ANALYSIS_E))) nl = 1;
-			if (Material[m].ja.on && !TransientOn) nl = 1;
+			if (nonl && (Analysis & ANALYSIS_E)) nl = 1;
+			if (Material[m].ja.on && (ThermalOn || !TransientOn)) nl = 1;
 		}
 		const char *why = NULL;
-		if (nl) why = "linear materials with thermal or analysis E (bh : A only, ja with transient)";
+		if (nl) why = "linear materials with analysis E (bh : A, also with thermal; ja : A with transient, no thermal)";
 		else if (GaugeTree || Direct) why = "gauge = 0 and the iterative solver";
 		if (why != NULL) {
 			printf("*** analysis A / E on a mesh of order 3 and up (order-%d Nedelec) supports %s only\n", TetOrder, why);

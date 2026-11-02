@@ -4773,7 +4773,30 @@ compare "B-H conductor, uniform temperature : thermal R == the uncoupled nonline
 	"$(awk -F, '$1 == "Rf" { a = 1; next } a == 1 && $1 == "1" { print $2; exit }' "$WORK/rlc.csv")" 1e-6
 cp "$SRC/bar_air_p2.msh" "$WORK/"
 sed 's/^mesh = .*/mesh = bar_air_p2.msh/' "$WORK/tacb_a0.ofe" > "$WORK/tacbx_p2.ofe"
-th_reject "B-H with AC heating on a second-order mesh" tacbx_p2.ofe "linear materials with thermal"
+#     ・2 次 (bar_air_p2、eddy3d_p2.c) と 3 次 (bar_air_ho3c、eddy3d_pr.c) の辺要素も同じ入れ子 (ν は積分点ごと) : α = 0 の熱連成が
+#       非連成の非線形の A と一致、導体が非線形で温度が一様な棒が temperature = T_mean の非連成の A と一致 (2 次 9e-8、
+#       3 次は CI の時間のため ν の許容を 1e-5 にして 4.4e-6 ≤ 3e-5。ν を最初の回で凍らせる誤りは 1e-4 動く)
+cp "$SRC/bar_air_p2.msh" "$SRC/bar_air_ho3c.msh" "$WORK/"
+tacb_rf() { awk -F, '$1 == "Rf" { a = 1; next } a == 1 && $1 == "1" { print $2; exit }' "$WORK/rlc.csv"; }
+for m in bar_air_p2 bar_air_ho3c; do
+	sed "s/^mesh = .*/mesh = $m.msh/" "$WORK/tacb_a0.ofe" > "$WORK/tacbh_a0.ofe"
+	(cd "$WORK" && "$OFE" -n 2 tacbh_a0.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  $m tacbh_a0 : the run failed -> NG" >&2; status=1; }
+	r0=$(tacb_rf)
+	grep -v '^#' "$SRC/bar_air_bh.ofe" | sed "s/^mesh = .*/mesh = $m.msh/" > "$WORK/tacbh_u.ofe"
+	(cd "$WORK" && "$OFE" -n 2 tacbh_u.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  $m tacbh_u : the run failed -> NG" >&2; status=1; }
+	compare "$m : B-H layer, alpha = 0 : thermal R == the uncoupled nonlinear A [ohm]" "$r0" "$(tacb_rf)" 1e-7
+	tl=1e-6; nls=""
+	[ "$m" = bar_air_ho3c ] && { tl=3e-5; nls="nlsolver = 100 1e-5 1.0"; }
+	awk -v m="$m.msh" -v nls="$nls" '/^mesh/{print "mesh = " m; next} /^nlsolver/{ if (nls != "") { print nls; next } } {print}' "$WORK/tacb_c.ofe" > "$WORK/tacbh_c.ofe"
+	th_run tacbh_c.ofe
+	rc=$(th_r)
+	tmc=$(awk '/T_mean/ { print $8; exit }' "$WORK/ofe.log")
+	awk -v m="$m.msh" -v nls="$nls" -v t="$tmc" '/^mesh/{print "mesh = " m; next} /^nlsolver/{ if (nls != "") { print nls; next } } /^temperature/{print "temperature = " t; next} {print}' "$WORK/tacb_cu.ofe" > "$WORK/tacbh_cu.ofe"
+	(cd "$WORK" && "$OFE" -n 2 tacbh_cu.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  $m tacbh_cu : the run failed -> NG" >&2; status=1; }
+	compare "$m : B-H conductor, uniform temperature : thermal R == the uncoupled nonlinear A at T_mean [ohm]" "$rc" "$(tacb_rf)" "$tl"
+done
+awk '/^kthermal/{print; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"; print "heatcap = 2 3.4e6"; print "transient = 1 4"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_ja.ofe"
+th_reject "AC heating with a J-A (hysteresis) material" tacx_ja.ofe "does not support ja (hysteresis) materials"
 #     ピラミッドは A が弾く (多項式の Nedelec 基底が無い)
 awk '/^mesh/{print "mesh = box_pyr.msh"; next} /^region/{print "region = 1 2"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_pyr.ofe"
 cp "$SRC/box_pyr.msh" "$WORK/"
