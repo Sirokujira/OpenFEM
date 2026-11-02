@@ -6686,7 +6686,8 @@ static int nodal_test_ho3(FILE *fp_log, int prism)
 		const double want = aca * vol;
 		const double err = fabs(q1 - want) / fabs(want);
 		fprintf(fp_log, "  linear field : phi^T K phi = %.10e, closed form = %.10e, rel. error = %.2e\n", q1, want, err);
-		if (!(err <= 1e-12)) {
+		// 6 次 / 7 次は等間隔の Lagrange の打ち消しの丸めで 2〜3e-13 (実測) と 1e-12 に近いので 1e-11 (高次の項の恒等式は 3e-15〜3e-13)
+		if (!(err <= ((po >= 6) ? 1e-11 : 1e-12))) {
 			fprintf(fp_log, "*** the linear-field identity failed\n");
 			ierr = 1;
 		}

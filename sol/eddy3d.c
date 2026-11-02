@@ -526,6 +526,17 @@ static void ed_fields(const double *ur, const double *ui, double omega, int ne, 
 					}
 				}
 			}
+			else if (kind == MESHELEM_PYR) {
+				double gn[5][3];
+				if (!pyr_grad_center(e - NTet - NHex - NPrism, gn)) {
+					for (int a = 0; a < 5; a++) {
+						for (int c = 0; c < 3; c++) {
+							pr[c] += ur[ne + nd[a]] * gn[a][c];
+							pi2[c] += ui[ne + nd[a]] * gn[a][c];
+						}
+					}
+				}
+			}
 			else {
 				double gn[6][3];
 				if (!prism_grad_center(e - NTet - NHex, gn)) {
@@ -950,7 +961,7 @@ V = Volt で解き、端子電流が cur (波高値、実数) になるよう解
 	eᴴ T e = jω aᴴ S a + φᴴ r,   Re(eᴴ T e) = Re(V I*)
 なので Σ_e Q_e = ½ Re(V I*) = ½|I|² R が丸めと反復の打ち切りを除いて厳密
 (rlc_check.sh で見るエネルギーの恒等式)。節点荷重は f_i = Σ_e Q_e / (要素の節点数)
-(要素平均の発熱を一定とみなした 1 次四面体の整合な荷重。和は Σ Q_e のまま)。
+(要素平均の発熱を一定とみなした 1 次四面体の整合な荷重。和は Σ Q_e のまま)。ピラミッドは ∫N_a dV / V (底面 3/16、頂点 1/4)。
 ω -> 0 で DC の導電解析に帰着するので、低周波では DC の熱連成 (電流 I/√2) と
 一致する (検証の恒等式)。損失はゲージ不変なので gauge は既定 (固定しない) でよい。
 */
@@ -1755,7 +1766,15 @@ int eddy3d_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f
 			}
 		}
 		qe *= 0.5;
-		for (int a = 0; a < nen; a++) f[nd[a]] += qe / nen;
+		if (edge_elem_kind(e) == MESHELEM_PYR) {
+			// ピラミッドの節点の重み ∫N_a dV / V は底面 3/16、頂点 1/4 (アフィンなピラミッド。均等の 1/5 にすると DC の
+			// 熱連成の発熱 (σ|∇φ|² を形状関数で積分) と一様な場でも食い違う : 低周波の T_max が 3e-5 ずれた、実測)
+			for (int a = 0; a < 4; a++) f[nd[a]] += qe * 3 / 16;
+			f[nd[4]] += qe / 4;
+		}
+		else {
+			for (int a = 0; a < nen; a++) f[nd[a]] += qe / nen;
+		}
 	}
 
 	return 0;

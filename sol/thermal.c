@@ -2974,13 +2974,8 @@ int solve_thermal(FILE *fp_log, double *gport, double *xport)
 			MeshDim, TetOrder, HexNen, PrismNen);
 		return 1;
 	}
-	// 交流の発熱 (A) は辺要素の種別 (四面体・六面体・角柱、混在可) ならどれでも。損失は
-	// edge_elem_matrices の T_e の上の ½ eᴴ T_e e なので種別に依らない。ピラミッドは A 自体が弾く
-	if (MeshMode && th_ac() && (MeshDim == 3) && (NPyr > 0)) {
-		fprintf(fp_log, "*** AC heating (thermal + analysis A) does not support pyramids "
-			"(no polynomial Nedelec basis; this mesh has %d pyramids)\n", NPyr);
-		return 1;
-	}
+	// 交流の発熱 (A) は辺要素の種別 (四面体・六面体・角柱・ピラミッド、混在可) ならどれでも。損失は
+	// edge_elem_matrices の T_e の上の ½ eᴴ T_e e なので種別に依らない (ピラミッドは有理の Nedelec 基底)
 	th_extent();
 	fprintf(fp_log, "  drive current = %.6e [A]%s, ambient (initial) = %.4f [degC]\n",
 		ThermalCurrent, (th_ac() ? " (peak amplitude, AC)" : ""), Temperature);

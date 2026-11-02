@@ -236,12 +236,11 @@ static int setup_unstruct(void)
 	// 最低次 Nedelec の接線トレースは三角形面・四角形面のどちらでも面の辺の
 	// 自由度だけで決まるので、面を共有する要素の種別が違っても接線連続性は
 	// 保たれる (solve_edge_test の (g) が直接検査する)。
-	// **ピラミッドだけは多項式の Nedelec 基底が無い** (有理基底が要る) ので弾く。
-	// 六面体 + 四面体の格子はピラミッドが要るため、ここで一緒に落ちる
-	if ((NPyr > 0) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
-		printf("%s\n", "*** analysis E / A (edge elements) do not support pyramids "
-			"(there is no polynomial Nedelec basis on a pyramid); use a mesh of "
-			"tetrahedra, hexahedra and prisms");
+	// ピラミッドは有理関数の Nedelec 基底 (edge.c の epyr_basis、ND1 ⊕ ∇(ξη/(1−ζ)) ⊕ 1) で 1 次の格子だけ解く。
+	// 高次の格子にピラミッドがあると高次の経路 (eddy3d_p2.c / eddy3d_pr.c) が扱えないので弾く
+	if ((NPyr > 0) && (TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
+		printf("%s\n", "*** analysis E / A (edge elements) support pyramids only on first-order meshes "
+			"(the rational pyramid Nedelec basis is the lowest order)");
 		return 1;
 	}
 	// 2 次の四面体 (10 節点) の A は 2 次の Nedelec 要素 (eddy3d_p2.c) で解く。対応するのは周波数領域の

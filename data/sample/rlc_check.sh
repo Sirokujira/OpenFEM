@@ -1130,13 +1130,44 @@ res=$(awk -v a="$r0" -v b="$r1" -v c="$l0" -v d="$l1" 'BEGIN {
 echo "  gauge = 1 leaves Z unchanged (hex) : $res"
 case "$res" in NG*) status=1 ;; esac
 # 弾かれるべき入力
-sed -e 's/^analysis = .*/analysis = A/' -e 's/^material = .*/material = 1.0 5.8e7/' \
-    -e 's/^solver = .*/frequency = 1e4\nvoltage = 1.0/' "$SRC/box_pyr.ofe" > "$WORK/pyredge.ofe"
-mesh_reject "analysis A on a pyramid mesh" pyredge.ofe
-if ! (cd "$WORK" && "$OFE" -n 2 pyredge.ofe 2>&1 | grep -q "do not support pyramids"); then
-	echo "  *** it was rejected for a different reason than the element kind" >&2
-	status=1
+# ---- ピラミッドの辺要素 (edge.c の有理の Nedelec 基底 : ND1 ⊕ ∇(ξη/(1−ζ)) ⊕ 1、8 辺の循環の双対) ----
+#   (p1) E の自己検証 (六面体 - ピラミッド - 四面体の箱、全領域を導体に) : 勾配の零空間・一様場・回転場が厳密、種別をまたぐ面 (45) の
+#        接線連続性、Hiptmair が収束する。ピラミッドの基底が ∇(節点の有理形状関数) を含むことが (a)、六面体・四面体と適合することが (g)
+#   (p2) A : gmsh が六面体 (x < L/2) と四面体 (x > L/2) の間に自動で挟んだピラミッドの棒 (gmsh_bar_pyr.py、h = 0.25 / 0.125 mm)。
+#        100 Hz の R が 1-D の厳密解に 1e-6 (DC への帰着は ∇N が辺の空間に入ることと組み立ての積分が厳密なことの検査)、
+#        h/2 で L の誤差が 3 倍以上・100 kHz の R が 2.5 倍以上よくなる (実測 3.6 / 2.8)。**格子の体積を先に確かめる** : gmsh は
+#        h = 0.0625 mm でピラミッドと四面体が重なる格子を出した (体積 +3.7e-4、位相では検出できない。DC の R が −1.4e-4)
+#   (p3) 非線形の材料のピラミッド (時間領域の ja / bh は四面体だけ) は理由をつけて弾く
+cp "$SRC/box_hexpyrtet.msh" "$SRC/bar_pyr_a.msh" "$SRC/bar_pyr_b.msh" "$WORK/"
+sed -e 's/^mesh = .*/mesh = box_hexpyrtet.msh/' -e 's/^region = 1 2/region = 1 2\nregion = 2 2\nregion = 3 2/' "$SRC/edge_test.ofe" > "$WORK/pyredge.ofe"
+(cd "$WORK" && "$OFE" -n 2 pyredge.ofe > /dev/null 2>&1) || true
+if grep -q "edge element self test passed" "$WORK/ofe.log" && grep -q "45 between different kinds" "$WORK/ofe.log"; then
+	echo "  pyramid edge elements (hex-pyramid-tet box, E self test) : (a)-(g) and the Hiptmair solve pass, 45 faces between kinds -> OK"
+else
+	echo "  pyramid edge elements (E self test) : failed -> NG" >&2; grep "^  ([a-g])\|\*\*\*" "$WORK/ofe.log" | cut -c1-150 >&2; status=1
 fi
+for m in bar_pyr_a bar_pyr_b; do
+	grep -v '^#' "$SRC/bar_eddy.ofe" | awk -v m="$m.msh" '/^mesh/{print "mesh = " m; next} /^frequency/{next} /^voltage/{next} /^awall/{next} /^analysis/{print "analysis = P"; next} {print}' > "$WORK/pyrv.ofe"
+	(cd "$WORK" && "$OFE" -n 2 pyrv.ofe > /dev/null 2>&1) || true
+	compare "$m : mesh volume (no overlapping elements) [m^3]" "$(awk '/^  volume = / { print $3; exit }' "$WORK/ofe.log")" 5e-10 1e-12
+	for f in 1e2 1e5; do
+		grep -v '^#' "$SRC/bar_eddy.ofe" | awk -v m="$m.msh" -v f="$f" '/^mesh/{print "mesh = " m; next} /^frequency/{print "frequency = " f; next} {print}' > "$WORK/pyra.ofe"
+		rm -f "$WORK/rlc.csv"
+		(cd "$WORK" && "$OFE" -n 2 pyra.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || true
+		set -- $(awk -F, '$1 == "Rf" { a = 1; next } a == 1 && $1 == "1" { r = $2; a = 0 } $1 == "Lf" { b = 1; next } b == 1 && $1 == "1" { l = $2; b = 0 } END { printf "%s %s", (r == "") ? "x" : r, (l == "") ? "x" : l }' "$WORK/rlc.csv" 2> /dev/null || echo "x x") $(awk -v f="$f" -f "$SRC/bar_eddy_z.awk")
+		eval "${m}_$f=\$(awk -v r=\"\$1\" -v l=\"\$2\" -v re=\"\$3\" -v le=\"\$4\" 'BEGIN { if (r == \"x\") { print \"1 1\"; exit } a = r / re - 1; b = l / le - 1; if (a < 0) a = -a; if (b < 0) b = -b; printf \"%.3e %.3e\", a, b }')"
+	done
+done
+set -- $bar_pyr_b_1e2
+compare "bar_pyr_b (pyramids), 100 Hz : R == 1-D exact solution (DC limit) [ohm]" "$(awk -v e="$1" 'BEGIN { printf "%.12e", 1.379314362e-04 * (1 + e) }')" 1.379314362e-04 1e-6
+res=$(awk -v a="$bar_pyr_a_1e2" -v b="$bar_pyr_b_1e2" -v c="$bar_pyr_a_1e5" -v d="$bar_pyr_b_1e5" 'BEGIN { split(a, A, " "); split(b, B, " "); split(c, C, " "); split(d, D, " ")
+	ok = (A[2] > 3 * B[2]) && (C[1] > 2.5 * D[1]) && (C[2] > 2.5 * D[2])
+	printf "%s (100 Hz L %.2e -> %.2e, 100 kHz R %.2e -> %.2e, L %.2e -> %.2e)", ok ? "OK" : "NG", A[2], B[2], C[1], D[1], C[2], D[2] }')
+echo "  A on the hex-pyramid-tet bar converges (h -> h/2) : $res"
+case "$res" in NG*) status=1 ;; esac
+grep -v '^#' "$SRC/bar_eddy.ofe" | awk '/^mesh/{print "mesh = bar_pyr_a.msh"; next} /^frequency/{next} /^analysis/{print "bh = 2 100 0.5"; print "transient = 1e-6 4"} {print}' > "$WORK/pyrnl.ofe"
+mesh_reject "pyramids with a bh material in the time domain" pyrnl.ofe
+grep -q "needs tetrahedra for the nonlinear material" "$WORK/ofe.log" || { echo "  *** it was rejected for a different reason than: needs tetrahedra for the nonlinear material" >&2; status=1; }
 # (完全 Lagrange の 27 節点の六面体の E は eddy3d_pr.c の自己検証で解く ([A order 3+] の (h))。serendipity の 20 節点は弾く)
 sed -e 's/^analysis = .*/analysis = E/' -e 's/^material = .*/material = 1.0 1e6/' -e 's/box_hex2.msh/box_hex2s.msh/' \
     "$SRC/box_hex2.ofe" > "$WORK/h2edge.ofe"
@@ -4688,6 +4719,7 @@ for m in box_hex6:sextic box_hex7:septic box_prism6:sextic box_prism7:septic; do
 	h3_c "$g" P
 	if grep -q '^\*\*\*' "$WORK/ofe.log" || ! grep -q "$w field : phi" "$WORK/ofe.log"; then
 		echo "  $g (analysis P) : the $w-field identity failed or did not run -> NG" >&2; status=1
+		grep "field : \|volume\|^\*\*\*" "$WORK/ofe.log" | cut -c1-160 >&2
 	else
 		echo "  $g (analysis P) : linear and $w field identities ($(awk -v w="$w" '$0 ~ w " field : phi" { print $NF }' "$WORK/ofe.log")) -> OK"
 	fi
@@ -5078,10 +5110,16 @@ for m in bar_air_p2 bar_air_ho3c; do
 done
 awk '/^kthermal/{print; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"; print "heatcap = 2 3.4e6"; print "transient = 1 4"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_ja.ofe"
 th_reject "AC heating with a J-A (hysteresis) material" tacx_ja.ofe "does not support ja (hysteresis) materials"
-#     ピラミッドは A が弾く (多項式の Nedelec 基底が無い)
-awk '/^mesh/{print "mesh = box_pyr.msh"; next} /^region/{print "region = 1 2"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_pyr.ofe"
-cp "$SRC/box_pyr.msh" "$WORK/"
-mesh_reject "AC heating on a pyramid mesh" tacx_pyr.ofe
+#     ピラミッドの格子 (bar_pyr_b : 六面体 - ピラミッド - 四面体) : 1 Hz の交流 (波高値 I√2) が DC の熱連成 (I) と一致する。
+#     損失の節点への配り方はピラミッドだけ ∫N_a dV / V (底面 3/16、頂点 1/4)。均等の 1/5 にすると T_max が 3e-5 ずれる (実測)
+cp "$SRC/bar_pyr_b.msh" "$WORK/"
+sed -e 's/^mesh = .*/mesh = bar_pyr_b.msh/' -e 's/^thermal = 7.5/thermal = 0.75/' "$SRC/thermal_tet.ofe" > "$WORK/tpyr_dc.ofe"
+th_run tpyr_dc.ofe
+rdc=$(th_r); tdc=$(th_t)
+awk '/^analysis/{print "frequency = 1"; print "awall = 20"; print "analysis = A"; next} /^thermal/{print "thermal = 1.0606601717798213"; next} {print}' "$WORK/tpyr_dc.ofe" > "$WORK/tpyr_ac.ofe"
+th_run tpyr_ac.ofe
+compare "pyramids : AC at 1 Hz (I sqrt 2 peak) == DC thermal : R [ohm]" "$(th_r)" "$rdc" 1e-8
+compare "pyramids : AC at 1 Hz == DC thermal : T_max [degC]" "$(th_t)" "$tdc" 1e-8
 
 # ---- 交流の発熱 (thermal + analysis = F、断面 2 次元・単位長あたり) ----
 #
