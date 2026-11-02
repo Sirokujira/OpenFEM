@@ -614,17 +614,14 @@ static int TXinv[(PR_RMAX + 1) * (PR_RMAX + 1) * (PR_RMAX + 1)];	// 四面体の
 static int pr_mix_init(int p);
 static int pr_mix_number(FILE *fp_log);
 
-// 積分点 (種別の混在では節点の数・積分点の数を最大に揃えて 0 で詰める : 足りない積分点は重み 0)
+// 積分点 (種別の混在では節点の数を最大に揃えて 0 で詰める。積分点は呼び出し側が要素ごとの elem3d_nip(e) まで回し、
+// 最大の点数 pr_nq() は積分点ごとの配列の幅にだけ使う)
 static int pr_ip(int e, int q, double nv[ELEM_NMAX], double g[ELEM_NMAX][3], double *w)
 {
 	if (!PR.mix) return elem3d_ip(e, q, nv, g, w);
 	for (int a = 0; a < PR.nP; a++) {
 		nv[a] = 0;
 		g[a][0] = g[a][1] = g[a][2] = 0;
-	}
-	if (q >= elem3d_nip(e)) {
-		*w = 0;
-		return 0;
 	}
 	return elem3d_ip(e, q, nv, g, w);
 }
