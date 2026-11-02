@@ -26,7 +26,8 @@ hdf5out.c
   /mesh                構造格子 : x y z / 非構造格子 : points cells
                        material conductor [ncell]
   /field               axis [np]、節点スカラー [np][nnode]、
-                       要素ベクトル [np][ncell][3]
+                       要素ベクトル [np][ncell][3]。過渡解析 (transient) は刻みごとのスナップショットで、
+                       軸は時刻 (属性 axis_name = "time [s]"、ofe_transient.csv の行と 1 対 1)
   /transient           過渡解析 (transient) の時系列 : ofe_transient.csv の列 [nt] (t と各量、単位は属性)
 
 節点・要素の並びは **VTK と同じ (構造格子は x が最内)** にそろえる。
@@ -56,6 +57,22 @@ static int64_t NPack = 0;
 int h5_enabled(void)
 {
 	return 1;
+}
+
+
+// /field の軸の名前 (空なら属性を書かない : 掃引は従来どおり)。過渡解析が刻みごとのスナップショットを書く前に呼ぶ
+static char FieldAxis[64] = "";
+
+void h5_field_axis(const char *name)
+{
+	snprintf(FieldAxis, sizeof(FieldAxis), "%s", name);
+}
+
+
+// 系列のファイルが開いているか (hdf5 = 1 で rank 0)。過渡解析が刻みごとのスナップショットを作るかの判定
+int h5_series_open(void)
+{
+	return (Hfile >= 0);
 }
 
 
@@ -500,6 +517,7 @@ int h5_add_field(double axis)
 		if (Gfield < 0) return 1;
 		attr_str(Gfield, "layout", "[point][node] / [point][cell][3]");
 		attr_str(Gfield, "note", "the node and cell order is the one described in /mesh");
+		if (FieldAxis[0] != '\0') attr_str(Gfield, "axis_name", FieldAxis);
 	}
 
 	int ierr = 0;
@@ -663,6 +681,18 @@ int h5_add_field(double axis)
 
 
 int h5_add_transient(void)
+{
+	return 0;
+}
+
+
+void h5_field_axis(const char *name)
+{
+	(void)name;
+}
+
+
+int h5_series_open(void)
 {
 	return 0;
 }

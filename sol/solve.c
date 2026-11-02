@@ -643,6 +643,13 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 			hmean, bmean, it);
 		if (fcsv) fprintf(fcsv, "%.8e,%.8e,%.8e,%.8e,%.8e,%d\n", t, cur, lam, hmean, bmean, it);
 		fflush(fp_log);
+		// hdf5 = 1 + fieldout = 1 : 刻みごとの場のスナップショット (終了時刻と同じ場、軸は時刻。次の刻みの始めに捨てる)
+		if (FieldOut && h5_series_open()) {
+			if (step == 1) h5_field_axis("time [s]");
+			field_add_node("Az", az);
+			field_add_grad("B", az, 1);
+			ierr |= h5_add_field(t);
+		}
 		memcpy(aold, az, (size_t)n * sizeof(double));
 	}
 
@@ -654,6 +661,7 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 			HaveM = 1;
 		}
 		if (FieldOut) {
+			field_free();		// 最後のスナップショットと同じ場 (二重にしない。スナップショットが無ければ空)
 			field_add_node("Az", az);
 			field_add_grad("B", az, 1);
 		}

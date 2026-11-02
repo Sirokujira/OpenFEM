@@ -7779,6 +7779,50 @@ case "$h5msg" in
 		fi
 	done
 
+	# (g) 過渡解析の場のスナップショット (hdf5 = 1 + fieldout = 1)。熱連成 (T、時刻 0 を含む) と静磁場 (Az) で:
+	#   ・/field/axis が ofe_transient.csv の t の列と同じ数字 (行と 1 対 1)、属性 axis_name = "time [s]"
+	#   ・最後のスナップショットが ofe_field.vtk と同じ数字
+	#   ・途中の刻み k のスナップショットが、t_end = k Δt・k 刻みで止めた別の実行の ofe_field.vtk に 1e-10
+	#     (刻みの場を作り直す誤り・次の刻みの場や電流を混ぜる誤りはここで落ちる。Δt の 1 ulp の違いがあり得るので相対誤差で見る)
+	vtk_node() { awk -v nm="$1" '$1 == "SCALARS" && $2 == nm { f = 1; getline; next } f && /^[A-Z]/ { f = 0 } f && (NF == 1) { print }' "$WORK/ofe_field.vtk"; }
+	for c in th m; do
+		if [ "$c" = th ]; then src=thermal_transient.ofe; flds="T phi_R_port1"; kk=100; tr="transient = 1 100 0.5"; row=100
+		else src=lamination_step.ofe; flds=Az; kk=50; tr="transient = 5e-6 50"; row=49; fi
+		sed 's/^analysis = /hdf5 = 1\nfieldout = 1\nanalysis = /' "$SRC/$src" > "$WORK/h5s_$c.ofe"
+		awk -v tr="$tr" '/^transient/{ print tr; next } {print}' "$SRC/$src" | sed 's/^analysis = /fieldout = 1\nanalysis = /' > "$WORK/h5s_${c}k.ofe"
+		(cd "$WORK" && "$OFE" -n 2 "h5s_${c}k.ofe" > /dev/null) || { echo "  h5s_${c}k : the run failed -> NG" >&2; status=1; }
+		for fld in $flds; do vtk_node "$fld" > "$WORK/h5s_vk_$fld.txt"; done
+		(cd "$WORK" && "$OFE" -n 2 "h5s_$c.ofe" > /dev/null) || { echo "  h5s_$c : the run failed -> NG" >&2; status=1; }
+		# 終了時刻の場を最後のスナップショットに重ねて二重に書かない (VTK の同じ名前の場は 1 つ)
+		res=$(awk '$1 == "SCALARS" { n[$2]++ } END { for (k in n) if (n[k] != 1) bad++; printf "%s", (bad == 0) ? "OK" : "NG" }' "$WORK/ofe_field.vtk")
+		echo "  transient ($c) : each field appears once in ofe_field.vtk : $res"
+		case "$res" in NG*) status=1 ;; esac
+		H5FMT="%.8e"
+		h5v /field/axis > "$WORK/h5s_ax.txt"
+		awk -F, 'NR > 1 { print $1 }' "$WORK/ofe_transient.csv" > "$WORK/h5s_t.txt"
+		same_nums "transient ($c) : /field/axis == the t column of ofe_transient.csv" "$WORK/h5s_ax.txt" "$WORK/h5s_t.txt"
+		if h5dump -a /field/axis_name "$WORK/ofe_series.h5" 2>/dev/null | grep -q '"time \[s\]"'; then
+			echo "  transient ($c) : /field has axis_name = \"time [s]\" : OK"
+		else
+			echo "  transient ($c) : /field has no axis_name = \"time [s]\" -> NG" >&2; status=1
+		fi
+		np=$(wc -l < "$WORK/h5s_t.txt")
+		for fld in $flds; do
+			vtk_node "$fld" > "$WORK/h5s_vl.txt"
+			nn=$(wc -l < "$WORK/h5s_vl.txt")
+			H5FMT="%.9e"
+			h5v "/field/$fld" "$((np - 1)),0" "1,$nn" > "$WORK/h5s_last.txt"
+			same_nums "transient ($c) : last field snapshot $fld == ofe_field.vtk" "$WORK/h5s_last.txt" "$WORK/h5s_vl.txt" "%.9e"
+			h5v "/field/$fld" "$row,0" "1,$nn" > "$WORK/h5s_mid.txt"
+			res=$(awk 'NR == FNR { a[FNR] = $1 + 0; na = FNR; next } { b[FNR] = $1 + 0; nb = FNR }
+				END { if ((na == 0) || (na != nb)) { printf "NG (%d / %d values)", na, nb; exit }
+				      for (i = 1; i <= na; i++) { d = a[i] - b[i]; if (d < 0) d = -d; if (d > m) m = d; x = (b[i] < 0) ? -b[i] : b[i]; if (x > mx) mx = x }
+				      e = (mx > 0) ? m / mx : 1; printf "%s (%d values, %.1e)", (e <= 1e-10) ? "OK" : "NG", na, e }' "$WORK/h5s_mid.txt" "$WORK/h5s_vk_$fld.txt")
+			echo "  transient ($c) : snapshot $fld of step $kk == ofe_field.vtk of a run stopped at step $kk : $res"
+			case "$res" in NG*) status=1 ;; esac
+		done
+	done
+
 	fi
 	;;
 esac

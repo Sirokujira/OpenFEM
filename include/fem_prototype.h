@@ -155,6 +155,8 @@ int  h5_add_hysteresis(int, double, double, double, double, int);
 int  h5_add_field(double);
 int  h5_add_transient(void);
 int  h5_nfield(void);
+void h5_field_axis(const char *);
+int  h5_series_open(void);
 
 // crs.c
 void crs_alloc(crs_t *);

@@ -2573,6 +2573,22 @@ static double th_current(double t, int left)
 //   ∫(発熱) dt = ΔU (蓄熱) + ∫(ヒートシンク + 対流 + 輻射) dt
 // をログに出す。M の行和が ∫ρc N_i dV なので、これは丸めと内側の反復の
 // 打ち切りを除いて厳密に成り立つ (rlc_check.sh で見る)。
+// 過渡解析の刻みごとの場のスナップショット (hdf5 = 1 + fieldout = 1) : 終了時刻と同じ場 (単位電流の φ にその時刻の電流を掛けたもの
+// と温度) を作り直して /field に時刻を軸に追記する
+static int th_snapshot(const double *phi, double cur, const double *tn, double *wk, double t)
+{
+	const int64_t nn = num_node();
+	field_free();
+	if (!th_ac()) {
+		for (int64_t i = 0; i < nn; i++) wk[i] = phi[i] * cur;
+		field_add_node("phi_R_port1", wk);
+		field_add_grad("E_R_port1", wk, 0);
+	}
+	field_add_node("T", tn);
+	return h5_add_field(t);
+}
+
+
 static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 	const double *kcell, double *tcell, double *scell, unsigned char *fix,
 	const unsigned char *fixt, double *phi, double *work, double *diag, double *f,
@@ -2613,6 +2629,9 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		fprintf(fcsv, "t [s],R [ohm],V [V],T_max [degC],T_mean [degC],I [A]\n");
 	}
 
+	// hdf5 = 1 + fieldout = 1 なら csv の各行 (時刻 0 を含む) の場を /field に追記する
+	const int snap = (FieldOut && h5_series_open());
+
 	// 時刻 0 : 一様な初期温度 (ヒートシンクの節点だけその温度)。R(T^0) を作るため
 	// 電気を 1 回解き、θ 法の (1-θ) 側に要る R(T^0) を持っておく
 	double g = 0, r = 0, tmax = 0, ptot = 0, qconv = 0, qrad = 0;
@@ -2643,6 +2662,10 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		fprintf(fp_log, "  %6s %14s %16s %14s %5s %14s\n", "step", "t [s]", "R [ohm]",
 			"T_max [degC]", "iter", "I [A]");
 		fprintf(fp_log, "  %6d %14.6e %16.9e %14.6f %5d %14.6e\n", 0, 0.0, r, tmax, 0, cur);
+		if (snap) {
+			h5_field_axis("time [s]");
+			ierr |= th_snapshot(phi, cur, tn, work, 0.0);
+		}
 	}
 
 	double ejoule = 0, esink = 0, econv = 0, erad = 0;
@@ -2755,6 +2778,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		fprintf(fp_log, "  %6d %14.6e %16.9e %14.6f %5d %14.6e\n", step, step * dts, r, tmax,
 			it, cur);
 		fflush(fp_log);
+		if (snap) ierr |= th_snapshot(phi, cur, tn, work, step * dts);
 	}
 
 	if (!ierr) {
@@ -2779,6 +2803,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		*gport = g;
 
 		if (FieldOut) {
+			if (snap) field_free();		// 最後のスナップショットと同じ場を作り直す (二重にしない)
 			if (!th_ac()) {
 				for (int i = 0; i < n; i++) phi[i] *= cur;	// 単位電流の φ を終了時刻の電流に
 				field_add_node("phi_R_port1", phi);
