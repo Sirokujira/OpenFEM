@@ -221,7 +221,6 @@ static int setup_unstruct(void)
 		if (nl) why = "linear materials with thermal or analysis E (bh / ja : A only, ja with transient)";
 		else if ((GaugeTree || Direct) && (TransientOn || ThermalOn || (Analysis & ANALYSIS_E)))
 			why = "gauge = 0 and the iterative solver in the time domain / with thermal";
-		else if (Hdf5Out) why = "no hdf5 series";
 		if (why != NULL) {
 			printf("*** analysis A / E on a second-order (10-node) mesh supports %s only\n", why);
 			return 1;
@@ -241,7 +240,6 @@ static int setup_unstruct(void)
 		const char *why = NULL;
 		if (nl) why = "linear materials with thermal or analysis E (bh : A only, ja with transient)";
 		else if (GaugeTree || Direct) why = "gauge = 0 and the iterative solver";
-		else if (Hdf5Out) why = "no hdf5 series";
 		if (why != NULL) {
 			printf("*** analysis A / E on a mesh of order 3 and up (order-%d Nedelec) supports %s only\n", TetOrder, why);
 			return 1;

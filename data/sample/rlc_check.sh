@@ -6690,6 +6690,36 @@ case "$h5msg" in
 	echo "  mixed mesh: the cells really have different node counts : $res"
 	case "$res" in NG*) status=1 ;; esac
 
+	# (e) 高次の辺要素の A (2 次 eddy3d_p2.c / 3 次 eddy3d_pr.c) の掃引と場。/sweep の Rf・Lf が ofe_sweep.csv と、
+	# 最後のスナップショットの J_A_re が ofe_field.vtk (= 最後の点) と一致し、点ごとに中身が違う (表皮効果)
+	cp "$SRC/bar_tet2c.msh" "$SRC/bar_ho3c.msh" "$WORK/"
+	for m in bar_tet2c bar_ho3c; do
+		grep -v '^#' "$SRC/bar_eddy.ofe" | awk -v m="$m.msh" '/^mesh/{print "mesh = " m; next} /^frequency/{print "frequencysweep = 1e2 1e4 1e5"; next}
+			/^analysis/{print "hdf5 = 1"; print "fieldout = 1"} {print}' > "$WORK/h5a_$m.ofe"
+		(cd "$WORK" && "$OFE" -n 2 "h5a_$m.ofe" > /dev/null)
+		H5FMT="%.8e"
+		q=2
+		for v in Rf Lf; do
+			h5v "/sweep/$v" > "$WORK/h5m.txt"
+			awk -F, -v q="$q" 'NR > 1 { print $q }' "$WORK/ofe_sweep.csv" > "$WORK/csvm.txt"
+			same_nums "$m (A, high-order edge elements) : sweep $v == ofe_sweep.csv" "$WORK/h5m.txt" "$WORK/csvm.txt"
+			q=$((q + 1))
+		done
+		awk '/^VECTORS J_A_re/ { f = 1; next } f && /^[A-Z]/ { f = 0 } f && (NF == 3) { print $1; print $2; print $3 }' "$WORK/ofe_field.vtk" > "$WORK/vtkja.txt"
+		nc=$(($(wc -l < "$WORK/vtkja.txt") / 3))
+		H5FMT="%.9e"
+		h5v /field/J_A_re "2,0,0" "1,$nc,3" > "$WORK/h5ja2.txt"
+		same_nums "$m (A) : last field snapshot J_A_re == ofe_field.vtk" "$WORK/h5ja2.txt" "$WORK/vtkja.txt" "%.9e"
+		h5v /field/J_A_re "0,0,0" "1,$nc,3" > "$WORK/h5ja0.txt"
+		res=$(paste "$WORK/h5ja0.txt" "$WORK/h5ja2.txt" | awk '
+			{ d = $1 - $2; if (d < 0) d = -d; if (d > m) m = d
+			  a = ($1 < 0) ? -$1 : $1; if (a > x) x = a }
+			END { if (x <= 0) { printf "NG (the field is identically zero)"; exit }
+			      printf "%s (max|d| / max|v| = %.2f)", ((m > 0.1 * x) ? "OK" : "NG"), m / x }')
+		echo "  $m (A) : the snapshots differ from point to point (skin effect) : $res"
+		case "$res" in NG*) status=1 ;; esac
+	done
+
 	fi
 	;;
 esac
