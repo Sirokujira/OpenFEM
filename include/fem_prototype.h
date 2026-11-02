@@ -76,6 +76,7 @@ void assemble_nu_tri6(crs_t *, const double *);
 int pr_p1_nonlinear(void);
 void assemble_mass_tri(crs_t *);
 void assemble_mass_tri_sig(crs_t *, const double *);
+void assemble_mass_tri_elem(crs_t *, const double *);
 int eddy2d_heat_solve(FILE *, const double *, double, double *, double *, double *, int);
 double tri6_area(int);
 int tri_grad_center(int, double [TRI_NMAX][2], int *);

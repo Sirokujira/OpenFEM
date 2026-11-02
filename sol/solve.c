@@ -368,11 +368,15 @@ static int mt_pcg(const crs_t *A, const double *mv, const int *comp, const doubl
 }
 
 
+#define MT_CYCLE 4		// mag_transient : 残差の 2 周期の往復とみなす連続の回数
+
 static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char *fix,
 	double *nucell, double *az)
 {
 	const int n = (int)num_node();
-	const int64_t ncell = (int64_t)Nx * Ny * Nz;
+	// 断面 2 次元の三角形の格子 (1 次) : 要素は三角形、J-A の状態は要素に 1 つ (assemble_ja_tri)
+	const int tri2d = (MeshMode && (MeshDim == 2));
+	const int64_t ncell = elem_count();
 	const double dt = TransientTime / TransientSteps;
 	const double scale = 1 / TlineLength;
 	int ierr = 0;
@@ -381,30 +385,31 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 	double *sig = (double *)malloc((size_t)ncell * sizeof(double));
 	int nsigc = 0;
 	for (int64_t c = 0; c < ncell; c++) {
-		const double s = Material[CellMaterial[c]].sigma;
-		sig[c] = (((CellConductor[c] < 0) && (s > 0)) ? s : 0);
+		elem_t el;
+		elem_get(c, &el);
+		const double s = Material[el.mat].sigma;
+		sig[c] = (((el.cond < 0) && (s > 0)) ? s : 0);
 		if (sig[c] > 0) nsigc++;
 	}
 	crs_t Ms;
 	crs_alloc(&Ms);
 	crs_distribute(&Ms);		// mpisolve = 2 : 剛性と同じ分け方 (A += Ms/Δt を値の配列で足す)
-	assemble_mass_cell(&Ms, sig);
+	if (tri2d) assemble_mass_tri_elem(&Ms, sig);
+	else       assemble_mass_cell(&Ms, sig);
 
 	// 孤立した導電領域 (節点を共有するセルどうしを 1 つにまとめる)
 	int *par = (int *)malloc((size_t)n * sizeof(int));
 	int *comp = (int *)malloc((size_t)n * sizeof(int));
 	for (int i = 0; i < n; i++) par[i] = i;
-	for (int i = 0; i < Nx; i++) {
-	for (int j = 0; j < Ny; j++) {
-	for (int k = 0; k < Nz; k++) {
-		if (sig[((int64_t)i * Ny + j) * Nz + k] <= 0) continue;
-		const int a0 = mt_find(par, (int)node_index(i, j, k));
-		for (int l = 1; l < 8; l++) {
-			const int b = mt_find(par, (int)node_index(i + ((l >> 2) & 1), j + ((l >> 1) & 1), k + (l & 1)));
+	for (int64_t c = 0; c < ncell; c++) {
+		if (sig[c] <= 0) continue;
+		elem_t el;
+		elem_get(c, &el);
+		const int a0 = mt_find(par, (int)el.nd[0]);
+		for (int l = 1; l < el.nen; l++) {
+			const int b = mt_find(par, (int)el.nd[l]);
 			if (b != mt_find(par, a0)) par[b] = mt_find(par, a0);
 		}
-	}
-	}
 	}
 	double *mv = (double *)malloc((size_t)n * sizeof(double));
 	double *one = (double *)malloc((size_t)n * sizeof(double));
@@ -472,8 +477,8 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 		cur = Curr * mt_wave(t);
 		const double fac = cur / Curr;
 		field_free();
-		int it, conv = 0, nback = 0;
-		double rnorm = 0, rbest = 0, lrel = NlRelax;
+		int it, conv = 0, nback = 0, ncycle = 0;
+		double rnorm = 0, rbest = 0, lrel = NlRelax, rprev1 = 0, rprev2 = 0;
 		for (it = 1; it <= NlMaxiter; it++) {
 			assemble_ja(az, res, nucell);
 			for (int i = 0; i < n; i++) da[i] = az[i] - aold[i];
@@ -495,19 +500,32 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 			// この刻みの残りは行列の傾きを両方の枝の大きい方にする (単調な H(B) に対して
 			// 縮小写像になる)。それでも越えるときは更新を半分にする。固定点の反復は
 			// 単調に減るとは限らない (実測で途中 4 倍に増えてから収束する) ので、
-			// 1 回増えただけでは何もしない (σ = 0 の電流掃引との一致を崩さないため)
+			// 1 回増えただけでは何もしない (σ = 0 の電流掃引との一致を崩さないため)。
+			// 2 周期の往復の検出 : 最良より大きい残差が 1 つ前の前と 5% 以内で MT_CYCLE 回続いたら (r_k ≈ r_{k−2})、
+			// 同じ手当てをする。三角形の格子では反転の直後の固定点が最良の 10 倍の内側で 2 値を往復して終わらなかった
+			// (実測 0.12 / 0.41 ...、最良 0.05)。単に「最良を更新できない回数」で見ると、構造格子の既存のケースが
+			// 18 回更新できないまま収束するので出力が変わり、σ = 0 の J-A は収束しなくなった (実測)
+			if ((it >= 3) && (rnorm > rbest) && (fabs(rnorm - rprev2) <= (0.05 * rnorm))) ncycle++;
+			else ncycle = 0;
+			rprev2 = rprev1;
+			rprev1 = rnorm;
 			if ((it == 1) || (rnorm < rbest)) {
 				rbest = rnorm;
 				memcpy(abest, az, (size_t)n * sizeof(double));
 			}
-			else if ((rnorm > (10 * rbest)) && (nback < 30)) {
+			else if (((rnorm > (10 * rbest)) || (ncycle >= MT_CYCLE)) && (nback < 30)) {
 				memcpy(az, abest, (size_t)n * sizeof(double));
 				if (!JaSafeSlope) JaSafeSlope = 1;
 				else lrel /= 2;
 				nback++;
+				ncycle = 0;
 				continue;
 			}
-			if (JaNu6 != NULL) assemble_nu6(A, JaNu6);
+			if (tri2d) {
+				if (JaNu6 != NULL) assemble_nu_tri6(A, JaNu6);
+				else assemble_nu_tri(A, nucell);
+			}
+			else if (JaNu6 != NULL) assemble_nu6(A, JaNu6);
 			else assemble_nu(A, nucell);
 			int li;
 			if (nsigc > 0) {
@@ -559,7 +577,30 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 		// 平均の H, B : ヒステリシス材料は J-A の状態 (符号つき)、それ以外の導電領域は
 		// セル中心の |B|
 		double bsum = 0, hsum = 0, vsum = 0;
-		for (int i = 0; i < Nx; i++) {
+		for (int e = 0; tri2d && (e < NTri); e++) {
+			// 三角形 : J-A の状態は要素に 1 つ (枠の先頭)、導電領域の |B| は要素内一定
+			const material_t *mt = &Material[TriMat[e]];
+			const double v = TriArea[e];
+			if (mt->ja.on && (JaB != NULL)) {
+				bsum += JaB[(int64_t)e * 8] * v;
+				hsum += JaH[(int64_t)e * 8] * v;
+				vsum += v;
+			}
+			else if (sig[e] > 0) {
+				double g[3][2], area;
+				if (tri_grad(&Tri[e * 3], g, &area)) continue;
+				double gr[2] = {0, 0};
+				for (int l = 0; l < 3; l++) {
+					gr[0] += az[Tri[(e * 3) + l]] * g[l][0];
+					gr[1] += az[Tri[(e * 3) + l]] * g[l][1];
+				}
+				const double bm = sqrt((gr[0] * gr[0]) + (gr[1] * gr[1]));
+				bsum += bm * v;
+				hsum += bm * v / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
+				vsum += v;
+			}
+		}
+		for (int i = 0; (i < Nx) && !tri2d; i++) {
 		for (int j = 0; j < Ny; j++) {
 		for (int k = 0; k < Nz; k++) {
 			const int64_t c = ((int64_t)i * Ny + j) * Nz + k;

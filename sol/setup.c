@@ -121,6 +121,11 @@ static int setup_tri2d(void)
 		printf("%s\n", "*** hysteresis (ja) materials on a 2-D mesh need first-order (3-node) triangles");
 		return 1;
 	}
+	// 静磁場の過渡解析 (M + transient) も 1 次の三角形だけ (要素内一定の B で組む assemble_ja_tri を線形の材料にも使う)
+	if (TransientOn && (Analysis == ANALYSIS_M) && (TetOrder >= 2)) {
+		printf("%s\n", "*** transient with analysis M on a 2-D mesh needs first-order (3-node) triangles");
+		return 1;
+	}
 	{
 		const double *c = ((Tline == 'X') ? Xp : (Tline == 'Y') ? Yp : Zp);
 		double lo = c[0], hi = c[0], span = 0;

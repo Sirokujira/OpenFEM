@@ -1940,12 +1940,8 @@ int input_data(FILE *fp)
 		}
 	}
 	else if (TransientOn && (Analysis == ANALYSIS_M)) {
-		// 静磁場の過渡解析 (渦電流 σ∂A/∂t + ヒステリシス)。断面 2 次元の構造格子・
-		// 単一ポート・後退 Euler に限る (J-A の履歴は刻みの終わりの状態で確定させる)
-		if (MeshMode) {
-			printf("%s\n", "*** transient with analysis M is implemented for the structured grid only");
-			return 1;
-		}
+		// 静磁場の過渡解析 (渦電流 σ∂A/∂t + ヒステリシス)。断面 2 次元の構造格子と 1 次の三角形の格子
+		// (次数は格子を読んでから setup_tri2d で見る)・単一ポート・後退 Euler に限る (J-A の履歴は刻みの終わりの状態で確定させる)
 		if (NPort != 1) {
 			printf("%s\n", "*** transient with analysis M needs exactly one port");
 			return 1;

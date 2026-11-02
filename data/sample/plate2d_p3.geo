@@ -9,7 +9,13 @@
 //   gmsh plate2d_p3.geo -2 -order 2 -format msh22 -o plate2d_p3o2.msh
 // (gmsh は変換のたびに節点を振り直すので、2.2 と 4.1 の一致を見る対は同じ変換で出す)
 W = 1e-3; T = 0.05e-3; D = 0.2e-3;
-NW = 10; NG = 3;
+If (!Exists(NW))
+  NW = 10;	// 幅の分割
+EndIf
+If (!Exists(NG))
+  NG = 3;	// 間隙の分割 (静磁場の過渡解析の積層板 lam2d.msh は NW 4 / NG 40 / NT 2 の 1 次 :
+		//   gmsh plate2d_p3.geo -2 -setnumber NW 4 -setnumber NG 40 -setnumber NT 2 -setnumber GB 0.5 -format msh22 -o lam2d.msh)
+EndIf
 If (!Exists(NT))
   NT = 4;	// 導体内の分割 (gmsh -setnumber NT n で変える : 収束次数の検査用)
 EndIf
@@ -29,7 +35,11 @@ For k In {0:2}
 EndFor
 // 導体の中は両面に向けて細かく (表皮効果)、間隙は一様
 Transfinite Curve{20, 30, 22, 32} = NT + 1 Using Bump 0.5;
-Transfinite Curve{21, 31} = NG + 1;
+If (!Exists(GB))
+  Transfinite Curve{21, 31} = NG + 1;
+Else
+  Transfinite Curve{21, 31} = NG + 1 Using Bump GB;	// 間隙も両面に向けて細かく (lam2d.msh : 面積の揃わない三角形)
+EndIf
 For k In {0:2}
   Curve Loop(40 + k) = {10 + k, 30 + k, -(11 + k), -(20 + k)};
   Plane Surface(50 + k) = {40 + k};

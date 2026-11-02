@@ -7693,14 +7693,30 @@ void assemble_mass_tri(crs_t *A)
 
 // 要素ごとの σ (sig[NTri]、NULL なら導体ごとの CondSigma) で組む。熱連成 (thermal + F) で
 // σ(T) を要素ごとに渡すのに使う。NULL のときの演算は従来と同じ
+static void mass_tri_add(crs_t *A, const double *sig, int all);
+
 void assemble_mass_tri_sig(crs_t *A, const double *sig)
+{
+	mass_tri_add(A, sig, 0);
+}
+
+
+// 静磁場の過渡解析 (M + transient) の渦電流の質量 : 要素ごとの σ (sig[NTri]) を導体でない要素にも掛ける
+// (構造格子の assemble_mass_cell と同じ扱い。導体の要素は呼び出し側で 0 にする)
+void assemble_mass_tri_elem(crs_t *A, const double *sig)
+{
+	mass_tri_add(A, sig, 1);
+}
+
+
+static void mass_tri_add(crs_t *A, const double *sig, int all)
 {
 	crs_zero(A);
 
 	for (int e = 0; e < NTri; e++) {
 		const int id = TriCond[e];
-		if (id < 0) continue;
-		const double sg = (sig ? sig[e] : CondSigma[id]);
+		if ((id < 0) && !all) continue;
+		const double sg = ((sig || all) ? sig[e] : CondSigma[id]);
 		if (sg <= 0) continue;
 
 		int32_t nd[TRI_NMAX];
