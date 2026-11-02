@@ -522,7 +522,8 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 				continue;
 			}
 			if (tri2d) {
-				if (JaNu6 != NULL) assemble_nu_tri6(A, JaNu6);
+				if (tri_ja_nip() > 1) assemble_ja_tri_matrix(A);		// 高次 : 積分点ごとのテンソル
+				else if (JaNu6 != NULL) assemble_nu_tri6(A, JaNu6);
 				else assemble_nu_tri(A, nucell);
 			}
 			else if (JaNu6 != NULL) assemble_nu6(A, JaNu6);
@@ -553,7 +554,7 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 		}
 
 		// J-A の状態を確定させる (静磁場の電流掃引と同じ)
-		ja_commit(ncell);
+		ja_commit(tri2d ? ((int64_t)NTri * (tri_ja_stride() / 8)) : ncell);
 
 		// エネルギー : 入力 b・ΔA、磁気の仕事 ΔA・r_ja、渦電流損 ΔA・M_eff ΔA / Δt
 		double din = 0, dmag = 0, ded = 0, lb = 0;
@@ -578,21 +579,25 @@ static int mag_transient(FILE *fp_log, crs_t *A, const double *b1, unsigned char
 		// セル中心の |B|
 		double bsum = 0, hsum = 0, vsum = 0;
 		for (int e = 0; tri2d && (e < NTri); e++) {
-			// 三角形 : J-A の状態は要素に 1 つ (枠の先頭)、導電領域の |B| は要素内一定
+			// 三角形 : J-A の状態と導電領域の |B| は積分点ごと (1 次は重心の 1 点で厳密)
 			const material_t *mt = &Material[TriMat[e]];
-			const double v = TriArea[e];
-			if (mt->ja.on && (JaB != NULL)) {
-				bsum += JaB[(int64_t)e * 8] * v;
-				hsum += JaH[(int64_t)e * 8] * v;
-				vsum += v;
-			}
-			else if (sig[e] > 0) {
-				double g[3][2], area;
-				if (tri_grad(&Tri[e * 3], g, &area)) continue;
+			if (!(mt->ja.on && (JaB != NULL)) && !(sig[e] > 0)) continue;
+			for (int qp = 0; qp < tri_ja_nip(); qp++) {
+				int32_t tnd[TRI_NMAX];
+				double tgn[TRI_NMAX][2], v, tpos[2];
+				const int nen = tri_ja_ip(e, qp, tnd, tgn, &v, tpos);
+				if (nen == 0) break;
+				if (mt->ja.on && (JaB != NULL)) {
+					const int64_t id = ((int64_t)e * tri_ja_stride()) + qp;
+					bsum += JaB[id] * v;
+					hsum += JaH[id] * v;
+					vsum += v;
+					continue;
+				}
 				double gr[2] = {0, 0};
-				for (int l = 0; l < 3; l++) {
-					gr[0] += az[Tri[(e * 3) + l]] * g[l][0];
-					gr[1] += az[Tri[(e * 3) + l]] * g[l][1];
+				for (int l = 0; l < nen; l++) {
+					gr[0] += az[tnd[l]] * tgn[l][0];
+					gr[1] += az[tnd[l]] * tgn[l][1];
 				}
 				const double bm = sqrt((gr[0] * gr[0]) + (gr[1] * gr[1]));
 				bsum += bm * v;
@@ -810,24 +815,26 @@ static int solve_magnetostatic(FILE *fp_log)
 			double win = 0, wmag = 0, iprev[2] = {0, 0}, lprev[2] = {0, 0};
 			int64_t probe = -1;
 			if (JaProbeOn && tri2d) {
-				// 1 次の三角形 : 要素の重心 (状態は要素に 1 つ、枠の先頭)
+				// 三角形 : 最も近い積分点 (1 次は要素の重心、状態は要素に 1 つ)。面に垂直な軸 (tline) の座標は見ない
 				double dbest = 1e300;
+				int pa, qa;
+				tri_axes(&pa, &qa);
 				for (int e = 0; e < NTri; e++) {
 					if (!Material[TriMat[e]].ja.on) continue;
-					double dd = 0;
-					const double *cc[3] = {Xp, Yp, Zp};
-					for (int c = 0; c < 3; c++) {
-						const double pc = (cc[c][Tri[e * 3]] + cc[c][Tri[(e * 3) + 1]] + cc[c][Tri[(e * 3) + 2]]) / 3;
-						dd += (pc - JaProbe[c]) * (pc - JaProbe[c]);
+					for (int qp = 0; qp < tri_ja_nip(); qp++) {
+						int32_t tnd[TRI_NMAX];
+						double tgn[TRI_NMAX][2], w, tpos[2];
+						if (tri_ja_ip(e, qp, tnd, tgn, &w, tpos) == 0) break;
+						const double dd = ((tpos[0] - JaProbe[pa]) * (tpos[0] - JaProbe[pa])) + ((tpos[1] - JaProbe[qa]) * (tpos[1] - JaProbe[qa]));
+						if (dd < dbest) { dbest = dd; probe = ((int64_t)e * tri_ja_stride()) + qp; }
 					}
-					if (dd < dbest) { dbest = dd; probe = (int64_t)e * 8; }
 				}
 				if (probe < 0) {
 					fprintf(fp_log, "*** warning : japrobe : no hysteretic cell, the probe is ignored\n");
 				}
 				else {
 					fprintf(fp_log, "  probe : triangle %lld (distance %.3e [m]); columns : step, %s\n",
-						(long long)(probe / 8) + 1, sqrt(dbest), (JaVector ? "H_p H_q [A/m], B_p B_q [T] (in-plane, p, q follow tline)"
+						(long long)(probe / tri_ja_stride()) + 1, sqrt(dbest), (JaVector ? "H_p H_q [A/m], B_p B_q [T] (in-plane, p, q follow tline)"
 						                                           : "H [A/m], B [T] (signed along the first direction)"));
 				}
 			}
@@ -885,7 +892,8 @@ static int solve_magnetostatic(FILE *fp_log)
 						break;
 					}
 					if (tri2d) {
-						if (JaNu6 != NULL) assemble_nu_tri6(&A, JaNu6);
+						if (tri_ja_nip() > 1) assemble_ja_tri_matrix(&A);		// 高次 : 積分点ごとのテンソル
+						else if (JaNu6 != NULL) assemble_nu_tri6(&A, JaNu6);
 						else assemble_nu_tri(&A, nucell);
 					}
 					else if (JaNu6 != NULL) assemble_nu6(&A, JaNu6);
@@ -908,15 +916,19 @@ static int solve_magnetostatic(FILE *fp_log)
 				// 磁気の仕事 ∫ H・ΔB (台形則、確定前の状態と比べる)。ベクトル J-A は面内 2 成分
 				for (int e = 0; tri2d && (e < NTri); e++) {
 					if (!Material[TriMat[e]].ja.on) continue;
-					const double w = TriArea[e];
-					const int64_t id = (int64_t)e * 8;
-					if (JaVector) {
-						for (int q = 0; q < 2; q++) {
-							wmag += w * scale * (JaVH[(id * 2) + q] + JaVHn[(id * 2) + q]) / 2 * (JaVBn[(id * 2) + q] - JaVB[(id * 2) + q]);
+					for (int qp = 0; qp < tri_ja_nip(); qp++) {
+						int32_t tnd[TRI_NMAX];
+						double tgn[TRI_NMAX][2], w, tpos[2];
+						if (tri_ja_ip(e, qp, tnd, tgn, &w, tpos) == 0) break;
+						const int64_t id = ((int64_t)e * tri_ja_stride()) + qp;
+						if (JaVector) {
+							for (int q = 0; q < 2; q++) {
+								wmag += w * scale * (JaVH[(id * 2) + q] + JaVHn[(id * 2) + q]) / 2 * (JaVBn[(id * 2) + q] - JaVB[(id * 2) + q]);
+							}
 						}
-					}
-					else {
-						wmag += w * scale * (JaH[id] + JaHn[id]) / 2 * (JaBn[id] - JaB[id]);
+						else {
+							wmag += w * scale * (JaH[id] + JaHn[id]) / 2 * (JaBn[id] - JaB[id]);
+						}
 					}
 				}
 				for (int i = 0; (i < Nx) && !tri2d; i++) {
@@ -941,7 +953,7 @@ static int solve_magnetostatic(FILE *fp_log)
 				}
 				}
 				// 状態を確定させる (方向は最初に磁化したときだけ決める)
-				ja_commit(ncell);
+				ja_commit(tri2d ? ((int64_t)NTri * (tri_ja_stride() / 8)) : ncell);
 				// 端子の仕事 Σ_k Ī_k ΔΛ_k (台形則)。Λ_k = b_k・A / I_ref (単位長あたり)
 				for (int pp = 0; pp < np; pp++) {
 					const double ik = ((pp == 0) ? cur : Sweep2[is]);
@@ -966,10 +978,15 @@ static int solve_magnetostatic(FILE *fp_log)
 				double bsum = 0, hsum = 0, vsum = 0;
 				for (int e = 0; tri2d && (e < NTri); e++) {
 					if (!Material[TriMat[e]].ja.on) continue;
-					const int64_t id = (int64_t)e * 8;
-					bsum += JaB[id] * TriArea[e];
-					hsum += JaH[id] * TriArea[e];
-					vsum += TriArea[e];
+					for (int qp = 0; qp < tri_ja_nip(); qp++) {
+						int32_t tnd[TRI_NMAX];
+						double tgn[TRI_NMAX][2], w, tpos[2];
+						if (tri_ja_ip(e, qp, tnd, tgn, &w, tpos) == 0) break;
+						const int64_t id = ((int64_t)e * tri_ja_stride()) + qp;
+						bsum += JaB[id] * w;
+						hsum += JaH[id] * w;
+						vsum += w;
+					}
 				}
 				for (int i = 0; (i < Nx) && !tri2d; i++) {
 				for (int j = 0; j < Ny; j++) {

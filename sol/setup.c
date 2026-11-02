@@ -110,21 +110,11 @@ static int setup_tri2d(void)
 		printf("%s\n", "*** a 2-D (cross-section) mesh needs the tline key");
 		return 1;
 	}
-	// ヒステリシス (J-A) は 1 次の三角形で解く (B が要素内一定なので状態は要素に 1 つ、assemble_ja_tri)。高次の三角形は
-	// 積分点ごとの状態の枠が足りない (9 点以上) ので弾く。B-H 曲線は M (Newton、積分点ごとの ν、assemble_newton_tri) も
-	// F (実効磁気抵抗率法、要素ごとの ν) も三角形の 1 次 / 高次で解く
+	// ヒステリシス (J-A) と静磁場の過渡解析は 1 次 / 高次の三角形で解く (状態は積分点ごと、assemble_ja_tri)。
+	// B-H 曲線は M (Newton、積分点ごとの ν、assemble_newton_tri) も F (実効磁気抵抗率法、要素ごとの ν) も三角形の 1 次 / 高次で解く
 	int hysteresis = 0;
 	for (int m = 0; m < NMaterial; m++) {
 		if (Material[m].ja.on) hysteresis = 1;
-	}
-	if (hysteresis && (TetOrder >= 2)) {
-		printf("%s\n", "*** hysteresis (ja) materials on a 2-D mesh need first-order (3-node) triangles");
-		return 1;
-	}
-	// 静磁場の過渡解析 (M + transient) も 1 次の三角形だけ (要素内一定の B で組む assemble_ja_tri を線形の材料にも使う)
-	if (TransientOn && (Analysis == ANALYSIS_M) && (TetOrder >= 2)) {
-		printf("%s\n", "*** transient with analysis M on a 2-D mesh needs first-order (3-node) triangles");
-		return 1;
 	}
 	{
 		const double *c = ((Tline == 'X') ? Xp : (Tline == 'Y') ? Yp : Zp);
@@ -204,8 +194,9 @@ static int setup_tri2d(void)
 	TlineLength = 1;
 	if (LineLength <= 0) LineLength = 1;
 
-	// J-A の状態 (1 次の三角形は要素に 1 つ。枠は構造格子と同じ 8 個で先頭だけを使う)
-	ja_alloc(hysteresis, NTri);
+	// J-A の状態 (1 次の三角形は要素に 1 つで枠は構造格子と同じ 8 個の先頭だけを使う。高次は積分点ごとで、三角形あたり
+	// tri_ja_stride() 個 = 8 個の枠 x tri_ja_stride() / 8)
+	ja_alloc(hysteresis, (int64_t)NTri * (tri_ja_stride() / 8));
 
 	alloc_matrices();
 

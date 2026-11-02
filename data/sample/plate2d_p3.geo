@@ -14,7 +14,9 @@ If (!Exists(NW))
 EndIf
 If (!Exists(NG))
   NG = 3;	// 間隙の分割 (静磁場の過渡解析の積層板 lam2d.msh は NW 4 / NG 40 / NT 2 の 1 次 :
-		//   gmsh plate2d_p3.geo -2 -setnumber NW 4 -setnumber NG 40 -setnumber NT 2 -setnumber GB 0.5 -format msh22 -o lam2d.msh)
+		//   gmsh plate2d_p3.geo -2 -setnumber NW 4 -setnumber NG 40 -setnumber NT 2 -setnumber GB 0.5 -format msh22 -o lam2d.msh。
+		//   2 次の lam2d_p2.msh は NG 10 -order 2、導体の J-A の plate2d_nt8 / _p2 / _p3.msh は NT 8 -order 1 / 2 / 3 で、
+		//   どちらも p3raw.msh と同じく gmsh で一度切ってから -0 で 2.2 に書き直す)
 EndIf
 If (!Exists(NT))
   NT = 4;	// 導体内の分割 (gmsh -setnumber NT n で変える : 収束次数の検査用)

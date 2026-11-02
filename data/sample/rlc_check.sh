@@ -5751,8 +5751,9 @@ th_reject "transient M with a bh curve" mtx_bh.ofe "linear and Jiles-Atherton ma
 #       固定点の反復回数も一致 (ベクトルの行列の pq 成分は B が軸に沿わないときにしか効かず、行列の誤りは答えを変えない)
 #   (f) 反転の直後に固定点が最良の 10 倍の内側で 2 値を往復する (r_k ≈ r_{k−2}) と、2 周期の往復とみなして傾きを
 #       安全側にする (三角形の (c) で実測。検出しないと 31 刻み目で収束しない)。構造格子の出力は変わらない
-#   (g) 2 次の三角形は弾く (理由まで見る)
-echo "[transient M 2-D] eddy currents + hysteresis in the time domain on first-order triangles"
+#   (g) 2 次の三角形 (状態と行列のテンソルは積分点ごと) : 積層板の Richardson が 1e-5 (1 次の 40 分割では届かない)、ベクトル J-A +
+#       渦電流が構造格子に 1e-5 T、σ = 0 の J-A (導体を J-A にした 2 次の格子) が電流掃引と全桁一致
+echo "[transient M 2-D] eddy currents + hysteresis in the time domain on triangles"
 cp "$SRC/lam2d.msh" "$SRC/plate2d.msh" "$SRC/plate2d_p2.msh" "$SRC/plate2d_dc.ofe" "$SRC/plate_line_ja_eddy.ofe" "$WORK/"
 mt2_lam() {	# mt2_lam <刻み数> <出力>
 	printf 'OpenFEM 1 0\ntitle = lamination step on triangles\nmesh = lam2d.msh\nmaterial = 1.0 1e6\nmur = 2 1000\nmaterial = 1.0 5e6\nregion = 1 2\nregion = 10 3\nregion = 11 3\nelectrode = 10 0\nelectrode = 11 1\nconductorsigma = 0 5.8e7\nconductorsigma = 1 5.8e7\nanalysis = M\ntline = X\ncurrent = 1.0\ntransient = 1e-5 %s\nnlsolver = 50 1e-10 1.0\nsolver = 50000 5000 1e-13\nend\n' "$1" > "$WORK/$2"
@@ -5826,9 +5827,36 @@ compare "triangles == structured : eddy loss [J/m]" "$l1" "$lst" 1e-4
 mt2_cmp "triangles : vector J-A == scalar : B_mean(t)" mt2_jev mt2_je1 1e-6
 mt2_cmp "triangles rotated 30 degrees (vector J-A) == unrotated : B_mean(t) and iterations" mt2_jevr mt2_jev 1e-9 it
 compare "triangles rotated 30 degrees (vector J-A) == unrotated : eddy loss [J/m]" "$lvr" "$lv" 1e-9
-# (g) 弾くべき入力
-sed 's/^mesh = .*/mesh = plate2d_p2.msh/' "$WORK/mt2_l100.ofe" > "$WORK/mt2_p2.ofe"
-th_reject "transient M on second-order triangles" mt2_p2.ofe "needs first-order (3-node) triangles"
+# (g) 2 次の三角形 (lam2d_p2.msh : 同じ形で間隙を 10 分割の 2 次)。状態と行列のテンソルは積分点ごと
+cp "$SRC/lam2d_p2.msh" "$SRC/plate2d_nt8_p2.msh" "$WORK/"
+for st in 100 200; do sed 's/^mesh = .*/mesh = lam2d_p2.msh/' "$WORK/mt2_l$st.ofe" > "$WORK/mt2_q$st.ofe"; done
+th_run mt2_q100.ofe; q100=$(mt_b)
+mt_energy "order 2, lamination, 100 steps" 1e-9
+th_run mt2_q200.ofe; q200=$(mt_b)
+#     Richardson の残りは 1 次 (間隙 40 分割) の +4.4e-5 に対し 2 次 (10 分割) は 1.9e-6 なので 1e-5 で 1 次と区別する
+compare "order 2, lamination step : B_mean, Richardson 2 B(200) - B(100) vs Fourier series [T]" \
+	"$(awk -v a="$q100" -v b="$q200" 'BEGIN { printf "%.12e", 2 * b - a }')" "$bex" 1e-5
+#     J-A + 渦電流 はベクトル J-A で : スカラーの J-A は ν = H/B を ∇A 全体に掛けるので、電流が 0 を横切った直後に B ≈ 0 で H ≠ 0
+#     (保磁力) の点があると離散の横成分で残差が特異になり、固定点が 1e-8〜1e-6 で停滞する (2 次の格子と細かい 1 次の格子で実測。
+#     ベクトル J-A は割り算をしないので同じ格子で収束する)
+mt2_je lam2d_p2.msh 1 1 mt2_jeq.ofe
+mt2_csv mt2_jeq.ofe mt2_jeq; mt_energy "order 2, vector J-A + eddy currents" 1e-9; lq=$(mt2_loss)
+mt2_cmp "order 2 (vector J-A) == structured plate_line_ja_eddy : B_mean(t)" mt2_jeq mt2_st 1e-5
+compare "order 2 (vector J-A) == structured : eddy loss [J/m]" "$lq" "$lst" 1e-4
+#     σ = 0 の J-A (導体を J-A にして B が厚さ方向に変わる 2 次の格子、単調) : 刻みを掃引の点に揃えると電流掃引と B の列が全桁一致
+printf 'OpenFEM 1 0\ntitle = J-A in the conductors\nmesh = plate2d_nt8_p2.msh\nmaterial = 1.0 0\nja = 2 1.6e6 1100 1.6e-3 400 0.2\nregion = 10 2\nregion = 11 2\nelectrode = 10 0\nelectrode = 11 1\nanalysis = M\ntline = X\ncurrent = 1.0\ncurrentsweep = 0.5 1.0 2.0\njasub = 40\nnlsolver = 200 1e-8 1.0\nsolver = 200000 5000 1e-12\nend\n' > "$WORK/mt2_qsw.ofe"
+th_run mt2_qsw.ofe
+awk '/Jiles-Atherton hysteresis/ { f = 1; next } f && (NF == 6) && ($1 ~ /^[0-9]+$/) && ($2 ~ /e/) { print $1, $2, $4 }' "$WORK/ofe.log" > "$WORK/mt2_qsweep.txt"
+awk '/^currentsweep/{print "transient = 3 3"; print "waveform = 0 0 1 0.5 2 1 3 2"; next} {print}' "$WORK/mt2_qsw.ofe" > "$WORK/mt2_qja0.ofe"
+th_run mt2_qja0.ofe
+awk '/H_mean/ { f = 1; next } f && (NF == 7) && ($1 ~ /^[0-9]+$/) && ($3 ~ /e/) { print $1, $3, $6 }' "$WORK/ofe.log" > "$WORK/mt2_qtr.txt"
+if [ "$(wc -l < "$WORK/mt2_qsweep.txt")" -eq 3 ] && cmp -s "$WORK/mt2_qsweep.txt" "$WORK/mt2_qtr.txt"; then
+	echo "  order 2 : sigma = 0 transient == quasi-static current sweep (J-A conductors, 3 steps, all printed digits) -> OK"
+else
+	echo "  order 2 : sigma = 0 transient differs from the quasi-static current sweep -> NG" >&2
+	diff "$WORK/mt2_qsweep.txt" "$WORK/mt2_qtr.txt" | head -4 >&2
+	status=1
+fi
 
 # ---- 3 次四面体 (20 節点、gmsh の tet20 / tri10) ----
 #
@@ -7447,8 +7475,8 @@ fi
 #   (c) ベクトル J-A (javector) の B がスカラーに 1e-6 (板間の場はほぼ 1 方向)
 #   (d) 面内に 30 度回した格子 (plate2d_r30) で B と各刻みの固定点の反復回数が一致 (スカラー・ベクトルとも。ベクトルの行列の
 #       非対角 (∇A の基底の pq 成分) は B が軸に沿わないときにしか効かない)
-#   (e) 高次の三角形は弾く (積分点ごとの状態の枠が足りない、理由まで見る)
-echo "[M ja 2-D] Jiles-Atherton hysteresis on a 2-D triangular mesh (first-order triangles)"
+#   (e) 高次の三角形 (下の注釈)
+echo "[M ja 2-D] Jiles-Atherton hysteresis on a 2-D triangular mesh"
 cp "$SRC/plate2d.msh" "$SRC/plate2d_r30.msh" "$SRC/plate2d_p2.msh" "$SRC/plate2d_dc.ofe" "$SRC/plate2d_r30.ofe" "$WORK/"
 mj_mk() {	# mj_mk <元の .ofe> <javector 0|1> <出力>
 	awk -v jv="$2" '/^region = 1 2/{print; print "ja = 2 1.6e6 1100 1.6e-3 400 0.2"; next}
@@ -7490,8 +7518,44 @@ for c in s v; do
 	echo "  2-D triangles rotated 30 degrees ($c) : B(step) and fixed-point iterations == unrotated : $res"
 	case "$res" in NG*) status=1 ;; esac
 done
-sed 's/^mesh = .*/mesh = plate2d_p2.msh/' "$WORK/mj_s.ofe" > "$WORK/mj_p2.ofe"
-th_reject "hysteresis (ja) on second-order triangles" mj_p2.ofe "need first-order (3-node) triangles"
+# (e) 高次の三角形 : 状態は積分点ごと (剛性と同じ則の点、tri_ja_ip)、固定点の行列は積分点ごとのテンソル (assemble_ja_tri_matrix)。
+#   (e1) 板間の J-A (B が一様) : 2 次 / 3 次 (plate2d_p2 / _p3) のスカラー・ベクトル J-A の B が 1 次の mj_s に 1e-6、端子の仕事の恒等式。
+#        B が一様なので積分点ごとの状態の誤り (点をまとめる、枠の幅を取り違える) はここでは等価
+#   (e2) 導体を J-A の材料にする (B が厚さ方向に変わる) : 導体の中の H は Ampère で外側の面から内側の面へ H(s) = s I/W に決まり材料に
+#        依らないので、導体の平均の B は H 駆動の順方向の J-A を s について平均した値 (ja_plate_cond.awk、独立に書いた参照解)。
+#        同じ頂点の 1 次 / 2 次 / 3 次 (plate2d_nt8 / _p2 / _p3、gmsh) を単調な掃引 0.5 → 1 → 2 A で : 1 次は h² で 1e-2 (実測 3.6e-3)、
+#        2 次・3 次は 3e-5 (J-A の部分刻み jasub = 200 の Heun の誤差が 1e-5 の桁、実測 2 次 1.2e-5 / 3 次 9.2e-6)、2 次が 1 次の 50 倍よい。
+#        (電流を反転させると構造格子でも固定点が発散する — 導体の中で H が 0 を横切る — ので単調な掃引にした)
+mj_ho() {	# mj_ho <格子> <javector 0|1> <出力>
+	sed "s/^mesh = .*/mesh = $1/" "$WORK/mj_s.ofe" | awk -v jv="$2" '/^nlsolver/{print; if (jv) print "javector = 1"; next} /^javector/{next} {print}' > "$WORK/$3"
+}
+cp "$SRC/plate2d_p3.msh" "$SRC/plate2d_nt8.msh" "$SRC/plate2d_nt8_p2.msh" "$SRC/plate2d_nt8_p3.msh" "$WORK/"
+for o in p2 p3; do
+	mj_ho plate2d_$o.msh 0 mj_s_$o.ofe; mj_ho plate2d_$o.msh 1 mj_v_$o.ofe
+	for c in s v; do
+		mj_tab "mj_${c}_$o.ofe"
+		res=$(paste -d' ' "$WORK/mj_mj_${c}_$o.ofe.tab" "$WORK/mj_mj_s.ofe.tab" | awk '{ d = $2 - $5; if (d < 0) d = -d; if (d > m) m = d; n++ }
+			END { printf "%s (%d steps, max %.1e T)", ((n == 11) && (m <= 1e-6)) ? "OK" : "NG", n, m }')
+		echo "  2-D triangles, order ${o#p} ($c) : B(step) == first-order (uniform B between the plates) : $res"
+		case "$res" in NG*) status=1 ;; esac
+		res=$(awk '/hysteresis work : terminals =/ { a = $6 + 0; b = $11 + 0 } END { if (a == "") { print "NG (no work line)"; exit } d = (a - b) / a; if (d < 0) d = -d
+			printf "%s (%.1e)", (d <= 1e-7) ? "OK" : "NG", d }' "$WORK/mj_mj_${c}_$o.ofe.log")
+		echo "  2-D triangles, order ${o#p} ($c) : terminal work == int H dB + linear energy : $res"
+		case "$res" in NG*) status=1 ;; esac
+	done
+done
+mjc_ref=$(awk -v ms=1.6e6 -v aa=1100 -v al=1.6e-3 -v kk=400 -v cc=0.2 -v w=1e-3 -v cur="0.5 1 2" -v nz=400 -v nsub=800 -f "$SRC/ja_plate_cond.awk" | awk '{ printf "%s ", $3 }')
+for o in 1 2 3; do
+	m=plate2d_nt8.msh; [ "$o" = 1 ] || m=plate2d_nt8_p$o.msh
+	printf 'OpenFEM 1 0\ntitle = J-A in the conductors\nmesh = %s\nmaterial = 1.0 0\nja = 2 1.6e6 1100 1.6e-3 400 0.2\nregion = 10 2\nregion = 11 2\nelectrode = 10 0\nelectrode = 11 1\nanalysis = M\ntline = X\ncurrent = 1.0\ncurrentsweep = 0.5 1.0 2.0\njasub = 200\nnlsolver = 200 1e-8 1.0\nsolver = 200000 5000 1e-12\nend\n' "$m" > "$WORK/mjc_$o.ofe"
+	mj_tab "mjc_$o.ofe"
+	e=$(awk -v r="$mjc_ref" 'BEGIN { split(r, R, " ") } { d = ($2 - R[$1]) / R[$1]; if (d < 0) d = -d; if (d > m) m = d; n++ } END { printf "%.3e", (n == 3) ? m : 1 }' "$WORK/mj_mjc_$o.ofe.tab")
+	eval "mjc_e$o=\$e"
+done
+res=$(awk -v a="$mjc_e1" -v b="$mjc_e2" -v c="$mjc_e3" 'BEGIN { ok = (a <= 1e-2) && (b <= 3e-5) && (c <= 3e-5) && (b * 50 <= a)
+	printf "%s (max rel. error : order 1 %.1e, order 2 %.1e, order 3 %.1e)", ok ? "OK" : "NG", a, b, c }')
+echo "  2-D triangles, J-A conductors (B varies through the thickness) : mean B == forward J-A over H(s) = s I/W : $res"
+case "$res" in NG*) status=1 ;; esac
 
 # 系列の HDF5 出力 (hdf5 = 1)。**HDF5 は任意依存**なので、
 #   ・入っていないビルド : 「hdf5 = 1 が弾かれること」だけを見て残りは skip する

@@ -1221,97 +1221,158 @@ void assemble_ja(const double *az, double *res, double *nucell)
 
 
 /*
-断面 2 次元の三角形の格子 (1 次) のヒステリシス : ∇A が要素内で一定なので、J-A の状態は要素に 1 つ (枠の先頭 id = 8e) で
-厳密 (構造格子の 2x2x2 Gauss の代わり)。式は構造格子と同じ (∇A の面内 2 成分 (∂A/∂p, ∂A/∂q)、B = (∂A/∂q, −∂A/∂p))。
-JaD の向きは面内 2 成分だけを使う (この経路の中だけで閉じる)
+断面 2 次元の三角形の格子のヒステリシス : 状態は積分点ごと (tri_ja_ip)。1 次は ∇A が要素内で一定なので重心の 1 点
+(枠の先頭 id = 8e) で厳密、高次は剛性と同じ則の点ごと (id = e tri_ja_stride() + q)。式は構造格子と同じ (∇A の面内 2 成分
+(∂A/∂p, ∂A/∂q)、B = (∂A/∂q, −∂A/∂p))。JaD の向きは面内 2 成分だけを使う (この経路の中だけで閉じる)。
+固定点の行列は要素ごとの ν / テンソル (積分点の重み付きの平均。1 次はその点の値そのもの)
 */
+// 高次の三角形の固定点の行列 : 積分点ごとの微分磁気抵抗率のテンソル (∇A の基底、6 成分)。要素で平均すると、点ごとの傾きが
+// 平均の 2 倍を越える所で固定点が縮小しない (J-A + 渦電流の 2 次の積層板で残差が 7e-8 から 1 回 1.1 倍で増えた、実測)
+static double *JqTen = NULL;
+static int64_t JqTenN = 0;
+
+void assemble_ja_tri_matrix(crs_t *A)
+{
+	int pa, qa;
+	tri_axes(&pa, &qa);
+	const int off = (((pa + qa) == 1) ? 3 : ((pa + qa) == 3) ? 4 : 5);
+	const int nip = tri_ja_nip();
+	crs_zero(A);
+	for (int e = 0; e < NTri; e++) {
+		for (int qp = 0; qp < nip; qp++) {
+			int32_t nd[TRI_NMAX];
+			double gn[TRI_NMAX][2], w, pos[2];
+			const int nen = tri_ja_ip(e, qp, nd, gn, &w, pos);
+			if (nen == 0) break;
+			const double *t = &JqTen[(((int64_t)e * nip) + qp) * 6];
+			const double cpp = t[pa], cqq = t[qa], cpq = t[off];
+			for (int l = 0; l < nen; l++) {
+				for (int m = 0; m < nen; m++) {
+					const double v = (cpp * gn[l][0] * gn[m][0]) + (cqq * gn[l][1] * gn[m][1])
+					               + (cpq * ((gn[l][0] * gn[m][1]) + (gn[l][1] * gn[m][0])));
+					const int64_t s2 = crs_find_tri(A, nd[l], nd[m]);
+					if (s2 >= 0) A->val[s2] += v * w;
+				}
+			}
+		}
+	}
+}
+
 static void assemble_ja_tri(const double *az, double *res, double *nucell)
 {
 	const int it = ((Tline == 'X') ? 0 : (Tline == 'Y') ? 1 : 2);
 	const int ip = (it + 1) % 3, iq = (it + 2) % 3;
+	const int nip = tri_ja_nip(), stride = tri_ja_stride();
+	if ((nip > 1) && (JqTenN != ((int64_t)NTri * nip * 6))) {
+		free(JqTen);
+		JqTenN = (int64_t)NTri * nip * 6;
+		JqTen = (double *)calloc((size_t)JqTenN, sizeof(double));
+	}
 
 	memset(res, 0, (size_t)NNode * sizeof(double));
 	for (int e = 0; e < NTri; e++) {
-		const int32_t *nd = &Tri[e * 3];
 		const material_t *mt = &Material[TriMat[e]];
-		double g[3][2], area;
-		if (tri_grad(nd, g, &area)) continue;		// 退化した三角形は setup で弾いてある
-		const double gr[2] = {(az[nd[0]] * g[0][0]) + (az[nd[1]] * g[1][0]) + (az[nd[2]] * g[2][0]),
-		                      (az[nd[0]] * g[0][1]) + (az[nd[1]] * g[1][1]) + (az[nd[2]] * g[2][1])};
-		const double bmag = sqrt((gr[0] * gr[0]) + (gr[1] * gr[1]));
-		double re[3] = {0, 0, 0};
-		double nu, nud;
-		double ten[6] = {0, 0, 0, 0, 0, 0};
-		if (mt->ja.on) {
-			const int64_t id = (int64_t)e * 8;
-			double *dir = &JaD[id * 3];
-			const int haved = ((dir[0] != 0) || (dir[1] != 0));
-			const double bs = (haved ? ((gr[0] * dir[0]) + (gr[1] * dir[1])) : bmag);
-			if (bmag > 1e-12) {
-				JaDn[(id * 3) + 0] = gr[0] / bmag;
-				JaDn[(id * 3) + 1] = gr[1] / bmag;
-				JaDn[(id * 3) + 2] = 0;
+		int32_t nd[TRI_NMAX];
+		double re[TRI_NMAX];
+		double nus = 0, wsum = 0, tens[6] = {0, 0, 0, 0, 0, 0}, nud = 0, ten[6] = {0, 0, 0, 0, 0, 0};
+		int nen = 0;
+		for (int l = 0; l < TRI_NMAX; l++) re[l] = 0;
+		for (int qp = 0; qp < nip; qp++) {
+			double gn[TRI_NMAX][2], w, pos[2];
+			nen = tri_ja_ip(e, qp, nd, gn, &w, pos);
+			if (nen == 0) break;		// 退化した三角形は setup で弾いてある
+			double gr[2] = {0, 0};
+			for (int l = 0; l < nen; l++) {
+				gr[0] += az[nd[l]] * gn[l][0];
+				gr[1] += az[nd[l]] * gn[l][1];
 			}
-			if (JaVector) {
-				const double bv[2] = {gr[1], -gr[0]};
-				const double *dg = (haved ? dir : &JaDn[id * 3]);
-				double dref[2] = {dg[1], -dg[0]};
-				double hv[2], mv[2], ns[2][2];
-				ja_eval_vec(&mt->ja, &JaVB[id * 2], &JaVH[id * 2], &JaVM[id * 2], bv, dref, hv, mv, ns);
-				const double nmax = ja_symmax(ns);
-				ten[ip] = ns[1][1];
-				ten[iq] = ns[0][0];
-				ten[it] = nmax;
-				ten[ja_off(ip, iq)] = -ns[0][1];
-				for (int q = 0; q < 2; q++) {
-					JaVBn[(id * 2) + q] = bv[q];
-					JaVHn[(id * 2) + q] = hv[q];
-					JaVMn[(id * 2) + q] = mv[q];
+			const double bmag = sqrt((gr[0] * gr[0]) + (gr[1] * gr[1]));
+			double nu;
+			for (int d = 0; d < 6; d++) ten[d] = 0;
+			if (mt->ja.on) {
+				const int64_t id = ((int64_t)e * stride) + qp;
+				double *dir = &JaD[id * 3];
+				const int haved = ((dir[0] != 0) || (dir[1] != 0));
+				const double bs = (haved ? ((gr[0] * dir[0]) + (gr[1] * dir[1])) : bmag);
+				if (bmag > 1e-12) {
+					JaDn[(id * 3) + 0] = gr[0] / bmag;
+					JaDn[(id * 3) + 1] = gr[1] / bmag;
+					JaDn[(id * 3) + 2] = 0;
 				}
+				if (JaVector) {
+					const double bv[2] = {gr[1], -gr[0]};
+					const double *dg = (haved ? dir : &JaDn[id * 3]);
+					double dref[2] = {dg[1], -dg[0]};
+					double hv[2], mv[2], ns[2][2];
+					ja_eval_vec(&mt->ja, &JaVB[id * 2], &JaVH[id * 2], &JaVM[id * 2], bv, dref, hv, mv, ns);
+					const double nmax = ja_symmax(ns);
+					ten[ip] = ns[1][1];
+					ten[iq] = ns[0][0];
+					ten[it] = nmax;
+					ten[ja_off(ip, iq)] = -ns[0][1];
+					for (int q = 0; q < 2; q++) {
+						JaVBn[(id * 2) + q] = bv[q];
+						JaVHn[(id * 2) + q] = hv[q];
+						JaVMn[(id * 2) + q] = mv[q];
+					}
+					JaBn[id] = bs;
+					JaHn[id] = (hv[0] * dref[0]) + (hv[1] * dref[1]);
+					JaMn[id] = (mv[0] * dref[0]) + (mv[1] * dref[1]);
+					for (int l = 0; l < nen; l++) re[l] += ((hv[0] * gn[l][1]) - (hv[1] * gn[l][0])) * w;
+					nud = nmax;
+					nus += nud * w;
+					wsum += w;
+					for (int d = 0; d < 6; d++) tens[d] += ten[d] * w;
+					if (nip > 1) for (int d = 0; d < 6; d++) JqTen[((((int64_t)e * nip) + qp) * 6) + d] = ten[d];
+					continue;
+				}
+				double h, m, dhdb;
+				ja_eval(&mt->ja, JaB[id], JaH[id], JaM[id], bs, &h, &m, &dhdb);
 				JaBn[id] = bs;
-				JaHn[id] = (hv[0] * dref[0]) + (hv[1] * dref[1]);
-				JaMn[id] = (mv[0] * dref[0]) + (mv[1] * dref[1]);
-				for (int l = 0; l < 3; l++) re[l] = ((hv[0] * g[l][1]) - (hv[1] * g[l][0])) * area;
-				nucell[e] = nmax;
-				if (JaNu6 != NULL) for (int d = 0; d < 6; d++) JaNu6[((int64_t)e * 6) + d] = ten[d];
-				for (int l = 0; l < 3; l++) res[nd[l]] += re[l];
-				continue;
+				JaHn[id] = h;
+				JaMn[id] = m;
+				nu  = ((fabs(bs) > 1e-12) ? (h / bs) : dhdb);
+				nud = dhdb;
 			}
-			double h, m, dhdb;
-			ja_eval(&mt->ja, JaB[id], JaH[id], JaM[id], bs, &h, &m, &dhdb);
-			JaBn[id] = bs;
-			JaHn[id] = h;
-			JaMn[id] = m;
-			nu  = ((fabs(bs) > 1e-12) ? (h / bs) : dhdb);
-			nud = dhdb;
+			else {
+				nu = nud = 1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
+			}
+			for (int l = 0; l < nen; l++) re[l] += nu * ((gn[l][0] * gr[0]) + (gn[l][1] * gr[1])) * w;
+			for (int d = 0; d < 3; d++) ten[d] = nud;
+			nus += nud * w;
+			wsum += w;
+			for (int d = 0; d < 6; d++) tens[d] += ten[d] * w;
+			if (nip > 1) for (int d = 0; d < 6; d++) JqTen[((((int64_t)e * nip) + qp) * 6) + d] = ten[d];
 		}
-		else {
-			nu = nud = 1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
-		}
-		for (int l = 0; l < 3; l++) re[l] = nu * ((g[l][0] * gr[0]) + (g[l][1] * gr[1])) * area;
-		nucell[e] = nud;
+		if (nen == 0) continue;
+		// 1 次は積分点の値そのもの (平均の割り算の丸めを入れない)
+		nucell[e] = ((nip == 1) ? nud : (nus / wsum));
 		if (JaNu6 != NULL) {
-			for (int d = 0; d < 6; d++) JaNu6[((int64_t)e * 6) + d] = ((d < 3) ? nud : 0);
+			for (int d = 0; d < 6; d++) JaNu6[((int64_t)e * 6) + d] = ((nip == 1) ? ten[d] : (tens[d] / wsum));
 		}
-		for (int l = 0; l < 3; l++) res[nd[l]] += re[l];
+		for (int l = 0; l < nen; l++) res[nd[l]] += re[l];
 	}
 }
 
 
-// 線形の三角形 (J-A でない要素) の磁気エネルギー ½ ∫ ν |∇A|² dS (∇A は要素内一定で厳密)
+// 線形の三角形 (J-A でない要素) の磁気エネルギー ½ ∫ ν |∇A|² dS (J-A と同じ積分点。1 次は ∇A が要素内一定で厳密)
 static double ja_linear_energy_tri(const double *az)
 {
+	const int nip = tri_ja_nip();
 	double wsum = 0;
 	for (int e = 0; e < NTri; e++) {
 		const material_t *mt = &Material[TriMat[e]];
 		if (mt->ja.on) continue;
-		const int32_t *nd = &Tri[e * 3];
-		double g[3][2], area;
-		if (tri_grad(nd, g, &area)) continue;
-		double gr[2] = {0, 0};
-		for (int l = 0; l < 3; l++) { gr[0] += az[nd[l]] * g[l][0]; gr[1] += az[nd[l]] * g[l][1]; }
 		const double nu = 1 / (MU0 * mt->mu6[0] * temp_factor(mt, 1));
-		wsum += 0.5 * nu * ((gr[0] * gr[0]) + (gr[1] * gr[1])) * area;
+		for (int qp = 0; qp < nip; qp++) {
+			int32_t nd[TRI_NMAX];
+			double gn[TRI_NMAX][2], w, pos[2];
+			const int nen = tri_ja_ip(e, qp, nd, gn, &w, pos);
+			if (nen == 0) break;
+			double gr[2] = {0, 0};
+			for (int l = 0; l < nen; l++) { gr[0] += az[nd[l]] * gn[l][0]; gr[1] += az[nd[l]] * gn[l][1]; }
+			wsum += 0.5 * nu * ((gr[0] * gr[0]) + (gr[1] * gr[1])) * w;
+		}
 	}
 	return wsum;
 }

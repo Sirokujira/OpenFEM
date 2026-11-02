@@ -7430,6 +7430,57 @@ static int tri6_grad(const int32_t *nd, int nen, const double lam[3],
 }
 
 
+// 断面 2 次元のヒステリシス (J-A) の積分点。1 次は重心の 1 点 (B が要素内一定なので厳密、重み = 面積)、高次は剛性と
+// 同じ則 (tri_quad_ord) の点ごとに状態を持つ。状態の枠は三角形あたり tri_ja_stride() 個 (8 の倍数、ja_alloc の単位)
+static double JqLam[NQTRI3][3], JqW[NQTRI3];
+static int JqN = 0, JqOrd = -1;
+
+int tri_ja_nip(void)
+{
+	if (TetOrder < 2) return 1;
+	if (JqOrd != TetOrder) {
+		JqN = tri_quad_ord(JqLam, JqW);
+		JqOrd = TetOrder;
+	}
+	return JqN;
+}
+
+int tri_ja_stride(void)
+{
+	return 8 * ((tri_ja_nip() + 7) / 8);
+}
+
+// 三角形 e の積分点 q : 節点 nd、面内勾配 gn (∇N、p, q 成分)、重み w (|det J| 込み)、面内の位置 pos。戻り値は節点数 (0 = 退化)
+int tri_ja_ip(int e, int q, int32_t nd[TRI_NMAX], double gn[TRI_NMAX][2], double *w, double pos[2])
+{
+	int pa, qa;
+	tri_axes(&pa, &qa);
+	const double *cp = ((pa == 0) ? Xp : (pa == 1) ? Yp : Zp);
+	const double *cq = ((qa == 0) ? Xp : (qa == 1) ? Yp : Zp);
+	if (tri_ja_nip() == 1) {
+		double g[3][2], area;
+		for (int l = 0; l < 3; l++) nd[l] = Tri[(e * 3) + l];
+		if (tri_grad(nd, g, &area)) return 0;
+		for (int l = 0; l < 3; l++) { gn[l][0] = g[l][0]; gn[l][1] = g[l][1]; }
+		*w = area;
+		pos[0] = (cp[nd[0]] + cp[nd[1]] + cp[nd[2]]) / 3;
+		pos[1] = (cq[nd[0]] + cq[nd[1]] + cq[nd[2]]) / 3;
+		return 3;
+	}
+	const int nen = tri_nodes(e, nd);
+	double det, n[TRI_NMAX], dl[TRI_NMAX][3];
+	if (tri6_grad(nd, nen, JqLam[q], gn, &det)) return 0;
+	trin_shape(nen, JqLam[q], n, dl);
+	*w = JqW[q] * fabs(det);
+	pos[0] = pos[1] = 0;
+	for (int l = 0; l < nen; l++) {
+		pos[0] += n[l] * cp[nd[l]];
+		pos[1] += n[l] * cq[nd[l]];
+	}
+	return nen;
+}
+
+
 // 2 次 / 3 次三角形の面積 (等パラメトリック写像で積分する)
 double tri6_area(int e)
 {
