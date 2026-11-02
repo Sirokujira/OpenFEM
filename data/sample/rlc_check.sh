@@ -500,6 +500,15 @@ mesh_reject() {	# mesh_reject <ラベル> <ofe ファイル>
 		echo "  $1 : rejected -> OK"
 	fi
 }
+# 弾かれた理由まで見る (別の理由で弾かれても mesh_reject は通るので)。**使う節より前で定義すること** (dash は未定義の関数で
+# exit 127 になり、検証全体が止まる — [2-D mesh] の節で踏んだ)
+th_reject() {	# th_reject <ラベル> <ofe> <理由の文字列>
+	mesh_reject "$1" "$2"
+	if ! (cd "$WORK" && "$OFE" -n 2 "$2" 2>&1 | grep -q "$3"); then
+		echo "  *** it was rejected for a different reason than: $3" >&2
+		status=1
+	fi
+}
 echo "[mesh order] inputs the solver must reject"
 # 辺要素 (E / A) は四面体ならどの次数でも解ける ([A order 2] / [A order 3+])。高次の六面体・角柱 ([A hex order 2+] /
 # [A prism order 2+]) とその混在 ([A mixed order 2+]) も。serendipity の六面体の E は弾く (h3x_e)
@@ -3543,14 +3552,7 @@ compare "tempcotable beyond its last point in thermal : R = 2 rho0 L / A [ohm]" 
 compare "tempcotable beyond its last point in thermal : T_max (parabola) [degC]" "$(th_t)" 160.625 1e-10
 
 
-# (7) 弾くべき入力 (理由まで grep する)
-th_reject() {	# th_reject <ラベル> <ofe> <理由の文字列>
-	mesh_reject "$1" "$2"
-	if ! (cd "$WORK" && "$OFE" -n 2 "$2" 2>&1 | grep -q "$3"); then
-		echo "  *** it was rejected for a different reason than: $3" >&2
-		status=1
-	fi
-}
+# (7) 弾くべき入力 (理由まで grep する。th_reject は mesh_reject の直後で定義してある)
 awk '/^analysis/{print "analysis = C"; next} {print}' "$SRC/thermal_bar.ofe" > "$WORK/thx_c.ofe"
 th_reject "thermal with analysis C" thx_c.ofe "analysis = R alone"
 awk '/^conductor = 1/{print; print "conductor = 2 1 0.005 0.005 0 1e-3 0 1e-3"; next} {print}' \
