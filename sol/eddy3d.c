@@ -942,6 +942,10 @@ static struct {
 	unsigned char *fix, *cond;
 	double *xdr, *br, *bi, *ur, *ui, *w1, *w2;
 	double omega;
+	// 非線形 (B-H) の磁性体があるときの要素の ν と Anderson の作業域 (無ければ NULL)。ν は熱連成の
+	// 反復をまたいで持ち越す (前の回の ν から始めるので、σ(T) の変化が小さくなると内側の反復は数回で済む)
+	double *nuelem, *aay, *aaf, *aayp, *aafp, *aady, *aadf;
+	int nlit_total;
 } EH;
 
 
@@ -1560,6 +1564,30 @@ int eddy3d_heat_open(FILE *fp_log)
 	EH.w1  = (double *)malloc((size_t)n * sizeof(double));
 	EH.w2  = (double *)malloc((size_t)n * sizeof(double));
 
+	// 非線形 (B-H) : solve_eddy3d と同じ実効磁気抵抗率法を、熱連成の各回の σ(T) で収束するまで解く
+	EH.nuelem = NULL;
+	EH.nlit_total = 0;
+	int nlf = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh[0] > 0) nlf = 1;
+	}
+	if (nlf) {
+		EH.nuelem = (double *)malloc((size_t)nelem * sizeof(double));
+		EH.aay  = (double *)malloc((size_t)nelem * sizeof(double));
+		EH.aaf  = (double *)malloc((size_t)nelem * sizeof(double));
+		EH.aayp = (double *)malloc((size_t)nelem * sizeof(double));
+		EH.aafp = (double *)malloc((size_t)nelem * sizeof(double));
+		EH.aady = (double *)malloc((size_t)nelem * AAM3 * sizeof(double));
+		EH.aadf = (double *)malloc((size_t)nelem * AAM3 * sizeof(double));
+		for (int e = 0; e < nelem; e++) {
+			const material_t *mt = &Material[edge_elem_mat(e)];
+			EH.nuelem[e] = ((mt->nbh[0] > 0) ? bh_nu(mt, 0, 0) : 0);
+		}
+		fprintf(fp_log, "  nonlinear (B-H) : effective reluctivity at the current amplitude, solved to "
+			"convergence in every thermal iteration (maxiter = %d, tol = %.1e, relax = %.2f); the thermal "
+			"tolerance is at least 10 x that (%.1e)\n", NlMaxiter, NlTol, NlRelax, ((ThermalTol > (10 * NlTol)) ? ThermalTol : (10 * NlTol)));
+	}
+
 	return ierr;
 }
 
@@ -1573,8 +1601,10 @@ int eddy3d_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f
 	const int n = ne + nn;
 	const int nelem = edge_elem_count();
 	const double omega = EH.omega;
-
-	assemble_eddy3d_sig(&EH.Kr, &EH.Ki, omega, NULL, sigelem);
+	double ir = 0, ii = 0, den = 0;
+	int aan = 0;		// Anderson の履歴は σ(T) が変わるたびに捨てる
+	for (int nlit = 1; ; nlit++) {
+	assemble_eddy3d_sig(&EH.Kr, &EH.Ki, omega, EH.nuelem, sigelem);
 	for (int i = 0; i < n; i++) EH.xdr[i] = 0;
 	for (int i = 0; i < nn; i++) {
 		if (EH.fix[ne + i] && (NodeConductor[i] == 1)) EH.xdr[ne + i] = Volt;
@@ -1595,7 +1625,7 @@ int eddy3d_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f
 	for (int i = 0; i < n; i++) EH.ur[i] += EH.xdr[i];
 
 	// 端子電流 (節点の行は 1/(jω) 倍してあるので jω 倍して戻す)
-	double ir = 0, ii = 0;
+	ir = ii = 0;
 	for (int i = 0; i < nn; i++) {
 		if ((NodeConductor[i] != 1) || !EH.cond[i]) continue;
 		double rr, ri;
@@ -1603,13 +1633,11 @@ int eddy3d_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f
 		ir += -omega * ri;
 		ii += omega * rr;
 	}
-	const double den = (ir * ir) + (ii * ii);
+	den = (ir * ir) + (ii * ii);
 	if (den <= 0) {
 		fprintf(fp_log, "*** thermal : no current flows through the port\n");
 		return 1;
 	}
-	*zr = Volt * ir / den;
-	*zi = -Volt * ii / den;
 
 	// 端子電流が cur (実数) になるよう s = cur / I_V 倍する
 	const double sr = cur * ir / den, si = -cur * ii / den;
@@ -1617,6 +1645,46 @@ int eddy3d_heat_solve(FILE *fp_log, const double *sigelem, double cur, double *f
 		const double xr = EH.ur[i], xi = EH.ui[i];
 		EH.ur[i] = (sr * xr) - (si * xi);
 		EH.ui[i] = (sr * xi) + (si * xr);
+	}
+	if (EH.nuelem == NULL) break;
+
+	// ν の更新 (solve_eddy3d と同じ、H を独立変数にした ν = |H|/B(|H|) と ln ν の Anderson 加速)。
+	// ν が動かなくなるまで繰り返し、収束した ν で解いた場で損失を作る
+	double dmax = 0;
+	for (int e = 0; e < nelem; e++) {
+		const material_t *mt = &Material[edge_elem_mat(e)];
+		if (mt->nbh[0] <= 0) {
+			EH.aay[e] = EH.aaf[e] = 0;
+			continue;
+		}
+		double bre[3], bim[3];
+		elem_bfield(e, EH.ur, EH.ui, bre, bim);
+		const double b2 = (bre[0] * bre[0]) + (bre[1] * bre[1]) + (bre[2] * bre[2])
+			+ (bim[0] * bim[0]) + (bim[1] * bim[1]) + (bim[2] * bim[2]);
+		const double hm = EH.nuelem[e] * sqrt(b2);
+		const double nun = ((hm > 0) ? (hm / bh_b_of_h(mt, 0, hm)) : bh_nu(mt, 0, 0));
+		const double dn = fabs(nun - EH.nuelem[e]) / nun;
+		if (dn > dmax) dmax = dn;
+		EH.aay[e] = log(EH.nuelem[e]);
+		EH.aaf[e] = log(nun) - EH.aay[e];
+	}
+	EH.nlit_total++;
+	if (dmax < NlTol) break;		// いまの ν は収束している (その ν で解いた場で損失を作る)
+	if (nlit >= NlMaxiter) {
+		fprintf(fp_log, "*** thermal : the effective reluctivity did not converge in %d iterations "
+			"(thermal iteration %d, max dnu/nu = %.3e)\n", NlMaxiter, it, dmax);
+		return 1;
+	}
+	anderson_step(nelem, EH.aay, EH.aaf, EH.aayp, EH.aafp, EH.aady, EH.aadf, AAM3, &aan, NlRelax);
+	for (int e = 0; e < nelem; e++) {
+		if (Material[edge_elem_mat(e)].nbh[0] > 0) EH.nuelem[e] = exp(EH.aay[e]);
+	}
+	}
+	*zr = Volt * ir / den;
+	*zi = -Volt * ii / den;
+	if (EH.nuelem != NULL) {
+		fprintf(fp_log, "  thermal iteration %d : effective reluctivity converged (%d B-H iterations so far)\n",
+			it, EH.nlit_total);
 	}
 
 	// 要素の損失 Q_e = ½ eᴴ T_e e を節点に配る
@@ -1662,6 +1730,8 @@ void eddy3d_heat_close(void)
 	free(EH.fix); free(EH.cond);
 	free(EH.xdr); free(EH.br); free(EH.bi); free(EH.ur); free(EH.ui);
 	free(EH.w1); free(EH.w2);
+	free(EH.nuelem); free(EH.aay); free(EH.aaf); free(EH.aayp); free(EH.aafp); free(EH.aady); free(EH.aadf);
+	EH.nuelem = EH.aay = EH.aaf = EH.aayp = EH.aafp = EH.aady = EH.aadf = NULL;
 	EH.fix = EH.cond = NULL;
 	EH.xdr = EH.br = EH.bi = EH.ur = EH.ui = EH.w1 = EH.w2 = NULL;
 	edge_free();

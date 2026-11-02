@@ -4732,6 +4732,49 @@ res=$(awk -v a="$d12" -v fa="$f12" -v b="$d24" -v fb="$f24" 'BEGIN {
 	printf "%s (err %.2e -> %.2e, ratio %.2f)", ((e2 < 0.02) && (q > 3.6) && (q < 4.6)) ? "OK" : "NG", e1, e2, q }')
 echo "  hexahedra, 100 kHz : surface - centre temperature vs Fourier series, h^2 (12 -> 24 cells) : $res"
 case "$res" in NG*) status=1 ;; esac
+# (5) 非線形 (B-H) の磁性体の交流の発熱 (誘導加熱。1 次の辺要素の A)。熱連成の各回の σ(T) で実効磁気抵抗率の反復を
+#     収束するまで解く (入れ子、前の回の ν から始める)。bar_air_bh (導体の上に非導電の非線形の層、100 Hz、200 A):
+#     ・α = 0 : R・L が熱連成なしの非線形の A (current = 200) と ν の許容 (1e-7) の範囲で一致
+#     ・α = 3.9e-3 : 層の H は Ampère で I だけで決まる (σ に依らない) ので、層を閉形式の μr_eff (bar_layer.awk) の
+#       線形にした熱連成と R・T_max が一致する (実測 1e-10。σ(T) と ν の入れ子の検査)
+#     ・I²R = 場の積分 = 出ていく熱。断面 2 次元の F と高次の辺要素は線形のみ (入力エラー)
+cp "$SRC/bar_air_bh.ofe" "$SRC/bar_air.msh" "$WORK/"
+grep -v '^#' "$SRC/bar_air_bh.ofe" | awk '/^current/{next} /^analysis/{print "kthermal = 2 400"; print "heatsink = 0 20"; print "heatsink = 1 20"; print "temperature = 20"; print "thermal = 200"} {print}' > "$WORK/tacb_a0.ofe"
+th_run tacb_a0.ofe
+th_energy "B-H layer, alpha = 0"
+(cd "$WORK" && "$OFE_POST" > /dev/null 2>&1)
+set -- $(awk -F, '$1 == "Rf" { a = 1; next } a == 1 && $1 == "1" { r = $2; a = 0 } $1 == "Lf" { b = 1; next } b == 1 && $1 == "1" { l = $2; b = 0 } END { printf "%s %s", r, l }' "$WORK/rlc.csv")
+rth=$1; lth=$2
+(cd "$WORK" && "$OFE" -n 2 bar_air_bh.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  bar_air_bh : the run failed -> NG" >&2; status=1; }
+set -- $(awk -F, '$1 == "Rf" { a = 1; next } a == 1 && $1 == "1" { r = $2; a = 0 } $1 == "Lf" { b = 1; next } b == 1 && $1 == "1" { l = $2; b = 0 } END { printf "%s %s", r, l }' "$WORK/rlc.csv")
+compare "B-H layer, alpha = 0 : thermal R == the uncoupled nonlinear A (200 A) [ohm]" "$rth" "$1" 1e-7
+compare "B-H layer, alpha = 0 : thermal L == the uncoupled nonlinear A (200 A) [H]" "$lth" "$2" 1e-7
+awk '/^analysis/{print "tempco = 2 3.9e-3 20"} {print}' "$WORK/tacb_a0.ofe" > "$WORK/tacb_a1.ofe"
+th_run tacb_a1.ofe
+th_energy "B-H layer, alpha = 3.9e-3"
+rnl=$(th_r); tnl=$(th_t)
+mueff=$(awk -v f=1e2 -v mode=nl -v I=200 -f "$SRC/bar_layer.awk" | awk '{ print $4 }')
+awk -v mu="$mueff" '/^bh = 3/{ if (!d) { print "mur = 3 " mu; d = 1 } next } {print}' "$WORK/tacb_a1.ofe" > "$WORK/tacb_lin.ofe"
+th_run tacb_lin.ofe
+compare "B-H layer, alpha = 3.9e-3 : R == the linear layer of mu_eff (closed form) [ohm]" "$rnl" "$(th_r)" 1e-7
+compare "B-H layer, alpha = 3.9e-3 : T_max == the linear layer of mu_eff [degC]" "$tnl" "$(th_t)" 1e-7
+#     ・導体が非線形 (10 Hz、0.5 A、B が表皮効果で厚さ方向に変わるので ν が σ(T) に依る)、k = 1e5 で側面の対流だけで冷やすと
+#       温度が一様になる : R が熱連成なしの非線形の A を temperature = T_mean で解いた値に一致 (1e-6、実測 6e-8)。
+#       **ν を熱連成の最初の回で凍らせる誤り (R +9.5e-5) はここでだけ落ちる** (層の H は σ に依らないので上の 2 つは素通り)。
+#       外側の許容は内側の ν の許容 (1e-7) の 10 倍に自動で緩める (同じ 1e-10 のままだと dR/R が 1e-8 で停滞した)
+grep -v '^#' "$SRC/bar_air_bh.ofe" | awk '/^bh = 3/{sub(/^bh = 3/, "bh = 2")} /^frequency/{print "frequency = 10"; next} /^current/{next}
+	/^analysis/{print "tempco = 2 3.9e-3 20"; print "kthermal = 2 1e5"; print "convection = 0.1 20"; print "temperature = 20"; print "thermal = 0.5"} {print}' > "$WORK/tacb_c.ofe"
+th_run tacb_c.ofe
+rc=$(th_r)
+tmc=$(awk '/T_mean/ { print $8; exit }' "$WORK/ofe.log")
+grep -v '^#' "$SRC/bar_air_bh.ofe" | awk -v t="$tmc" '/^bh = 3/{sub(/^bh = 3/, "bh = 2")} /^frequency/{print "frequency = 10"; next}
+	/^current/{print "current = 0.5"; next} /^analysis/{print "tempco = 2 3.9e-3 20"; print "temperature = " t} {print}' > "$WORK/tacb_cu.ofe"
+(cd "$WORK" && "$OFE" -n 2 tacb_cu.ofe > /dev/null 2>&1 && "$OFE_POST" > /dev/null 2>&1) || { echo "  tacb_cu : the run failed -> NG" >&2; status=1; }
+compare "B-H conductor, uniform temperature : thermal R == the uncoupled nonlinear A at T_mean [ohm]" "$rc" \
+	"$(awk -F, '$1 == "Rf" { a = 1; next } a == 1 && $1 == "1" { print $2; exit }' "$WORK/rlc.csv")" 1e-6
+cp "$SRC/bar_air_p2.msh" "$WORK/"
+sed 's/^mesh = .*/mesh = bar_air_p2.msh/' "$WORK/tacb_a0.ofe" > "$WORK/tacbx_p2.ofe"
+th_reject "B-H with AC heating on a second-order mesh" tacbx_p2.ofe "linear materials with thermal"
 #     ピラミッドは A が弾く (多項式の Nedelec 基底が無い)
 awk '/^mesh/{print "mesh = box_pyr.msh"; next} /^region/{print "region = 1 2"; next} {print}' "$SRC/thermal_ac.ofe" > "$WORK/tacx_pyr.ofe"
 cp "$SRC/box_pyr.msh" "$WORK/"
@@ -4744,6 +4787,8 @@ mesh_reject "AC heating on a pyramid mesh" tacx_pyr.ofe
 # 発熱は組み立てと同じ質量行列の上の ½∫σ|V' - jωAz|² なので Σf = ½|I|²R(f) が厳密。
 echo "[thermal F 2-D] AC heating on a 2-D cross-section (per unit length)"
 cp "$SRC/thermal_f2d.ofe" "$SRC/plate2d.msh" "$SRC/plate2d_p2.msh" "$SRC/plate_line_ac.ofe" "$WORK/"
+awk '/^analysis/{print "bh = 2 100 0.5"; print "bh = 2 1000 1.0"} {print}' "$SRC/thermal_f2d.ofe" > "$WORK/f2x_bh.ofe"
+th_reject "AC heating on a 2-D cross-section with a bh material" f2x_bh.ofe "thermal with analysis F supports linear materials only"
 f2_tm() { awk '/^  T_max = / { print $(NF-1); exit }' "$WORK/ofe.log"; }
 # (1) 100 Hz、h = 50 : 等温の板の閉形式 (thermal_f2d.ofe の注釈)。許容は板の中の温度差
 #     (Bi = ht/k = 6e-6 と端の効果、実測 2e-6) から ΔT に 1e-5、R に 1e-6

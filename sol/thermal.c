@@ -2341,6 +2341,20 @@ static int th_ac(void)
 }
 
 
+// 熱連成の収束判定。非線形 (B-H) の交流の発熱では各回の内側で実効磁気抵抗率の反復を許容 NlTol で打ち切るので、
+// 外側の判定はそれより緩くないと終わりが内側の打ち切りの雑音で決まって収束しない (実測で dR/R が 1e-8 で停滞)。
+// CLAUDE.md の「外側の許容は内側より緩く」と同じ理由で 10 NlTol を下限にする
+static double th_tol(void)
+{
+	if (th_ac()) {
+		for (int m = 0; m < NMaterial; m++) {
+			if ((Material[m].nbh[0] > 0) && (ThermalTol < (10 * NlTol))) return 10 * NlTol;
+		}
+	}
+	return ThermalTol;
+}
+
+
 static double th_pfac(void)
 {
 	return (th_ac() ? 0.5 : 1.0);
@@ -2669,7 +2683,7 @@ static int th_transient(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 
 			const double dr = ((rprev > 0) ? fabs(r - rprev) / r : 1);
 			const double dt = fabs(tmax - tmprev) / ((fabs(tmax) > 1) ? fabs(tmax) : 1);
-			if ((it > 1) && (dr < ThermalTol) && (dt < ThermalTol)) {
+			if ((it > 1) && (dr < th_tol()) && (dt < th_tol())) {
 				conv = 1;
 				break;
 			}
@@ -2838,7 +2852,7 @@ static int th_steady(FILE *fp_log, crs_t *A, crs_t *B, const double *b0,
 		const double dt = fabs(tmax - tmprev) / ((fabs(tmax) > 1) ? fabs(tmax) : 1);
 		fprintf(fp_log, "  %4d %16.9e %14.6f %16.3e\n", it, r, tmax, dr);
 		fflush(fp_log);
-		if ((it > 1) && (dr < ThermalTol) && (dt < ThermalTol)) {
+		if ((it > 1) && (dr < th_tol()) && (dt < th_tol())) {
 			conv = 1;
 			break;
 		}

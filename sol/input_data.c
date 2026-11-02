@@ -1661,8 +1661,9 @@ int input_data(FILE *fp)
 				"frequencysweep");
 			return 1;
 		}
-		// 交流の発熱 : 周波数は 1 点 (温度場はその周波数での釣り合い)。非線形 (B-H) の
-		// 実効磁気抵抗率の反復とは入れ子にしない (どちらも反復なので収束を保証できない)
+		// 交流の発熱 : 周波数は 1 点 (温度場はその周波数での釣り合い)。非線形 (B-H) は 3 次元の A だけで、
+		// 熱連成の各回の σ(T) で実効磁気抵抗率の反復を収束するまで解く (入れ子。前の回の ν から始める)。
+		// 断面 2 次元の F と高次の辺要素 (setup で弾く) は線形のみ
 		if ((Analysis == ANALYSIS_A) || (Analysis == ANALYSIS_F)) {
 			if (NFreqSweep > 0) {
 				printf("%s\n", "*** thermal with analysis A / F cannot be combined with "
@@ -1674,9 +1675,9 @@ int input_data(FILE *fp)
 				return 1;
 			}
 			for (int m = 0; m < NMaterial; m++) {
-				if (Material[m].nbh[0] > 0) {
-					printf("%s\n", "*** thermal with analysis A / F supports linear "
-						"materials only (remove bh)");
+				if ((Material[m].nbh[0] > 0) && (Analysis == ANALYSIS_F)) {
+					printf("%s\n", "*** thermal with analysis F supports linear "
+						"materials only (remove bh; bh with thermal is supported for analysis A)");
 					return 1;
 				}
 			}
