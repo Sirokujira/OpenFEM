@@ -1,0 +1,43 @@
+OpenFEM 1 0
+title = wide parallel plate line with a nonlinear core, eddy current (F + B-H)
+#
+# 非線形磁性体 (B-H) と渦電流 (analysis = F) の同時解析。plate_line_ac.ofe の板間に
+# plate_line_bh.ofe と同じ B-H 曲線の磁性体 (導電率 0) を詰める。
+#
+# 実効磁気抵抗率法: 要素ごとの ν = H/B を波高値 |B| で評価して反復する
+# (単一ポート、電流振幅 current)。
+#
+# 磁界は 1 次元なので、板間の H は周波数にも磁性体の μ にも依らず
+# Ampère の法則で H = I/W に決まる。板 (導体) の中の電流分布はこの境界値だけで
+# 決まるので、**空気の板間との差は磁性体の磁束だけ**:
+#   R_nl(f) = R_air(f)
+#   L_nl(f) = L_air(f) + (B(I/W) - mu0 I/W) d / I      (どの周波数でも厳密)
+#   I = 1.0 A -> H = 1000 A/m -> B = 1.0 T  -> L_nl - L_air = 1.9974867259e-04 [H/m]
+#   I = 0.5 A -> H =  500 A/m -> B = 0.7222 T -> 2.8863756147e-04
+#   I = 5.0 A -> H = 5000 A/m -> B = 1.0889 T -> 4.3304311e-05
+# 板間の H が固定されているので、H を独立変数にした更新 (ν = H / B(H)) は
+# 2 回で収束する (B を独立変数にした逐次代入は 2 値を往復して収束しない)。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 20 0.05e-3 20 0.25e-3 20 0.30e-3
+zmesh = 0 1 1e-4
+
+material = 1.0 0
+bh = 2 100   0.5
+bh = 2 1000  1.0
+bh = 2 10000 1.2
+geometry = 2 1 0 1e-3 0.05e-3 0.25e-3 0 1e-4
+
+conductor = 0 1 0 1e-3 0      0.05e-3 0 1e-4
+conductor = 1 1 0 1e-3 0.25e-3 0.30e-3 0 1e-4
+
+conductorsigma = 0 5.8e7
+conductorsigma = 1 5.8e7
+
+analysis = F
+tline = Z
+frequency = 1e3
+current = 1.0
+nlsolver = 50 1e-10 1.0
+solver = 200000 5000 1e-11
+end

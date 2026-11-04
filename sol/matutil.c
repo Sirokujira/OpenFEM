@@ -180,3 +180,70 @@ int tensor6_inverse(const double a[6], double b[6])
 
 	return 0;
 }
+
+
+/*
+Anderson 加速 (深さ m) の 1 段。非線形の固定点反復 y <- y + f (f は固定点写像の残差)
+を加速する。y, f は長さ n、yp / fp は前回の y / f、dy / df は差分の履歴 (n x m、
+循環)、*cnt はこれまでの段の数。y を上書きして次の点を返す:
+	y_new = y + w f - Σ γ_j (ΔY_j + w ΔF_j),   γ = argmin |f - ΔF γ|
+最小二乗は正規方程式 (m x m、正則化つき) で解く。破綻したら γ = 0 (緩和付きの
+素の固定点) に落ちる。
+*/
+void anderson_step(int64_t n, double *y, const double *f, double *yp, double *fp,
+	double *dy, double *df, int m, int *cnt, double relax)
+{
+	if (*cnt > 0) {
+		const int slot = (*cnt - 1) % m;
+		for (int64_t c = 0; c < n; c++) {
+			dy[(slot * n) + c] = y[c] - yp[c];
+			df[(slot * n) + c] = f[c] - fp[c];
+		}
+	}
+	for (int64_t c = 0; c < n; c++) {
+		yp[c] = y[c];
+		fp[c] = f[c];
+	}
+	const int mh = ((*cnt < m) ? *cnt : m);
+	double gam[ANDERSON_MAX];
+	for (int j = 0; j < ANDERSON_MAX; j++) gam[j] = 0;
+	if (mh > 0) {
+		double am[ANDERSON_MAX][ANDERSON_MAX + 1];
+		double tr = 0;
+		for (int i = 0; i < mh; i++) {
+			for (int j = 0; j < mh; j++) {
+				double sum = 0;
+				for (int64_t c = 0; c < n; c++) sum += df[(i * n) + c] * df[(j * n) + c];
+				am[i][j] = sum;
+			}
+			double sum = 0;
+			for (int64_t c = 0; c < n; c++) sum += df[(i * n) + c] * f[c];
+			am[i][mh] = sum;
+			tr += am[i][i];
+		}
+		// 正則化 (履歴がほぼ線形従属のとき)。正規方程式は正定値なのでピボット不要
+		for (int i = 0; i < mh; i++) am[i][i] += (1e-12 * tr) + 1e-300;
+		int sing = 0;
+		for (int k = 0; k < mh; k++) {
+			if (am[k][k] <= 0) { sing = 1; break; }
+			for (int i = k + 1; i < mh; i++) {
+				const double r = am[i][k] / am[k][k];
+				for (int j = k; j <= mh; j++) am[i][j] -= r * am[k][j];
+			}
+		}
+		for (int k = mh - 1; !sing && (k >= 0); k--) {
+			double sum = am[k][mh];
+			for (int j = k + 1; j < mh; j++) sum -= am[k][j] * gam[j];
+			gam[k] = sum / am[k][k];
+		}
+		if (sing) {
+			for (int j = 0; j < ANDERSON_MAX; j++) gam[j] = 0;
+		}
+	}
+	for (int64_t c = 0; c < n; c++) {
+		double v = y[c] + (relax * f[c]);
+		for (int j = 0; j < mh; j++) v -= gam[j] * (dy[(j * n) + c] + (relax * df[(j * n) + c]));
+		y[c] = v;
+	}
+	(*cnt)++;
+}

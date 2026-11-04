@@ -97,6 +97,96 @@ void mpi_recv_dbl(double *buf, int n, int src, int tag)
 	MPI_Recv(buf, n, MPI_DOUBLE, src, tag, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 }
 
+
+/*
+行ブロックの行列ベクトル積 (mpisolve = 1)。全 rank が同じ行列を持ち (組み立ては複製)、crs_spmv() の
+行を連続ブロックに分けて各 rank が自分の行だけ計算し、Allgatherv で全体を揃える。行ごとの和の順序は
+分け方に依らないので、結果は直列と**ビット単位で同じ**になる (内積などそれ以外の演算は全 rank が
+直列と同じ順に重複して行う)。
+*/
+static int RowOn = 0, RowSize = 1, RowRank = 0;
+static int *RowCnt = NULL, *RowDsp = NULL;
+
+void mpi_rows_enable(int on)
+{
+	RowSize = mpi_size();
+	RowRank = mpi_rank();
+	RowOn = (on && (RowSize > 1));
+	if (RowOn && (RowCnt == NULL)) {
+		RowCnt = (int *)malloc((size_t)RowSize * sizeof(int));
+		RowDsp = (int *)malloc((size_t)RowSize * sizeof(int));
+	}
+}
+
+
+int mpi_enabled(void)
+{
+	return 1;
+}
+
+
+void mpi_row_range(int n, int *r0, int *r1)
+{
+	if (!RowOn) {
+		*r0 = 0;
+		*r1 = n;
+		return;
+	}
+	*r0 = (int)(((int64_t)n * RowRank) / RowSize);
+	*r1 = (int)(((int64_t)n * (RowRank + 1)) / RowSize);
+}
+
+
+void mpi_allgather_rows(double *y, int n)
+{
+	if (!RowOn) return;
+	for (int r = 0; r < RowSize; r++) {
+		const int a = (int)(((int64_t)n * r) / RowSize);
+		const int b = (int)(((int64_t)n * (r + 1)) / RowSize);
+		RowDsp[r] = a;
+		RowCnt[r] = b - a;
+	}
+	MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, y, RowCnt, RowDsp, MPI_DOUBLE, MPI_COMM_WORLD);
+}
+
+
+// 行ブロックの分け方で分散した CRS の非零の列 (自分の nmine 個) を全体 (all、全体の行の先頭 rowptr) に集める。
+// rank r の非零は全体の rowptr[a_r] .. rowptr[b_r] (a_r, b_r は mpi_row_range の行範囲)
+void mpi_allgather_nnz(const double *mine, int64_t nmine, double *all, const int64_t *rowptr, int n)
+{
+	if (!RowOn) {
+		memcpy(all, mine, (size_t)nmine * sizeof(double));
+		return;
+	}
+	for (int r = 0; r < RowSize; r++) {
+		const int a = (int)(((int64_t)n * r) / RowSize);
+		const int b = (int)(((int64_t)n * (r + 1)) / RowSize);
+		RowDsp[r] = (int)rowptr[a];
+		RowCnt[r] = (int)(rowptr[b] - rowptr[a]);
+	}
+	MPI_Allgatherv(mine, (int)nmine, MPI_DOUBLE, all, RowCnt, RowDsp, MPI_DOUBLE, MPI_COMM_WORLD);
+}
+
+
+// 行 row (n 行の行ブロック分割) を持つ rank
+int mpi_row_owner(int n, int row)
+{
+	if (!RowOn) return 0;
+	for (int r = 0; r < RowSize; r++) {
+		const int b = (int)(((int64_t)n * (r + 1)) / RowSize);
+		if (row < b) return r;
+	}
+	return RowSize - 1;
+}
+
+
+// root の値を全 rank に配る (行列を分散したとき、他の rank の行の内積を受け取る)
+void mpi_bcast_dbl(double *buf, int n, int root)
+{
+	if (!RowOn) return;
+	MPI_Bcast(buf, n, MPI_DOUBLE, root, MPI_COMM_WORLD);
+}
+
 #else		// !OFE_MPI : スタブ (直列)
 
 int mpi_init(int *argc, char ***argv)
@@ -163,4 +253,62 @@ void mpi_recv_dbl(double *buf, int n, int src, int tag)
 	(void)buf; (void)n; (void)src; (void)tag;
 }
 
+
+void mpi_rows_enable(int on)
+{
+	(void)on;
+}
+
+
+int mpi_enabled(void)
+{
+	return 0;
+}
+
+
+void mpi_row_range(int n, int *r0, int *r1)
+{
+	*r0 = 0;
+	*r1 = n;
+}
+
+
+void mpi_allgather_rows(double *y, int n)
+{
+	(void)y; (void)n;
+}
+
+
+int mpi_row_owner(int n, int row)
+{
+	(void)n; (void)row;
+	return 0;
+}
+
+
+void mpi_allgather_nnz(const double *mine, int64_t nmine, double *all, const int64_t *rowptr, int n)
+{
+	(void)rowptr; (void)n;
+	memcpy(all, mine, (size_t)nmine * sizeof(double));
+}
+
+
+void mpi_bcast_dbl(double *buf, int n, int root)
+{
+	(void)buf; (void)n; (void)root;
+}
+
 #endif		// OFE_MPI
+
+
+// 出力ファイルを開く。rank 0 以外 (mpisolve で全 rank が同じ計算をしているとき) は null デバイスに
+// 書いて捨てる (同じ作業ディレクトリの同じ名前のファイルを壊し合わないように)
+FILE *mpi_fopen_out(const char *fn, const char *mode)
+{
+	if (mpi_rank() == 0) return fopen(fn, mode);
+#ifdef _WIN32
+	return fopen("NUL", mode);
+#else
+	return fopen("/dev/null", mode);
+#endif
+}

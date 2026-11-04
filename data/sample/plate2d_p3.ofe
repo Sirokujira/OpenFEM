@@ -1,0 +1,29 @@
+OpenFEM 1 0
+title = parallel plate line on a third-order (10-node triangle) 2-D mesh
+#
+# 断面 2 次元の 3 次要素 (10 節点三角形、gmsh の tri10)。形状は plate2d_dc.ofe と同じ
+# 平行平板線路 (W = 1mm、t = 0.05mm、d = 0.2mm、σ = 5.8e7) で、格子は gmsh 製
+# (plate2d_p3.geo、導体内を両面に向けて 4 分割、幅 10 分割)。
+#
+#   Ldc = μ0 (d + 2t/3) / W = 2.932153e-07 [H/m]   (導体内の Az は 2 次なので P2 / P3 で厳密)
+#   Rs  = 2 / (σ W t)        = 6.896552e-01 [ohm/m]
+#
+# 渦電流 (analysis = F、plate2d_ac.ofe の形) の 1 次元厳密解
+#   Z = 2 γ/(σW) coth(γt) + jωμ0 d/W,  γ = (1 + j)/δ
+# に対して、10 MHz (t/δ = 2.4) で R +6.7e-8、L +1.8e-7 (同じ頂点の 2 次格子
+# plate2d_p3o2.msh は R +4.9e-4、L +7.8e-6)。rlc_check.sh の [plate2d_p3] で見る。
+#
+mesh = plate2d_p3.msh
+material = 1.0 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+conductorsigma = 0 5.8e7
+conductorsigma = 1 5.8e7
+
+analysis = M
+tline = X
+current = 1
+solver = 200000 5000 1e-11
+end

@@ -14,6 +14,7 @@ mesh / material / geometry の書式は .ofd からそのまま流用できる�
 #include <stdarg.h>
 
 #define MAXTOKEN (1000)
+#define INPUT_LINE (32768)		// 入力の 1 行の最大長 (電流掃引の 256 点 x 2 本が入る)
 #define ARRAY_INC (1000)
 
 // 空白区切りでトークンに分解する ("str" は破壊される)
@@ -193,6 +194,128 @@ int material_freq(void)
 }
 
 
+/*
+磁性体の非線形 (B-H) とヒステリシス (J-A) の入力の検査。構造格子と断面 2 次元の三角形の格子 (M / F) の両方で呼ぶ
+(input_data() は非構造格子のとき途中で return するので、そこに置いた検査は三角形の格子に効かない — 単一ポート・
+currentsweep の既定値などが三角形の格子で黙って抜けていた)
+*/
+static int mag_nl_checks(void)
+{
+	// 非線形磁性体 (B-H) は重ね合わせが成り立たないので単一ポートに限る
+	int nonlinear = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].nbh[0] > 0) nonlinear = 1;
+		// 軸毎に与えるときは 3 軸とも必要
+		if (Material[m].bhaniso) {
+			for (int d = 0; d < 3; d++) {
+				if (Material[m].nbh[d] <= 0) {
+					printf("*** bh : material %d needs a curve for all three axes "
+						"when axes are specified\n", m);
+					return 1;
+				}
+			}
+		}
+	}
+	// ヒステリシス (Jiles-Atherton)
+	int hysteresis = 0;
+	for (int m = 0; m < NMaterial; m++) {
+		if (Material[m].ja.on) hysteresis = 1;
+		if (Material[m].ja.on && (Material[m].nbh[0] > 0)) {
+			printf("*** material %d cannot have both bh and ja\n", m);
+			return 1;
+		}
+	}
+	if (hysteresis) {
+		// 異方性の J-A はベクトル J-A だけが読む (スカラーの J-A は場の向きを持たない)
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.aniso && !JaVector) {
+				printf("%s\n", "*** jaaxis (anisotropic J-A) needs javector = 1 with analysis M");
+				return 1;
+			}
+		}
+		if (!(Analysis & ANALYSIS_M)) {
+			printf("%s\n", "*** the ja key needs analysis M (magnetostatic)");
+			return 1;
+		}
+		if (Analysis & ANALYSIS_F) {
+			printf("%s\n", "*** the ja key cannot be combined with analysis F");
+			return 1;
+		}
+		if (NSweep2 > 0) {
+			// 2 ポートの掃引 (回転磁界) : 2 番目のポートの電流を currentsweep2 で与える
+			if (NPort != 2) {
+				printf("%s\n", "*** currentsweep2 needs exactly two ports (conductors 1 and 2)");
+				return 1;
+			}
+			if (NSweep2 != NSweep) {
+				printf("%s\n", "*** currentsweep2 needs as many points as currentsweep");
+				return 1;
+			}
+			if (TransientOn) {
+				printf("%s\n", "*** currentsweep2 cannot be combined with transient");
+				return 1;
+			}
+		}
+		else if (NPort != 1) {
+			printf("%s\n", "*** a hysteretic (ja) model requires exactly one port "
+				"(two ports with currentsweep2)");
+			return 1;
+		}
+		if (NSweep < 1) {
+			// 掃引が無いときは current の 1 点だけを処女曲線として解く
+			NSweep = 1;
+			Sweep[0] = Curr;
+		}
+	}
+	else if (NSweep > 0) {
+		printf("%s\n", "*** currentsweep needs a hysteretic (ja) material");
+		return 1;
+	}
+	if ((NSweep2 > 0) && !hysteresis) {
+		printf("%s\n", "*** currentsweep2 needs a hysteretic (ja) material and currentsweep");
+		return 1;
+	}
+	if (!hysteresis && JaVector) {
+		input_warn("javector has no effect without a hysteretic (ja) material");
+	}
+	if (!hysteresis && JaProbeOn) {
+		input_warn("japrobe has no effect without a hysteretic (ja) material");
+	}
+	if ((NFreqSweep > 0) && (NSweep > 0)) {
+		printf("%s\n", "*** frequencysweep and currentsweep cannot be combined");
+		return 1;
+	}
+
+	if (nonlinear) {
+		// M (静磁場) は Newton、F (渦電流) は実効磁気抵抗率法 (波高値 |B| での ν)
+		if (!(Analysis & (ANALYSIS_M | ANALYSIS_F))) {
+			printf("%s\n", "*** the bh key needs analysis M (magnetostatic) or F (eddy current)");
+			return 1;
+		}
+		if (Analysis & ANALYSIS_F) {
+			for (int m = 0; m < NMaterial; m++) {
+				if (Material[m].bhaniso) {
+					printf("%s\n", "*** analysis F supports isotropic bh curves only "
+						"(not per-axis curves)");
+					return 1;
+				}
+			}
+			if (NFreqSweep > 0) {
+				printf("%s\n", "*** a nonlinear (bh) analysis F cannot be combined with "
+					"frequencysweep (solve each frequency separately)");
+				return 1;
+			}
+		}
+		if (NPort != 1) {
+			printf("%s\n", "*** a nonlinear (bh) model requires exactly one port "
+				"(superposition does not hold)");
+			return 1;
+		}
+	}
+	return 0;
+}
+
+
 int input_data(FILE *fp)
 {
 	int    nline = 0;
@@ -200,7 +323,9 @@ int input_data(FILE *fp)
 	int    *dxr = NULL, *dyr = NULL, *dzr = NULL;
 	double *xr = NULL, *yr = NULL, *zr = NULL;
 	char   prog[BUFSIZ];
-	char   strline[BUFSIZ], strkey[BUFSIZ], strsave[BUFSIZ];
+	// 1 行の長さは BUFSIZ に頼らない (MSVC 512 / macOS 1024 / glibc 8192 で違い、長い掃引の行が
+	// Windows と macOS でだけ黙って切れる)
+	static char strline[INPUT_LINE], strkey[INPUT_LINE], strsave[INPUT_LINE];
 	char   *token[MAXTOKEN];
 	const char sep[] = " \t\n\r";
 	const char errfmt1[] = "*** too many %s data\n";
@@ -232,10 +357,15 @@ int input_data(FILE *fp)
 		Material[m].mutempco = 0;
 		Material[m].mutemp0 = 20;
 		Material[m].bhtempco = 0;
+		for (int d = 0; d < 4; d++) Material[m].ntemp[d] = 0;
 		Material[m].bhtemp0 = 20;
+		Material[m].kth = 0;
+		Material[m].cth = 0;
 		Material[m].eps6_given = 0;
 		Material[m].bhaniso = 0;
 		Material[m].ja.on = 0;
+		Material[m].ja.aniso = 0;
+		Material[m].ja.axset = 0;
 		for (int d = 0; d < 3; d++) Material[m].nbh[d] = 0;
 		for (int d = 0; d < 6; d++) {
 			Material[m].eps6[d] = 0;	// 0 : anisoeps 未指定 (最後に epsr で埋める)
@@ -261,8 +391,38 @@ int input_data(FILE *fp)
 		CondSigma[p] = 0;
 		CondTempco[p] = 0;
 		CondTemp0[p] = 20;
+		CondNTemp[p] = 0;
 	}
 	Temperature = 20;
+	ThermalOn = 0;
+	ThermalCurrent = 0;
+	ThermalMaxIter = 200;
+	ThermalTol = 1e-10;
+	for (int p = 0; p < MAXPORT; p++) {
+		HeatSinkOn[p] = 0;
+		HeatSinkT[p] = 20;
+	}
+	ConvH = 0;
+	RadEps = 0;
+	ConvTabN = 0;
+	RadTabN = 0;
+	ProfN[0] = ProfN[1] = 0;
+	ProfAxis[0] = ProfAxis[1] = 0;
+	MpiSolve = 0;
+	ExprOn[0] = ExprOn[1] = 0;
+	ExprT[0] = ExprT[1] = 0;
+	ExprBad[0] = ExprBad[1] = 0;
+	ExprStr[0][0] = ExprStr[1][0] = '\0';
+	RadExchange = 0;
+	NConv = 0;
+	NRad = 0;
+	TransientOn = 0;
+	TransientTime = 0;
+	TransientSteps = 0;
+	TransientTheta = 1;
+	WaveN = 0;
+	WaveT = NULL;
+	WaveF = NULL;
 
 	MeshMode = 0;
 	strcpy(MeshFile, "");
@@ -279,6 +439,9 @@ int input_data(FILE *fp)
 	NSweep = 0;
 	NFreqSweep = 0;
 	JaSub = 20;
+	JaVector = 0;
+	NSweep2 = 0;
+	JaProbeOn = 0;
 
 	NlMaxiter = 50;
 	NlTol = 1e-5;
@@ -292,6 +455,11 @@ int input_data(FILE *fp)
 	// 読み込み
 
 	while (fgets(strline, sizeof(strline), fp) != NULL) {
+		// 行が長すぎて切れた (改行が無く、ファイルの終わりでもない) ら黙って誤読せず入力エラー
+		if ((strchr(strline, '\n') == NULL) && !feof(fp)) {
+			printf("*** input line too long (more than %d characters)\n", INPUT_LINE - 2);
+			return 1;
+		}
 		// コメント
 		char *pcomment = strchr(strline, '#');
 		if (pcomment != NULL) *pcomment = '\0';
@@ -406,11 +574,16 @@ int input_data(FILE *fp)
 			Material[NMaterial].mutempco = 0;
 			Material[NMaterial].mutemp0 = 20;
 			Material[NMaterial].bhtempco = 0;
+			for (int d = 0; d < 4; d++) Material[NMaterial].ntemp[d] = 0;
 			Material[NMaterial].bhtemp0 = 20;
 			Material[NMaterial].temp0 = 20;
+			Material[NMaterial].kth = 0;
+			Material[NMaterial].cth = 0;
 			Material[NMaterial].eps6_given = 0;
 			Material[NMaterial].bhaniso = 0;
 			Material[NMaterial].ja.on = 0;
+			Material[NMaterial].ja.aniso = 0;
+			Material[NMaterial].ja.axset = 0;
 			for (int d = 0; d < 3; d++) Material[NMaterial].nbh[d] = 0;
 			for (int d = 0; d < 6; d++) {
 				Material[NMaterial].eps6[d] = 0;
@@ -750,6 +923,39 @@ int input_data(FILE *fp)
 			else if (strkey[0] == 'm') { Material[mid].mutempco  = al; Material[mid].mutemp0  = t0; }
 			else                       { Material[mid].bhtempco  = al; Material[mid].bhtemp0  = t0; }
 		}
+		else if (!strcmp(strkey, "epstemptable") || !strcmp(strkey, "mutemptable")
+		      || !strcmp(strkey, "bhtemptable") || !strcmp(strkey, "tempcotable")) {
+			// epstemptable / mutemptable / bhtemptable = <material_id> <T1> <f1> <T2> <f2> ...
+			//   εr / μr / B-H 曲線に掛ける倍率 f(T) を (温度, 倍率) の折れ線で与える
+			//   (範囲の外は端の値)。1 次係数 (*tempco) の代わりに使い、キュリー点
+			//   近傍の非線形な落ち込みを書く (例 : Tc を越えたら μr -> 1)
+			// tempcotable = <material_id> <T1> <f1> ...  : 抵抗率の倍率 ρ(T)/ρ0 の折れ線
+			//   (σ(T) = σ0 / f(T)、tempco の 1 + α(T - T0) の代わり)
+			const int kind = ((strkey[0] == 'e') ? 0 : (strkey[0] == 'm') ? 1
+				: (strkey[0] == 'b') ? 2 : 3);
+			if ((nval < 3) || ((nval % 2) == 0) || (((nval - 1) / 2) > MAXTEMPTAB)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			if ((mid < 0) || (mid >= NMaterial) || (Material[mid].ntemp[kind] > 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			material_t *mt = &Material[mid];
+			const int nt = (nval - 1) / 2;
+			for (int k = 0; k < nt; k++) {
+				mt->tempT[kind][k] = atof(token[3 + (2 * k)]);
+				mt->tempF[kind][k] = atof(token[4 + (2 * k)]);
+				// 温度は狭義単調増加、倍率は正 (0 以下は εr / μr / B が破綻する)
+				if ((mt->tempF[kind][k] <= 0)
+				 || ((k > 0) && (mt->tempT[kind][k] <= mt->tempT[kind][k - 1]))) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+			}
+			mt->ntemp[kind] = nt;
+		}
 		else if (!strcmp(strkey, "conductortempco")) {
 			// conductortempco = <conductor_id> <alpha> [<T0>]
 			//   conductorsigma で与えた導体の σ に同じモデルを適用する
@@ -765,6 +971,272 @@ int input_data(FILE *fp)
 			}
 			CondTempco[cid] = atof(token[3]);
 			if (nval == 3) CondTemp0[cid] = atof(token[4]);
+		}
+		else if (!strcmp(strkey, "conductortempcotable")) {
+			// conductortempcotable = <conductor_id> <T1> <f1> <T2> <f2> ...
+			//   conductortempco の代わりに抵抗率の倍率 ρ(T)/ρ0 = f(T) を折れ線で与える
+			//   (CondSigma = σ0 / f、範囲の外は端の値)
+			if ((nval < 3) || ((nval % 2) == 0) || (((nval - 1) / 2) > MAXTEMPTAB)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int cid = atoi(token[2]);
+			if ((cid < 0) || (cid >= MAXPORT) || (CondNTemp[cid] > 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int nt = (nval - 1) / 2;
+			for (int k = 0; k < nt; k++) {
+				CondTempT[cid][k] = atof(token[3 + (2 * k)]);
+				CondTempF[cid][k] = atof(token[4 + (2 * k)]);
+				if ((CondTempF[cid][k] <= 0) || ((k > 0) && (CondTempT[cid][k] <= CondTempT[cid][k - 1]))) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+			}
+			CondNTemp[cid] = nt;
+		}
+		else if (!strcmp(strkey, "kthermal")) {
+			// kthermal = <material_id> <k [W/(m K)]>  : 熱伝導率 (熱連成 thermal で使う)
+			//   material 行より後に書くこと (材料番号を参照するため)
+			if (nval != 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			const double k = atof(token[3]);
+			if ((mid < 0) || (mid >= NMaterial) || (k < 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			Material[mid].kth = k;
+		}
+		else if (!strcmp(strkey, "heatcap")) {
+			// heatcap = <material_id> <ρc [J/(m^3 K)]>  : 体積熱容量 (密度 x 比熱)
+			//   熱連成の過渡解析 (transient) で使う。material 行より後に書くこと
+			if (nval != 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			const double c = atof(token[3]);
+			if ((mid < 0) || (mid >= NMaterial) || (c < 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			Material[mid].cth = c;
+		}
+		else if (!strcmp(strkey, "transient")) {
+			// transient = <t_end [s]> <nstep> [<theta>]  : 熱連成を過渡解析にする
+			//   t = 0 で電流 I を入れ、温度 temperature (一様) から θ 法で
+			//   時間発展させる。θ = 1 (既定) は後退 Euler、0.5 は Crank-Nicolson。
+			//   θ < 0.5 は条件付き安定なので受け付けない
+			if ((nval < 2) || (nval > 3)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			TransientOn = 1;
+			TransientTime = atof(token[2]);
+			TransientSteps = atoi(token[3]);
+			if (nval >= 3) TransientTheta = atof(token[4]);
+			if ((TransientTime <= 0) || (TransientSteps < 1)
+			 || (TransientTheta < 0.5) || (TransientTheta > 1)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+		}
+		else if (!strcmp(strkey, "waveform")) {
+			// waveform = <t0> <f0> <t1> <f1> ...  : 過渡解析の電流 I(t) = I x f(t)
+			//   f は (t, f) の折れ線 (範囲の外は端の値)。時刻は単調非減少で、同じ時刻を
+			//   2 回書くと段差になる (その時刻ちょうどではあとの値)。省略時は f = 1
+			if ((nval < 2) || (nval % 2) || (WaveN > 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			WaveN = nval / 2;
+			WaveT = (double *)malloc((size_t)WaveN * sizeof(double));
+			WaveF = (double *)malloc((size_t)WaveN * sizeof(double));
+			for (int k = 0; k < WaveN; k++) {
+				WaveT[k] = atof(token[2 + (2 * k)]);
+				WaveF[k] = atof(token[3 + (2 * k)]);
+				if ((k > 0) && (WaveT[k] < WaveT[k - 1])) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+			}
+		}
+		else if (!strcmp(strkey, "heatsink")) {
+			// heatsink = <conductor_id> <T [degC]>  : その導体の節点の温度を固定する
+			//   熱の逃げ場。少なくとも 1 つ要る (無いと発熱の行き場が無く定常解が無い)
+			if (nval != 2) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int cid = atoi(token[2]);
+			if ((cid < 0) || (cid >= MAXPORT)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			HeatSinkOn[cid] = 1;
+			HeatSinkT[cid] = atof(token[3]);
+		}
+		else if (!strcmp(strkey, "convection") || !strcmp(strkey, "radiation")) {
+			// convection = <h [W/(m^2 K)]> <T_amb [degC]> [<x1> <x2> <y1> <y2> <z1> <z2>]
+			//   表面からの対流 -k dT/dn = h (T - T_amb) (熱連成)
+			// radiation  = <ε> <T_amb [degC]> [<x1> <x2> <y1> <y2> <z1> <z2>]
+			//   表面からの輻射 -k dT/dn = ε σ_SB (T^4 - T_amb^4) (絶対温度)。周囲は
+			//   温度 T_amb の黒体の壁とみなす (面どうしの相互放射は扱わない)
+			// どちらも熱を通す領域の露出面 (隣が熱を通さないセルか格子の外) に課し、
+			// 電極の面は端子に接しているので除く。何行でも書け、直方体を付けると
+			// 中心がその中にある面だけに効く。面は**あとに書いた行ほど優先**する
+			// (直方体なしの行で既定を決め、あとの行で一部を上書きする)
+			const int rad = !strcmp(strkey, "radiation");
+			surfbc_t *bc = (rad ? &RadBC[NRad] : &ConvBC[NConv]);
+			if (((nval != 2) && (nval != 8)) || ((rad ? NRad : NConv) >= MAXSURF)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			bc->c = atof(token[2]);
+			bc->t = atof(token[3]);
+			bc->box = (nval == 8);
+			for (int d = 0; d < 6; d++) bc->g[d] = (bc->box ? atof(token[4 + d]) : 0);
+			int bad = (bc->c < 0) || (rad && ((bc->c > 1) || (bc->t <= -KELVIN)));
+			for (int d = 0; bc->box && (d < 3); d++) {
+				if (bc->g[2 * d] > bc->g[(2 * d) + 1]) bad = 1;
+			}
+			if (bad) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			if (rad) {
+				if (bc->c > RadEps) RadEps = bc->c;
+				NRad++;
+			}
+			else {
+				if (bc->c > ConvH) ConvH = bc->c;
+				NConv++;
+			}
+		}
+		else if (!strcmp(strkey, "convectiontemptable") || !strcmp(strkey, "radiationtemptable")) {
+			// convectiontemptable = <T1> <f1> <T2> <f2> ...
+			// radiationtemptable = <T1> <f1> ...  : 輻射の ε(T) = ε f(T) (同じ折れ線、ε f ≤ 1)
+			//   対流の h を面の温度 T の関数にする : h(T) = h f(T) (すべての convection 行に
+			//   掛かる、折れ線で範囲の外は端の値)。自然対流 h ∝ (T - T_a)^(1/4) などを書く。
+			//   対流が非線形になるので輻射と同じく Picard の各回で Newton 線形化する
+			const int isrd = (strkey[0] == 'r');
+			int *tn = (isrd ? &RadTabN : &ConvTabN);
+			double *tt = (isrd ? RadTabT : ConvTabT);
+			double *tf = (isrd ? RadTabF : ConvTabF);
+			if ((nval < 2) || ((nval % 2) != 0) || ((nval / 2) > MAXTEMPTAB) || (*tn > 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int nt = nval / 2;
+			for (int k = 0; k < nt; k++) {
+				tt[k] = atof(token[2 + (2 * k)]);
+				tf[k] = atof(token[3 + (2 * k)]);
+				// 温度は狭義単調増加、倍率は 0 以上 (自然対流は T = T_a で h = 0)
+				if ((tf[k] < 0) || ((k > 0) && (tt[k] <= tt[k - 1]))) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+			}
+			*tn = nt;
+		}
+		else if (!strcmp(strkey, "convectionprofile") || !strcmp(strkey, "radiationprofile")) {
+			// convectionprofile = <x|y|z> <p1> <f1> <p2> <f2> ...
+			// radiationprofile  = <x|y|z> <p1> <f1> ...
+			//   h (ε) を位置の連続関数にする : h(r) = h f(r の軸成分) (すべての行に掛かる、折れ線で
+			//   範囲の外は端の値)。面の中心で引く (直方体で面を選ぶのと同じ点)。高さで変わる自然対流など
+			const int k = ((strkey[0] == 'r') ? 1 : 0);
+			const char ax = token[2][0];
+			if ((nval < 3) || (((nval - 1) % 2) != 0) || (((nval - 1) / 2) > MAXTEMPTAB) || (ProfN[k] > 0)
+			 || (token[2][1] != '\0') || ((ax != 'x') && (ax != 'y') && (ax != 'z'))) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int np = (nval - 1) / 2;
+			for (int i = 0; i < np; i++) {
+				ProfX[k][i] = atof(token[3 + (2 * i)]);
+				ProfF[k][i] = atof(token[4 + (2 * i)]);
+				// 位置は狭義単調増加、倍率は 0 以上
+				if ((ProfF[k][i] < 0) || ((i > 0) && (ProfX[k][i] <= ProfX[k][i - 1]))) {
+					printf(errfmt2, strkey);
+					return 1;
+				}
+			}
+			ProfAxis[k] = ax - 'x';
+			ProfN[k] = np;
+		}
+		else if (!strcmp(strkey, "mpisolve")) {
+			// mpisolve = 0 | 1 : 1 で mpirun の rank に行列ベクトル積を行ブロックで分ける (掃引の点の
+			//   分散の代わり。出力は直列とバイト一致)。WITH_MPI=OFF のビルドでは黙って直列に落ちず入力エラー
+			// mpisolve = 2 : さらに行列そのものを行ブロックで分散する (各 rank は自分の行だけを組み立てて持つ。
+			//   構造格子の C / L / R だけ。出力は同じくバイト一致)
+			if ((nval != 1) || (atoi(token[2]) < 0) || (atoi(token[2]) > 2)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			MpiSolve = atoi(token[2]);
+			if (MpiSolve && !mpi_enabled()) {
+				printf("%s\n", "*** mpisolve = 1 / 2 needs a build with -DWITH_MPI=ON (this binary was built without MPI)");
+				return 1;
+			}
+		}
+		else if (!strcmp(strkey, "convectionexpr") || !strcmp(strkey, "radiationexpr")) {
+			// convectionexpr = <式 f(x, y, z)>   (radiationexpr も同じ)
+			//   h (ε) に面の中心での f を掛ける (convectionprofile と併用すれば両方の積)。式は + - * / ^、
+			//   括弧、x y z [m]、pi、sin cos tan exp log sqrt abs tanh step min max pow (sol/expr.c)
+			const int k = ((strkey[0] == 'r') ? 1 : 0);
+			char buf[EXPR_MAXLEN];
+			size_t len = 0;
+			buf[0] = '\0';
+			for (int i = 2; i < ntoken; i++) {
+				const size_t l = strlen(token[i]);
+				if ((len + l + 2) >= sizeof(buf)) {
+					len = sizeof(buf);
+					break;
+				}
+				if (i > 2) buf[len++] = ' ';
+				memcpy(&buf[len], token[i], l);
+				len += l;
+				buf[len] = '\0';
+			}
+			if ((nval < 1) || ExprOn[k] || (len >= sizeof(buf)) || expr_compile(buf, &ExprF[k])) {
+				printf("*** invalid %s (syntax error, unknown name or given twice) : %s\n", strkey,
+					((len < sizeof(buf)) ? buf : "(too long)"));
+				return 1;
+			}
+			strcpy(ExprStr[k], buf);
+			ExprOn[k] = 1;
+			ExprT[k] = expr_uses_t(&ExprF[k]);
+		}
+		else if (!strcmp(strkey, "radiationexchange")) {
+			// radiationexchange = 1 : 輻射を課した露出面どうしの相互放射 (灰色・拡散、形態係数は
+			//   閉形式、遮蔽は面の中心どうしの線分で判定)。0 なら各面は周囲 (T_r) とだけ交換する
+			if ((nval != 1) || ((atoi(token[2]) != 0) && (atoi(token[2]) != 1))) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			RadExchange = atoi(token[2]);
+		}
+		else if (!strcmp(strkey, "thermal")) {
+			// thermal = <I [A]> [<maxiter> [<tol>]]  : 電気-熱連成 (定常、analysis = R)
+			//   ポートに電流 I を流したときの Joule 発熱で温度分布を解き、
+			//   σ(T) = σ0/(1 + α(T - T0)) (tempco) を要素ごとに更新して R が
+			//   収束するまで繰り返す
+			if ((nval < 1) || (nval > 3)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ThermalOn = 1;
+			ThermalCurrent = atof(token[2]);
+			if (nval >= 2) ThermalMaxIter = atoi(token[3]);
+			if (nval >= 3) ThermalTol = atof(token[4]);
+			if ((ThermalCurrent <= 0) || (ThermalMaxIter < 1) || (ThermalTol <= 0)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
 		}
 		else if (!strcmp(strkey, "frequencysweep")) {
 			// frequencysweep = <f1> <f2> ...        : 周波数を明示列挙
@@ -878,6 +1350,29 @@ int input_data(FILE *fp)
 			}
 			ja->on = 1;
 		}
+		else if (!strcmp(strkey, "jaaxis")) {
+			// jaaxis = <material_id> <x|y|z> <Ms> <a> <alpha> <k> <c>
+			//   異方性の J-A : その軸の成分のパラメータ (指定しない軸は ja の行の値)。ベクトル J-A 専用
+			if (nval < 7) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			const int mid = atoi(token[2]);
+			const char ax = (char)tolower((int)token[3][0]);
+			const int d = ((ax == 'x') ? 0 : (ax == 'y') ? 1 : (ax == 'z') ? 2 : -1);
+			if ((mid < 2) || (mid >= NMaterial) || (d < 0) || (token[3][1] != '\0')) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ja_t *ja = &Material[mid].ja;
+			for (int q = 0; q < 5; q++) ja->axp[d][q] = atof(token[4 + q]);
+			const double *pa = ja->axp[d];
+			if ((pa[0] <= 0) || (pa[1] <= 0) || (pa[3] <= 0) || (pa[2] < 0) || (pa[4] < 0) || (pa[4] >= 1)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			ja->axset |= (1 << d);
+		}
 		else if (!strcmp(strkey, "currentsweep")) {
 			// currentsweep = <I1> <I2> ...  : 履歴に沿って順に解く
 			if (nval < 1) {
@@ -892,6 +1387,33 @@ int input_data(FILE *fp)
 			for (int q = 0; q < nval; q++) {
 				Sweep[q] = atof(token[2 + q]);
 			}
+		}
+		else if (!strcmp(strkey, "currentsweep2")) {
+			// currentsweep2 = <I1> <I2> ...  : 2 番目のポートの電流 (currentsweep と同じ点数)。
+			//   2 つのポートの電流の位相をずらすと回転磁界になる (javector と使う)
+			if ((nval < 1) || (nval > MAXSWEEP)) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			NSweep2 = nval;
+			for (int q = 0; q < nval; q++) Sweep2[q] = atof(token[2 + q]);
+		}
+		else if (!strcmp(strkey, "javector")) {
+			// javector = 0 | 1 : 1 でベクトル J-A (等方性、断面 2 次元の面内 2 成分)
+			if ((nval != 1) || ((atoi(token[2]) != 0) && (atoi(token[2]) != 1))) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			JaVector = atoi(token[2]);
+		}
+		else if (!strcmp(strkey, "japrobe")) {
+			// japrobe = <x> <y> <z> : その点に近い Gauss 点の H, B (面内のベクトル) を掃引の各点でログに出す
+			if (nval != 3) {
+				printf(errfmt2, strkey);
+				return 1;
+			}
+			for (int q = 0; q < 3; q++) JaProbe[q] = atof(token[2 + q]);
+			JaProbeOn = 1;
 		}
 		else if (!strcmp(strkey, "jasub")) {
 			// jasub = <n>  : 1 ステップあたりの J-A 部分積分数
@@ -1014,6 +1536,21 @@ int input_data(FILE *fp)
 		}
 	}
 
+	// 異方性の J-A : 指定しない軸を ja の行の値で埋める (温度補正の Ms の倍率より前に)
+	for (int m = 0; m < NMaterial; m++) {
+		ja_t *ja = &Material[m].ja;
+		if (!ja->axset) continue;
+		if (!ja->on) {
+			printf("*** jaaxis : material %d has no ja line (give the Jiles-Atherton parameters with ja first)\n", m);
+			return 1;
+		}
+		for (int d = 0; d < 3; d++) {
+			if (ja->axset & (1 << d)) continue;
+			ja->axp[d][0] = ja->ms; ja->axp[d][1] = ja->a; ja->axp[d][2] = ja->alpha;
+			ja->axp[d][3] = ja->k; ja->axp[d][4] = ja->c;
+		}
+		ja->aniso = 1;
+	}
 	// 分散材料の展開と異方性の埋め (周波数掃引では material_freq を呼び直す)
 	// 導電率の温度補正 σ(T) = σ0/(1 + α(T-T0))。
 	// σ の読み出し箇所は Material[].sigma (R / A / E) と CondSigma[] (Rs / F) の
@@ -1021,8 +1558,8 @@ int input_data(FILE *fp)
 	// 補正し忘れる箇所が原理的に出ない。α = 0 (既定) なら何も変わらない。
 	for (int m = 0; m < NMaterial; m++) {
 		material_t *mt = &Material[m];
-		if (mt->tempco == 0) continue;
-		const double den = 1 + (mt->tempco * (Temperature - mt->temp0));
+		if ((mt->tempco == 0) && (mt->ntemp[3] < 1)) continue;
+		const double den = temp_factor(mt, 3);
 		if (den <= 0) {
 			printf("*** tempco : material %d has a non-positive resistivity factor "
 				"(1 + alpha (T - T0) = %.4e) at T = %.4e degC\n", m, den, Temperature);
@@ -1035,8 +1572,8 @@ int input_data(FILE *fp)
 	// 上書きするのでここでは掛けられず、読み出し時 (material_coef_pub) に掛ける
 	for (int m = 0; m < NMaterial; m++) {
 		material_t *mt = &Material[m];
-		if (mt->bhtempco == 0) continue;
-		const double fac = 1 + (mt->bhtempco * (Temperature - mt->bhtemp0));
+		if ((mt->bhtempco == 0) && (mt->ntemp[2] < 1)) continue;
+		const double fac = temp_factor(mt, 2);
 		if (fac <= 0) {
 			printf("*** bhtempco : material %d has a non-positive factor "
 				"(1 + alpha (T - T0) = %.4e) at T = %.4e degC\n", m, fac, Temperature);
@@ -1046,12 +1583,25 @@ int input_data(FILE *fp)
 			for (int i = 0; i < mt->nbh[d]; i++) mt->bh_b[d][i] *= fac;
 		}
 		if (mt->ja.on) mt->ja.ms *= fac;		// 飽和磁化も同じ割合で動く
+		if (mt->ja.aniso) {
+			for (int d = 0; d < 3; d++) mt->ja.axp[d][0] *= fac;
+		}
 	}
 	// εr / μr の係数はここでは掛けないが、符号が破綻していないかは見ておく
 	for (int m = 0; m < NMaterial; m++) {
 		const material_t *mt = &Material[m];
-		const double fe = 1 + (mt->epstempco * (Temperature - mt->epstemp0));
-		const double fm = 1 + (mt->mutempco  * (Temperature - mt->mutemp0));
+		const double fe = temp_factor(mt, 0);
+		const double fm = temp_factor(mt, 1);
+		// 1 次係数と表の両方は、どちらを使うかが曖昧なので受け付けない
+		static const char *tname[4] = {"epstempco and epstemptable",
+			"mutempco and mutemptable", "bhtempco and bhtemptable", "tempco and tempcotable"};
+		const double tco[4] = {mt->epstempco, mt->mutempco, mt->bhtempco, mt->tempco};
+		for (int d = 0; d < 4; d++) {
+			if ((mt->ntemp[d] > 0) && (tco[d] != 0)) {
+				printf("*** material %d has both %s; give only one\n", m, tname[d]);
+				return 1;
+			}
+		}
 		if ((mt->epstempco != 0) && (fe <= 0)) {
 			printf("*** epstempco : material %d has a non-positive factor (%.4e) "
 				"at T = %.4e degC\n", m, fe, Temperature);
@@ -1064,8 +1614,15 @@ int input_data(FILE *fp)
 		}
 	}
 	for (int p = 0; p < MAXPORT; p++) {
-		if (CondTempco[p] == 0) continue;
-		const double den = 1 + (CondTempco[p] * (Temperature - CondTemp0[p]));
+		if ((CondTempco[p] == 0) && (CondNTemp[p] < 1)) continue;
+		if ((CondTempco[p] != 0) && (CondNTemp[p] > 0)) {
+			printf("*** conductor %d has both conductortempco and conductortempcotable; "
+				"give only one\n", p);
+			return 1;
+		}
+		const double den = ((CondNTemp[p] > 0)
+			? table_interp(CondNTemp[p], CondTempT[p], CondTempF[p], Temperature)
+			: (1 + (CondTempco[p] * (Temperature - CondTemp0[p]))));
 		if (den <= 0) {
 			printf("*** conductortempco : conductor %d has a non-positive resistivity "
 				"factor (1 + alpha (T - T0) = %.4e) at T = %.4e degC\n", p, den, Temperature);
@@ -1094,8 +1651,9 @@ int input_data(FILE *fp)
 				if (Material[m].be_d > 0) use_bertotti_sigma = 1;
 			}
 		}
+		// M の過渡解析 (渦電流) は導体でない材料の Material[].sigma を読む
 		const int use_matsig = ((Analysis & (ANALYSIS_R | ANALYSIS_A | ANALYSIS_E)) != 0)
-		                     || use_bertotti_sigma;
+		                     || use_bertotti_sigma || ((Analysis == ANALYSIS_M) && TransientOn);
 		const int use_mu   = (Analysis & (ANALYSIS_M | ANALYSIS_F | ANALYSIS_A | ANALYSIS_E)) != 0;
 		int have_condsig = 0;
 		for (int p = 0; p < MAXPORT; p++) {
@@ -1106,8 +1664,8 @@ int input_data(FILE *fp)
 
 		for (int m = 0; m < NMaterial; m++) {
 			const material_t *mt = &Material[m];
-			if ((mt->tempco != 0) && !use_matsig) {
-				input_warn("tempco (material %d) scales Material.sigma, which only "
+			if (((mt->tempco != 0) || (mt->ntemp[3] > 0)) && !use_matsig) {
+				input_warn("tempco / tempcotable (material %d) scales Material.sigma, which only "
 					"analysis R / A / E reads; for Rs and analysis F use "
 					"conductortempco instead", m);
 			}
@@ -1136,31 +1694,34 @@ int input_data(FILE *fp)
 			}
 			// 温度係数も「どの解析が読むか」を登録する (読まれない指定は無害に
 			// 見えて実は効いていないので、警告が唯一の防波堤になる)
-			if ((mt->epstempco != 0) && !use_eps) {
-				input_warn("epstempco (material %d) scales epsr, which only "
+			if (((mt->epstempco != 0) || (mt->ntemp[0] > 0)) && !use_eps) {
+				input_warn("epstempco / epstemptable (material %d) scales epsr, which only "
 					"analysis C / R read", m);
 			}
-			if ((mt->mutempco != 0) && !use_mu) {
-				input_warn("mutempco (material %d) scales mur, which only "
+			if (((mt->mutempco != 0) || (mt->ntemp[1] > 0)) && !use_mu) {
+				input_warn("mutempco / mutemptable (material %d) scales mur, which only "
 					"analysis M / F / A / E read", m);
 			}
-			if ((mt->bhtempco != 0) && (mt->nbh[0] <= 0) && !mt->ja.on) {
-				input_warn("bhtempco (material %d) has no effect because the material "
-					"has no bh curve and no ja model", m);
+			const int bht = ((mt->bhtempco != 0) || (mt->ntemp[2] > 0));
+			if (bht && (mt->nbh[0] <= 0) && !mt->ja.on) {
+				input_warn("bhtempco / bhtemptable (material %d) has no effect because the "
+					"material has no bh curve and no ja model", m);
 			}
-			if ((mt->bhtempco != 0) && !(Analysis & ANALYSIS_M)) {
-				input_warn("bhtempco (material %d) scales the B-H curve, which only "
-					"analysis M reads", m);
+			if (bht && !(Analysis & ANALYSIS_M)) {
+				input_warn("bhtempco / bhtemptable (material %d) scales the B-H curve, which "
+					"only analysis M reads", m);
 			}
 		}
 		for (int p = 0; p < MAXPORT; p++) {
-			if ((CondTempco[p] != 0) && !use_condsig) {
-				input_warn("conductortempco (conductor %d) scales CondSigma, which only "
-					"Rs and analysis F read; for R / A / E use tempco instead", p);
+			const int ctt = ((CondTempco[p] != 0) || (CondNTemp[p] > 0));
+			if (ctt && !use_condsig) {
+				input_warn("conductortempco / conductortempcotable (conductor %d) scales "
+					"CondSigma, which only Rs and analysis F read; for R / A / E use "
+					"tempco instead", p);
 			}
-			if ((CondTempco[p] != 0) && (CondSigma[p] <= 0)) {
-				input_warn("conductortempco (conductor %d) has no effect because "
-					"conductorsigma was not given for it", p);
+			if (ctt && (CondSigma[p] <= 0)) {
+				input_warn("conductortempco / conductortempcotable (conductor %d) has no "
+					"effect because conductorsigma was not given for it", p);
 			}
 		}
 		// 積層厚だけ与えて σ が無いと古典渦電流項が黙って 0 になる
@@ -1199,6 +1760,287 @@ int input_data(FILE *fp)
 		return 1;
 	}
 
+	// 電気-熱連成 (thermal) の前提。**非構造格子の早期 return より前に置くこと**
+	// (非構造格子にも効かせるため。要素の種別 (1 次四面体だけ) は格子を読むまで
+	// 分からないので solve_thermal() で見る)
+	if (ThermalOn) {
+		// DC (R) か交流の発熱 (A、3 次元渦電流の損失) のどちらか 1 つ
+		if ((Analysis != ANALYSIS_R) && (Analysis != ANALYSIS_A) && (Analysis != ANALYSIS_F)) {
+			printf("%s\n", "*** thermal needs analysis = R alone (the coupling is "
+				"between DC conduction and heat conduction), analysis = A alone "
+				"(AC heating by 3-D eddy currents) or analysis = F alone (AC heating "
+				"on a 2-D cross-section, per unit length)");
+			return 1;
+		}
+		// 発熱は電流の 2 乗なので重ね合わせが効かない (bh と同じ理由)
+		if (NPort != 1) {
+			printf("%s\n", "*** thermal needs exactly one port (Joule heating does "
+				"not superpose, so the port matrix cannot be built port by port)");
+			return 1;
+		}
+		if ((Analysis == ANALYSIS_R) && ((Freq > 0) || (NFreqSweep > 0))) {
+			printf("%s\n", "*** thermal is a DC coupling; remove frequency / "
+				"frequencysweep");
+			return 1;
+		}
+		// 交流の発熱 : 周波数は 1 点 (温度場はその周波数での釣り合い)。非線形 (B-H) は熱連成の各回の σ(T) で
+		// 実効磁気抵抗率の反復を収束するまで解く (入れ子。前の回の ν から始める)。J-A は弾く
+		if ((Analysis == ANALYSIS_A) || (Analysis == ANALYSIS_F)) {
+			if (NFreqSweep > 0) {
+				printf("%s\n", "*** thermal with analysis A / F cannot be combined with "
+					"frequencysweep (solve each frequency separately)");
+				return 1;
+			}
+			if (Freq <= 0) {
+				printf("%s\n", "*** thermal with analysis A / F needs the frequency key");
+				return 1;
+			}
+			for (int m = 0; m < NMaterial; m++) {
+				// J-A (ヒステリシス) は熱連成の交流の発熱では解かない。**この検査が無いと J-A の材料が黙って
+				// 線形 (μr = 1) として解かれていた** (thermal + A + transient + ja が normal end になった、実測)
+				if (Material[m].ja.on) {
+					printf("%s\n", "*** thermal (AC heating) does not support ja (hysteresis) materials; "
+						"use a bh curve, or solve the hysteresis without thermal");
+					return 1;
+				}
+			}
+		}
+		// F は断面 2 次元 (tline が要る)。電流は絶対値で、発熱・R は単位長あたり
+		if (Tline && (Analysis != ANALYSIS_F)) {
+			printf("%s\n", "*** thermal cannot be combined with tline (the drive "
+				"current and the heat are absolute, not per unit length)");
+			return 1;
+		}
+		int nsink = 0;
+		for (int p = 0; p < MAXPORT; p++) {
+			if (!HeatSinkOn[p]) continue;
+			if (p > NPort) {
+				printf("*** heatsink : conductor %d does not exist\n", p);
+				return 1;
+			}
+			nsink++;
+		}
+		// 熱の逃げ場が無いと、発熱し続けるのに温度が定まらない (純 Neumann で
+		// 右辺の和が 0 でない) ので定常解が存在しない。逃げ場はヒートシンクか対流。
+		// 過渡解析なら有限の時刻までは断熱でも解がある (熱容量が行列を正則にする)
+		if (!TransientOn && (nsink < 1) && (ConvH <= 0) && (RadEps <= 0)) {
+			printf("%s\n", "*** thermal needs a way for the heat to leave: at least "
+				"one heatsink (a conductor with a fixed temperature), convection or "
+				"radiation; otherwise there is no steady state");
+			return 1;
+		}
+		// h(T) の表は convection の行に掛かる倍率なので、行が無ければ読まれない
+		if ((ConvTabN > 0) && (NConv < 1)) {
+			input_warn("convectiontemptable has no effect without convection (it scales "
+				"the h of the convection lines)");
+		}
+		if (RadExchange && ExprT[1]) {
+			printf("%s\n", "*** radiationexchange cannot be combined with a radiationexpr that depends on T "
+				"(the radiosity matrix is built once for constant emissivities)");
+			return 1;
+		}
+		if (RadExchange && (RadTabN > 0)) {
+			printf("%s\n", "*** radiationexchange cannot be combined with radiationtemptable "
+				"(the radiosity matrix is built once for constant emissivities)");
+			return 1;
+		}
+		if (RadExchange && (NRad < 1)) {
+			input_warn("radiationexchange has no effect without radiation");
+		}
+		if ((RadTabN > 0) && (NRad < 1)) {
+			input_warn("radiationtemptable has no effect without radiation (it scales "
+				"the emissivity of the radiation lines)");
+		}
+		// 位置の折れ線は convection / radiation の行に掛かる倍率なので、行が無ければ読まれない
+		if ((ProfN[0] > 0) && (NConv < 1)) {
+			input_warn("convectionprofile has no effect without convection (it scales "
+				"the h of the convection lines)");
+		}
+		if ((ProfN[1] > 0) && (NRad < 1)) {
+			input_warn("radiationprofile has no effect without radiation (it scales "
+				"the emissivity of the radiation lines)");
+		}
+		if (ExprOn[0] && (NConv < 1)) {
+			input_warn("convectionexpr has no effect without convection (it scales "
+				"the h of the convection lines)");
+		}
+		if (ExprOn[1] && (NRad < 1)) {
+			input_warn("radiationexpr has no effect without radiation (it scales "
+				"the emissivity of the radiation lines)");
+		}
+		// 倍率が全部 0 なら面から熱が出ない (逃げ場の検査は行の値で見ているので、ここで弾く)
+		for (int k = 0; k < 2; k++) {
+			double fm = 0;
+			for (int i = 0; i < ProfN[k]; i++) fm = ((ProfF[k][i] > fm) ? ProfF[k][i] : fm);
+			if ((ProfN[k] > 0) && (fm <= 0)) {
+				printf("*** %s : all factors are zero\n", (k ? "radiationprofile" : "convectionprofile"));
+				return 1;
+			}
+			if ((k == 1) && (ProfN[1] > 0) && ((RadEps * fm) > 1)) {
+				printf("*** radiationprofile : emissivity %g x factor %g exceeds 1\n", RadEps, fm);
+				return 1;
+			}
+		}
+		if ((ProfN[1] > 0) && (RadTabN > 0)) {
+			double fm = 0, gm = 0;
+			for (int i = 0; i < ProfN[1]; i++) fm = ((ProfF[1][i] > fm) ? ProfF[1][i] : fm);
+			for (int i = 0; i < RadTabN; i++) gm = ((RadTabF[i] > gm) ? RadTabF[i] : gm);
+			if ((RadEps * fm * gm) > 1) {
+				printf("*** radiationprofile x radiationtemptable : emissivity %g x %g x %g exceeds 1\n",
+					RadEps, fm, gm);
+				return 1;
+			}
+		}
+		// 放射率は 1 を越えられない : 表の最大の倍率 x 最大の ε <= 1
+		for (int k = 0; k < RadTabN; k++) {
+			if ((RadEps * RadTabF[k]) > 1) {
+				printf("*** radiationtemptable : emissivity %g x factor %g exceeds 1\n",
+					RadEps, RadTabF[k]);
+				return 1;
+			}
+		}
+		// 電流の流れる材料が熱を通さないと、その要素の発熱が逃げられない
+		for (int m = 0; m < NMaterial; m++) {
+			if ((Material[m].sigma > 0) && (Material[m].kth <= 0)) {
+				printf("*** thermal : material %d conducts current (sigma > 0) but "
+					"has no thermal conductivity (kthermal)\n", m);
+				return 1;
+			}
+		}
+		// 過渡解析では熱を通す材料はすべて熱容量を持つこと (0 なら熱容量の無い
+		// 物体になり、物理的に意味が無い)
+		for (int m = 0; m < NMaterial; m++) {
+			if (TransientOn && (Material[m].kth > 0) && (Material[m].cth <= 0)) {
+				printf("*** transient : material %d conducts heat (kthermal) but has "
+					"no heat capacity (heatcap)\n", m);
+				return 1;
+			}
+		}
+	}
+	else if (TransientOn && (Analysis == ANALYSIS_A)) {
+		// 3 次元渦電流の過渡解析 (A-φ、後退 Euler、ポート 1 を voltage x waveform で電圧駆動)。
+		// 線形・J-A (ヒステリシス)・等方性の B-H 曲線の材料、周波数掃引とは併用しない
+		if (NPort != 1) {
+			printf("%s\n", "*** transient with analysis A needs exactly one port");
+			return 1;
+		}
+		if (TransientTheta != 1) {
+			printf("%s\n", "*** transient with analysis A supports theta = 1 (backward Euler) only");
+			return 1;
+		}
+		if (NFreqSweep > 0) {
+			printf("%s\n", "*** transient with analysis A cannot be combined with frequencysweep");
+			return 1;
+		}
+		for (int m = 0; m < NMaterial; m++) {
+			if ((Material[m].nbh[0] > 0) && Material[m].bhaniso) {
+				printf("%s\n", "*** transient with analysis A supports isotropic bh curves only (not per-axis curves)");
+				return 1;
+			}
+		}
+	}
+	else if (TransientOn && (Analysis == ANALYSIS_M)) {
+		// 静磁場の過渡解析 (渦電流 σ∂A/∂t + ヒステリシス)。断面 2 次元の構造格子と 1 次の三角形の格子
+		// (次数は格子を読んでから setup_tri2d で見る)・単一ポート・後退 Euler に限る (J-A の履歴は刻みの終わりの状態で確定させる)
+		if (NPort != 1) {
+			printf("%s\n", "*** transient with analysis M needs exactly one port");
+			return 1;
+		}
+		if (TransientTheta != 1) {
+			printf("%s\n", "*** transient with analysis M supports theta = 1 (backward Euler) only "
+				"(the hysteresis state is committed at the end of each step)");
+			return 1;
+		}
+		if (NSweep > 0) {
+			printf("%s\n", "*** transient with analysis M cannot be combined with currentsweep "
+				"(use waveform for the current history)");
+			return 1;
+		}
+		for (int m = 0; m < NMaterial; m++) {
+			if ((Material[m].nbh[0] > 0) && !Material[m].ja.on) {
+				printf("%s\n", "*** transient with analysis M supports linear and Jiles-Atherton "
+					"materials only (not bh curves)");
+				return 1;
+			}
+		}
+	}
+	else if (TransientOn) {
+		printf("%s\n", "*** transient needs thermal or analysis M / A (it is the time-dependent form "
+			"of the electro-thermal coupling, of the magnetostatic analysis or of the 3-D eddy current)");
+		return 1;
+	}
+	else {
+		// 読む解析が無いのに指定されたキーを知らせる (黙って無視しない)
+		int haveK = 0, haveSink = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].kth > 0) haveK = 1;
+		}
+		for (int p = 0; p < MAXPORT; p++) {
+			if (HeatSinkOn[p]) haveSink = 1;
+		}
+		if (haveK) {
+			input_warn("kthermal has no effect without thermal (it is only read by "
+				"the electro-thermal coupling)");
+		}
+		if (haveSink) {
+			input_warn("heatsink has no effect without thermal (it is only read by "
+				"the electro-thermal coupling)");
+		}
+		if (NConv > 0) {
+			input_warn("convection has no effect without thermal (it is only read by "
+				"the electro-thermal coupling)");
+		}
+		if (ConvTabN > 0) {
+			input_warn("convectiontemptable has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (ProfN[0] > 0) {
+			input_warn("convectionprofile has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (ProfN[1] > 0) {
+			input_warn("radiationprofile has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (ExprOn[0]) {
+			input_warn("convectionexpr has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (ExprOn[1]) {
+			input_warn("radiationexpr has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (RadTabN > 0) {
+			input_warn("radiationtemptable has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (RadExchange) {
+			input_warn("radiationexchange has no effect without thermal (it is only "
+				"read by the electro-thermal coupling)");
+		}
+		if (NRad > 0) {
+			input_warn("radiation has no effect without thermal (it is only read by "
+				"the electro-thermal coupling)");
+		}
+	}
+	// 電流の波形は時間発展でしか意味が無い (定常では t が無い)
+	if ((WaveN > 0) && !TransientOn) {
+		printf("%s\n", "*** waveform needs transient (the current waveform is a "
+			"function of time)");
+		return 1;
+	}
+	// 熱容量は過渡解析だけが読む (定常の熱連成でも読まない)
+	if (!TransientOn) {
+		int haveC = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].cth > 0) haveC = 1;
+		}
+		if (haveC) {
+			input_warn("heatcap has no effect without transient (it is only read by "
+				"the time-dependent electro-thermal coupling)");
+		}
+	}
+
 	// 非構造格子のときは xmesh 等も conductor も要らない
 
 	if (MeshMode) {
@@ -1234,8 +2076,8 @@ int input_data(FILE *fp)
 		}
 		// A 解析 (3 次元渦電流) は周波数と導電材料が要る
 		if (Analysis & ANALYSIS_A) {
-			if (Freq <= 0) {
-				printf("%s\n", "*** analysis A requires the frequency key");
+			if ((Freq <= 0) && !TransientOn) {
+				printf("%s\n", "*** analysis A requires the frequency key (or transient)");
 				return 1;
 			}
 			int haveSigma = 0;
@@ -1261,7 +2103,38 @@ int input_data(FILE *fp)
 					"(the ungauged A-phi system is singular)");
 				return 1;
 			}
+			// 非線形 (B-H) の A (実効磁気抵抗率法)。**この分岐は非構造格子の早期 return
+			// の手前なので、下の構造格子向けの bh の検査はここには効かない**
+			int nl3 = 0;
+			for (int m = 0; m < NMaterial; m++) {
+				if (Material[m].nbh[0] > 0) nl3 = 1;
+				if ((Material[m].nbh[0] > 0) && Material[m].bhaniso) {
+					printf("%s\n", "*** analysis A supports isotropic bh curves only "
+						"(not per-axis curves)");
+					return 1;
+				}
+				if (Material[m].ja.on && !TransientOn) {
+					printf("%s\n", "*** the ja key with analysis A needs transient (hysteresis is solved in the time domain)");
+					return 1;
+				}
+			}
+			// 3 次元のヒステリシスは常にベクトル J-A (スカラーの射影は 3 次元では停滞するので持たない)
+			if (JaVector) {
+				input_warn("javector has no effect with analysis A (the 3-D hysteresis is always the vector J-A)");
+			}
+			if (nl3 && (NPort != 1)) {
+				printf("%s\n", "*** a nonlinear (bh) model requires exactly one port "
+					"(superposition does not hold)");
+				return 1;
+			}
+			if (nl3 && (NFreqSweep > 0)) {
+				printf("%s\n", "*** a nonlinear (bh) analysis A cannot be combined with "
+					"frequencysweep (solve each frequency separately)");
+				return 1;
+			}
 		}
+		// 断面 2 次元 (M / F) の非線形・ヒステリシスの検査は構造格子と共通
+		if ((Analysis & (ANALYSIS_M | ANALYSIS_F)) && mag_nl_checks()) return 1;
 		return 0;
 	}
 
@@ -1364,74 +2237,7 @@ int input_data(FILE *fp)
 		printf("%s\n", "*** analysis M requires the tline key (2D magnetostatic)");
 		return 1;
 	}
-	// 非線形磁性体 (B-H) は重ね合わせが成り立たないので単一ポートに限る
-	int nonlinear = 0;
-	for (int m = 0; m < NMaterial; m++) {
-		if (Material[m].nbh[0] > 0) nonlinear = 1;
-		// 軸毎に与えるときは 3 軸とも必要
-		if (Material[m].bhaniso) {
-			for (int d = 0; d < 3; d++) {
-				if (Material[m].nbh[d] <= 0) {
-					printf("*** bh : material %d needs a curve for all three axes "
-						"when axes are specified\n", m);
-					return 1;
-				}
-			}
-		}
-	}
-	// ヒステリシス (Jiles-Atherton)
-	int hysteresis = 0;
-	for (int m = 0; m < NMaterial; m++) {
-		if (Material[m].ja.on) hysteresis = 1;
-		if (Material[m].ja.on && (Material[m].nbh[0] > 0)) {
-			printf("*** material %d cannot have both bh and ja\n", m);
-			return 1;
-		}
-	}
-	if (hysteresis) {
-		if (!(Analysis & ANALYSIS_M)) {
-			printf("%s\n", "*** the ja key needs analysis M (magnetostatic)");
-			return 1;
-		}
-		if (Analysis & ANALYSIS_F) {
-			printf("%s\n", "*** the ja key cannot be combined with analysis F");
-			return 1;
-		}
-		if (NPort != 1) {
-			printf("%s\n", "*** a hysteretic (ja) model requires exactly one port");
-			return 1;
-		}
-		if (NSweep < 1) {
-			// 掃引が無いときは current の 1 点だけを処女曲線として解く
-			NSweep = 1;
-			Sweep[0] = Curr;
-		}
-	}
-	else if (NSweep > 0) {
-		printf("%s\n", "*** currentsweep needs a hysteretic (ja) material");
-		return 1;
-	}
-	if ((NFreqSweep > 0) && (NSweep > 0)) {
-		printf("%s\n", "*** frequencysweep and currentsweep cannot be combined");
-		return 1;
-	}
-
-	if (nonlinear) {
-		if (!(Analysis & ANALYSIS_M)) {
-			printf("%s\n", "*** the bh key needs analysis M (magnetostatic)");
-			return 1;
-		}
-		if (Analysis & ANALYSIS_F) {
-			printf("%s\n", "*** the bh key cannot be combined with analysis F "
-				"(time-harmonic eddy current assumes a linear material)");
-			return 1;
-		}
-		if (NPort != 1) {
-			printf("%s\n", "*** a nonlinear (bh) model requires exactly one port "
-				"(superposition does not hold)");
-			return 1;
-		}
-	}
+	if (mag_nl_checks()) return 1;
 	// F 解析 (渦電流) も断面 2 次元。周波数と導体の導電率が要る
 	if (Analysis & ANALYSIS_F) {
 		if (!Tline) {

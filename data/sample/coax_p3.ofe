@@ -1,0 +1,22 @@
+OpenFEM 1 0
+title = coax on a curved third-order (20-node) tetrahedral mesh
+#
+# 同軸 (a = 0.5mm, b = 1.5mm、εr = 2.1) の C' = 2πε/ln(b/a)、L' = μ0 ln(b/a)/(2π)。
+# 格子は gmsh 4.15.2 が coax3.geo から作ったもの (h = 0.4mm、-order 3。高次の節点は
+# 円筒面の上)。誤差は C' +0.032% / L' -0.032%。
+#
+# **曲がった境界では 3 次が 2 次に勝つとは限らない** (実測)。等間隔の節点で円を
+# 補間すると、面積 (体積) の誤差は 2 次 (偶数次の超収束) も 3 次も h⁴ になり、
+# この粗さでは 2 次の方が小さい (体積 +8.6e-5 vs -6.5e-5、C' +0.014% vs +0.032%)。
+# 検証は「3 次が h⁴ で収束すること」(h = 0.4 -> 0.2mm、coax_p3f.msh) で見る。
+#
+mesh = coax_p3.msh
+material = 2.1 0
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+
+analysis = C L
+tline = Z
+solver = 50000 2000 1e-13
+end

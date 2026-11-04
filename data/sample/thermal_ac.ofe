@@ -1,0 +1,36 @@
+OpenFEM 1 0
+title = AC heating : a copper bar with skin effect (A-phi), cooled at both ends
+#
+# 交流の発熱 (thermal + analysis = A)。3 次元渦電流 (A-φ) の時間平均の損失
+# Q = ½∫σ|E|² dV で温度を解き、σ(T) を要素ごとに戻して A-φ を解き直す。
+# 電流 (thermal) は**波高値**で、発熱の時間平均は ½ I² R(f)。
+#
+# 格子は bar_eddy.ofe と同じ導体棒 (bar_tet.msh、長さ 2mm、幅 0.25mm、厚さ 1mm、
+# z = 0 / z = t と両端を awall)。100 kHz の銅 (σ = 5.8e7) では表皮深さが 0.21mm で、
+# 電流と発熱が z の両表面に寄る。両端の電極をヒートシンク (20 degC)、側面は断熱。
+#
+# 検証 (rlc_check.sh の [thermal_ac]):
+#   - 100 Hz (表皮効果なし) では DC の熱連成 (電流 I/√2) と 9 桁一致 (ω -> 0 で
+#     A-φ が DC の導電解析に帰着するため)
+#   - α = 0 では R・X が熱連成なしの A と一致し、中央の断面の表面と中心の温度差が
+#     表皮効果の発熱分布 |cosh(γ(z - t/2))|² の Fourier 級数解に 0.2% で一致
+#     (data/sample/ac_heat.awk)
+#   - Σ(要素の損失) = ½ I² R = ヒートシンクへの熱 (13 桁)
+#
+mesh = bar_tet.msh
+material = 1.0 5.8e7
+tempco = 2 3.9e-3 20
+kthermal = 2 400
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+awall = 20
+heatsink = 0 20
+heatsink = 1 20
+
+temperature = 20
+frequency = 1e5
+thermal = 300
+analysis = A
+solver = 100000 20000 1e-11
+end

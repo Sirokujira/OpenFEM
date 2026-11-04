@@ -40,6 +40,8 @@ OpenFEM 側から見れば一般の非構造格子 (節点の並びも隣接関�
   coax_hex2 : 同軸を曲がった 2 次六面体 (hex27) で切る。全節点が円筒面上。
          物理タグ 1 = 体積、10 = 外側 r=b (電極 0)、11 = 内側 r=a (電極 1)
 
+  slab2 / annulus2 : 熱連成の検証用の板 (x 向きの電流、z 面を冷やす) / 円環 (軸方向の電流、
+    内外の円筒面を冷やす)。既定は hex27、-prism 1 で prism18、-linear 1 で 1 次
   box_hex2_warp / box_prism2_warp : ゆがんだ 2 次六面体 (hex27) / 2 次角柱
          (prism18)。角だけを乱数で動かし、中間節点は 1 次の写像の位置に置く。
          物理タグ 1 = 体積、10 = z 下面 (電極 0)、11 = z 上面 (電極 1)
@@ -519,6 +521,91 @@ def make_coax_hex2(nr=4, nt=12, ra=0.5e-3, rb=1.5e-3, lz=0.1e-3):
             cells.append((tag, 10, [node(i2, a, k) for a, k in q]))
 
     return nodes, cells
+
+
+def make_grid2(n1, n2, n3, pos, wrap2=0, prism=0, linear=0, efaces="i"):
+    """(i, j, k) の構造格子を 2 次 (hex27 / prism18) か 1 次 (hex8 / prism6) で切る (熱連成の検証用)
+
+    pos(gi, gj, gk) が半分の刻みの格子座標 (0..2n) から座標を返す (中間節点も同じ写像に
+    載せるので曲がった形は等パラメトリックに表される)。wrap2 = 1 で j を周期にする。角柱は
+    (i, j) 面の四角形を対角線で 2 つの三角形に割って k に押し出す。電極 (タグ 10 / 11) は
+    efaces = "i" なら i = 0 / i = n1 の面、"k" なら k = 0 / k = n3 の面。体積のタグは 1
+    """
+    nodes = []
+    idx = {}
+
+    def node(a, b, c):
+        if wrap2:
+            b = b % (2 * n2)
+        if (a, b, c) not in idx:
+            idx[(a, b, c)] = len(nodes)
+            nodes.append(pos(a, b, c))
+        return idx[(a, b, c)]
+
+    tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
+    cells = []
+    for i in range(n1):
+        for j in range(n2):
+            for k in range(n3):
+                if not prism:
+                    xi = HEX27_XI[:8] if linear else HEX27_XI
+                    nd = [node((2 * i) + 1 + sx, (2 * j) + 1 + sy, (2 * k) + 1 + sz) for sx, sy, sz in xi]
+                    cells.append((1, 5 if linear else 12, nd))
+                    continue
+                for tri in tris:
+                    tp = {"A": (2 * (i + tri[0][0]), 2 * (j + tri[0][1])),
+                          "B": (2 * (i + tri[1][0]), 2 * (j + tri[1][1])),
+                          "C": (2 * (i + tri[2][0]), 2 * (j + tri[2][1]))}
+                    for e in (("AB", "A", "B"), ("BC", "B", "C"), ("CA", "C", "A")):
+                        tp[e[0]] = ((tp[e[1]][0] + tp[e[2]][0]) // 2, (tp[e[1]][1] + tp[e[2]][1]) // 2)
+                    tz = PRISM18_TZ[:6] if linear else PRISM18_TZ
+                    nd = [node(tp[t][0], tp[t][1], (2 * k) + z) for t, z in tz]
+                    cells.append((1, 6 if linear else 13, nd))
+
+    def quad(f, u, v):
+        # f(a, b) -> 格子座標。角 4 + 辺 4 + 中心 (Gmsh の 9 節点四角形の並び)
+        q = [(u, v), (u + 2, v), (u + 2, v + 2), (u, v + 2),
+             (u + 1, v), (u + 2, v + 1), (u + 1, v + 2), (u, v + 1), (u + 1, v + 1)]
+        q = q[:4] if linear else q
+        return (3 if linear else 10), [node(*f(a, b)) for a, b in q]
+
+    if efaces == "i":
+        for j in range(n2):
+            for k in range(n3):
+                for gi, tag in ((0, 10), (2 * n1, 11)):
+                    ty, nd = quad(lambda a, b, gi=gi: (gi, a, b), 2 * j, 2 * k)
+                    cells.append((tag, ty, nd))
+    else:
+        for i in range(n1):
+            for j in range(n2):
+                for gk, tag in ((0, 10), (2 * n3, 11)):
+                    if not prism:
+                        ty, nd = quad(lambda a, b, gk=gk: (a, b, gk), 2 * i, 2 * j)
+                        cells.append((tag, ty, nd))
+                        continue
+                    for tri in tris:
+                        v = [(2 * (i + a), 2 * (j + b)) for a, b in tri]
+                        m = [((v[0][0] + v[1][0]) // 2, (v[0][1] + v[1][1]) // 2),
+                             ((v[1][0] + v[2][0]) // 2, (v[1][1] + v[2][1]) // 2),
+                             ((v[2][0] + v[0][0]) // 2, (v[2][1] + v[0][1]) // 2)]
+                        pts = v if linear else v + m
+                        cells.append((tag, 2 if linear else 9, [node(a, b, gk) for a, b in pts]))
+    return nodes, cells
+
+
+def make_slab2(nx=4, ny=2, nz=2, lx=2e-3, ly=1e-3, lz=0.2e-3, prism=0, linear=0):
+    """x 向きに電流が流れる板 (電極は x = 0 / lx の面)。z 面だけを冷やす熱連成の検証用"""
+    return make_grid2(nx, ny, nz, lambda a, b, c: (lx * a / (2.0 * nx), ly * b / (2.0 * ny), lz * c / (2.0 * nz)),
+                      prism=prism, linear=linear, efaces="i")
+
+
+def make_annulus2(nr=3, nt=12, nz=1, ra=0.5e-3, rb=1.0e-3, lz=0.2e-3, prism=0, linear=0):
+    """軸方向に電流が流れる円環 (電極は z = 0 / lz の面)。内外の円筒面 (曲がった面) を冷やす"""
+    def pos(a, b, c):
+        r = ra + (rb - ra) * a / (2.0 * nr)
+        th = math.pi * b / nt
+        return (r * math.cos(th), r * math.sin(th), lz * c / (2.0 * nz))
+    return make_grid2(nr, nt, nz, pos, wrap2=1, prism=prism, linear=linear, efaces="k")
 
 
 def make_box_hex2_warp(nx=3, ny=3, nz=3, lx=1e-3, ly=1e-3, lz=0.2e-3, seed=20260803):
@@ -1004,7 +1091,7 @@ def make_bar(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, grade=1.0):
     return nodes, tets, tris
 
 
-def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0):
+def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0, mix=0, tear=0):
     """導体棒の**六面体** (prism=1 なら**角柱**) 版 (3 次元渦電流 A-φ の検証)
 
     make_bar と同じ形状・同じ物理タグ。1 次元厳密解も同じなので、
@@ -1012,7 +1099,43 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0):
     角柱は各セルを対角線で 2 つに割って z に押し出す
     (三角形は (x,y) 面内、押し出しは z — A_t = 0 の面と平行な向き)。
 
-    物理タグ : 1 = 体積、10 = x=0 面 (電極 0)、11 = x=lx 面 (電極 1)、
+    **mix で種別を混在させる** (辺要素の混在格子の検証)。接する面の形が
+    揃う向きにしか割れないので、組み合わせで分割の向きが変わる:
+
+      mix = 1 : 六面体 (x < lx/2) + 角柱 (x > lx/2) — 界面は**四角形面**。
+                z 方向に積むと六面体の四角形面に角柱の三角形面 2 枚が当たって
+                非適合になる (読み込み時の位相検査で弾かれる) ので x で割る。
+      mix = 2 : 角柱 (z < lz/2) + 四面体 (z > lz/2) — 界面は**三角形面**。
+                四面体は角柱を 3 つに割ったものなので、側面の四角形は
+                三角形 2 枚に割れる。x で割ると角柱の四角形面に当たって
+                非適合になるので z で割る。
+      mix = 3 : **わざと非適合にした**六面体 (z < lz/2) + 角柱 (z > lz/2)。
+                界面で六面体の四角形面に角柱の三角形面 2 枚が当たるので
+                有限要素空間が H(curl) に入らない。読み込み時の位相検査
+                (elem_face_check) で弾かれることの検証に使う。
+                **この非適合は自己検証のどの恒等式でも検出できない**
+                (実測: elem_face_check を無効にすると (a)〜(g) が全部通った。
+                四角形面と三角形面は節点の集合が違うのでそもそも「共有面」に
+                ならず、接線連続性の検査は比べる相手を見つけられない)。
+
+    mix = 1 / 2 は解が 1 次元のままなので**閉形式は純格子と同じ**で、混在
+    させたことによる誤差だけを見られる。
+
+    **tear = 1 で界面の節点を複製する** (mix = 1 と併せて使う)。部品を別々に
+    切って節点をマージし忘れた格子を模したもので、界面の両側が自由度を共有
+    しなくなる。**これも自己検証のどの恒等式にも引っかからない** (実測:
+    (a)〜(d) と (g) がすべて機械精度で通り、連結成分が 1 -> 2 に増えたことだけが
+    痕跡だった) ので、節点の重複を直接見る検査 (node_merge_check) が生きて
+    いることの検証に使う。
+
+    **混在させたときは種別ごとに物理タグを分ける** (1 / 2)。同じタグにすると
+    要素番号から材料を引く経路 (種別ごとに配列が別で添字のずれ方も違う) が
+    単一材料になり、添字を取り違えても答えが変わらない。渦電流の検証では
+    両方のタグに同じ導体材料を当てて 1 次元の閉形式を残し、辺要素の自己検証
+    (analysis = E) では別々の材料を当てて添字を効かせる。
+
+    物理タグ : 1 = 体積 (混在では 1 つ目の種別)、2 = 混在の 2 つ目の種別、
+               10 = x=0 面 (電極 0)、11 = x=lx 面 (電極 1)、
                20 = A_t = 0 の面 (z=0, z=lz, x=0, x=lx)
     """
     nodes = []
@@ -1023,39 +1146,60 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0):
                 idx[(i, j, k)] = len(nodes)
                 nodes.append((lx * i / nx, ly * j / ny, lz * k / nz))
 
+    imix = nx // 2                      # mix = 1 : ここより右が角柱
+    kmix = nz // 2                      # mix = 2 : ここより上が四面体
+
+    def cell_is_hex(i, k):
+        if mix == 1: return i < imix
+        if mix == 2: return False
+        if mix == 3: return k < kmix
+        return not prism
+
     cells = []
     tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
     for i in range(nx):
         for j in range(ny):
             for k in range(nz):
-                if prism:
-                    # (x,y) の四角形を対角線で割り、z に押し出す
-                    for tri in tris:
-                        b = [idx[(i + a, j + c, k)] for a, c in tri]
-                        t = [idx[(i + a, j + c, k + 1)] for a, c in tri]
-                        cells.append((1, 6, b + t))
-                else:
+                # 混在では 2 つ目の種別にタグ 2 を付ける
+                tag2 = (2 if ((mix == 1) and (i >= imix))
+                          or ((mix in (2, 3)) and (k >= kmix)) else 1)
+                if cell_is_hex(i, k):
                     b = [idx[(i, j, k)], idx[(i + 1, j, k)],
                          idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)]]
                     t = [idx[(i, j, k + 1)], idx[(i + 1, j, k + 1)],
                          idx[(i + 1, j + 1, k + 1)], idx[(i, j + 1, k + 1)]]
-                    cells.append((1, 5, b + t))
+                    cells.append((tag2, 5, b + t))
+                else:
+                    # (x,y) の四角形を対角線で割り、z に押し出す
+                    for tri in tris:
+                        b = [idx[(i + a, j + c, k)] for a, c in tri]
+                        t = [idx[(i + a, j + c, k + 1)] for a, c in tri]
+                        if (mix == 2) and (k >= kmix):
+                            # 角柱を 3 四面体に割る (面が三角形で揃うので適合)
+                            q = b + t
+                            for w in ((0, 1, 2, 5), (0, 1, 5, 4), (0, 4, 5, 3)):
+                                cells.append((tag2, 4, [q[w[0]], q[w[1]], q[w[2]], q[w[3]]]))
+                        else:
+                            cells.append((tag2, 6, b + t))
 
-    def bquad(a, b, c, d, tag):
-        if prism:
-            # 角柱の z 面は三角形 2 枚 (対角線は体積側と同じ向き)、側面は四角形
+    def bquad(a, b, c, d, tag, hexcell):
+        if hexcell:
+            cells.append((tag, 3, [a, b, c, d]))
+        else:
+            # 角柱・四面体の z 面は三角形 2 枚 (対角線は体積側と同じ向き)
             cells.append((tag, 2, [a, b, c]))
             cells.append((tag, 2, [a, c, d]))
-        else:
-            cells.append((tag, 3, [a, b, c, d]))
 
-    # z = 0 と z = lz : A_t = 0 (角柱ではこの面が三角形になる)
+    # z = 0 と z = lz : A_t = 0 (角柱・四面体ではこの面が三角形になる)
     for i in range(nx):
         for j in range(ny):
             for k in (0, nz):
                 bquad(idx[(i, j, k)], idx[(i + 1, j, k)],
-                      idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)], 20)
-    # x = 0 (電極 0) と x = lx (電極 1) : 電極かつ A_t = 0 (常に四角形)
+                      idx[(i + 1, j + 1, k)], idx[(i, j + 1, k)], 20,
+                      cell_is_hex(i, (0 if k == 0 else nz - 1)))
+    # x = 0 (電極 0) と x = lx (電極 1) : 電極かつ A_t = 0
+    # (mix = 2 の四面体領域では側面の四角形が三角形 2 枚に割れるので合わせる。
+    #  ずれると四角形面と三角形面が同じ位置に重なり、位相検査で弾かれる)
     for j in range(ny):
         for k in range(nz):
             for i, tag in ((0, 10), (nx, 11)):
@@ -1063,14 +1207,221 @@ def make_bar_hex(nx=24, ny=2, nz=24, lx=2e-3, ly=0.25e-3, lz=1e-3, prism=0):
                 b = idx[(i, j + 1, k)]
                 c = idx[(i, j + 1, k + 1)]
                 d = idx[(i, j, k + 1)]
-                cells.append((tag, 3, [a, b, c, d]))
-                cells.append((20, 3, [a, b, c, d]))
+                if (mix == 2) and (k >= kmix):
+                    # 体積側の四面体は対角線 a-c で割れている
+                    for tg in (tag, 20):
+                        cells.append((tg, 2, [a, b, c]))
+                        cells.append((tg, 2, [a, c, d]))
+                else:
+                    cells.append((tag, 3, [a, b, c, d]))
+                    cells.append((20, 3, [a, b, c, d]))
+
+    if tear:
+        # 界面 (x = lx * imix / nx) の節点を複製し、+x 側の要素だけ複製節点を
+        # 見るようにする (部品ごとに切って節点をマージし忘れた格子)
+        xmid = lx * imix / nx
+        seam = [nid for nid, p in enumerate(nodes) if p[0] == xmid]
+        renum = {nid: len(nodes) + i for i, nid in enumerate(seam)}
+        nodes = nodes + [nodes[nid] for nid in seam]
+        torn = []
+        for tag, et, ids in cells:
+            if max(nodes[q][0] for q in ids) > xmid:
+                ids = [renum.get(q, q) for q in ids]
+            torn.append((tag, et, ids))
+        cells = torn
 
     return nodes, cells
 
 
+def make_neck_hex(split=0, pyrneck=0, bar=0, nx=40, grade=0):
+    """首のある導体 (thermal_neck.ofe と同じ形・同じ格子) の六面体 / 角柱 / ピラミッド版
+    (熱連成の非構造格子の検証)
+
+    構造格子の thermal_neck.ofe の導体のセル (首の外の空気のセルは除く) をそのまま
+    要素にする。split = 0 で六面体、1 で角柱 ((x,y) を対角線で割って z に押し出す)、
+    2 で各セルを体心に節点を足した 6 つのピラミッド (底面がセルの面なので隣のセルと
+    四角形面で接する)。bar = 1 は首の代わりに thermal_bar.ofe の真っ直ぐな棒
+    (10mm x 1mm x 1mm、x に nx 分割、断面 1 x 1 セル)。grade = 1 で x を不等間隔に
+    する (x < 4mm に nx/4、残りに 3nx/4。構造格子の xmesh = 0 nx/4 4e-3 3nx/4 0.01 と
+    同じ格子点で、要素の体積が揃わないので体積の重みの誤りが見える)。pyrneck = 1 は六面体 (首の外) + ピラミッド (首) の混在
+    (界面は四角形面で適合)。六面体の版は構造格子と同じ離散問題になる
+    (要素行列・発熱・要素の温度がすべて同じ 2x2x2 Gauss)。
+
+    物理タグ : 1 = 首の外の要素、2 = 首の要素 (種別に依らない。別の材料を当てて
+               要素番号から材料を引く経路を効かせる)、
+               10 = x=0 面 (電極 0)、11 = x の上端の面 (電極 1)
+    """
+    def axis(spec):
+        xs = [spec[0]]
+        for n, b in spec[1:]:
+            a = xs[-1]
+            for i in range(1, n + 1):
+                xs.append(a + (b - a) * i / n)
+        return xs
+    if bar:
+        xs = (axis([0.0, (nx // 4, 4e-3), (nx - (nx // 4), 0.01)]) if grade
+              else axis([0.0, (nx, 0.01)]))
+        ys = axis([0.0, (1, 1e-3)])
+        zs = axis([0.0, (1, 1e-3)])
+    else:
+        xs = axis([0.0, (6, 1e-3), (6, 2e-3), (6, 3e-3)])
+        ys = axis([0.0, (6, 0.75e-3), (4, 1.25e-3), (6, 2e-3)])
+        zs = axis([0.0, (2, 0.5e-3)])
+    nx, ny, nz = len(xs) - 1, len(ys) - 1, len(zs) - 1
+
+    def inside(i, j):
+        xc = 0.5 * (xs[i] + xs[i + 1])
+        yc = 0.5 * (ys[j] + ys[j + 1])
+        return bool(bar) or (xc < 1e-3) or (xc > 2e-3) or (0.75e-3 < yc < 1.25e-3)
+
+    def neck(i):
+        return (not bar) and (1e-3 < 0.5 * (xs[i] + xs[i + 1]) < 2e-3)
+
+    nodes = []
+    idx = {}
+    def node(i, j, k):
+        if (i, j, k) not in idx:
+            idx[(i, j, k)] = len(nodes)
+            nodes.append((xs[i], ys[j], zs[k]))
+        return idx[(i, j, k)]
+
+    cells = []
+    tris = (((0, 0), (1, 0), (1, 1)), ((0, 0), (1, 1), (0, 1)))
+    for i in range(nx):
+        for j in range(ny):
+            if not inside(i, j):
+                continue
+            for k in range(nz):
+                c = [node(i, j, k), node(i + 1, j, k), node(i + 1, j + 1, k), node(i, j + 1, k),
+                     node(i, j, k + 1), node(i + 1, j, k + 1), node(i + 1, j + 1, k + 1),
+                     node(i, j + 1, k + 1)]
+                pyr = (split == 2) or (pyrneck and neck(i))
+                tag = (2 if neck(i) else 1)
+                if pyr:
+                    ctr = len(nodes)
+                    nodes.append((0.5 * (xs[i] + xs[i + 1]), 0.5 * (ys[j] + ys[j + 1]),
+                                  0.5 * (zs[k] + zs[k + 1])))
+                    # 底面は頂点 (体心) から見て反時計回り (Gmsh の並び、det J > 0)。
+                    # 下の面の並びはどれも法線がセルの内側 (体心) を向く
+                    for f in ((0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1),
+                              (1, 5, 6, 2), (2, 6, 7, 3), (3, 7, 4, 0)):
+                        b = [c[f[0]], c[f[1]], c[f[2]], c[f[3]]]
+                        cells.append((tag, 7, b + [ctr]))
+                elif split == 1:
+                    for tri in tris:
+                        b = [node(i + a, j + d, k) for a, d in tri]
+                        t = [node(i + a, j + d, k + 1) for a, d in tri]
+                        cells.append((tag, 6, b + t))
+                else:
+                    cells.append((tag, 5, c))
+    for j in range(ny):
+        for k in range(nz):
+            for i, tag in ((0, 10), (nx, 11)):
+                cells.append((tag, 3, [node(i, j, k), node(i, j + 1, k),
+                                       node(i, j + 1, k + 1), node(i, j, k + 1)]))
+    return nodes, cells
+
+
+def make_cavity_hex(split=0, nx=40, two=0, void=0, prism=0):
+    """開いた立方体の空洞 (thermal_cavity.ofe と同じ形・同じ格子) の六面体 / 四面体版
+    (非構造格子の相互放射の検証)
+
+    導体の直方体 (10mm x 3mm x 3mm) の上面に空洞 (x 4..6mm、y 0.5..2.5mm、z 1..3mm) を
+    開ける。格子点は thermal_cavity.ofe の xmesh / ymesh / zmesh と同じなので、六面体の版
+    (split = 0) は構造格子と同じ離散問題になる。split = 1 は各セルを Kuhn の分割で
+    6 つの四面体に割る (主対角線 v000 - v111 の向きが全セルで揃うので隣と適合する。
+    電極の四角形は同じ対角線 (j,k)-(j+1,k+1) で三角形 2 枚に割る)。
+
+    nx は x の分割 (既定 40 = 構造格子と同じ。20 でも空洞の壁は格子線に乗る)。
+    two = 1 で空洞を 2 つ (x 2..4mm と 6..8mm、間の壁が遮蔽になる)、void = 1 で閉じた
+    空隙 (x 4..6mm、y 0.5..2.5mm、z 0.5..2.2mm、導体の中に閉じている) にする
+    (どちらも rlc_check.sh の構造格子の検査と同じ形)。prism = 1 は各セルを xy の対角線で
+    角柱 2 つに割る (三角形の面は z = 一定、電極の面は四角形のまま)。高次の格子は
+    gmsh -order 2 で 1 次の格子から作る (thermal_cavity_hex2.msh / thermal_cavity_prism2.msh、
+    nx = 5)。
+
+    物理タグ : 1 = 導体、10 = x=0 面 (電極 0)、11 = x=10mm 面 (電極 1)
+    """
+    def axis(spec):
+        xs = [spec[0]]
+        for n, b in spec[1:]:
+            a = xs[-1]
+            for i in range(1, n + 1):
+                xs.append(a + (b - a) * i / n)
+        return xs
+    xs = axis([0.0, (nx, 0.01)])
+    ys = axis([0.0, (2, 0.5e-3), (5, 2.5e-3), (2, 3e-3)])
+    zs = axis([0.0, (4, 1e-3), (5, 3e-3)])
+    nx, ny, nz = len(xs) - 1, len(ys) - 1, len(zs) - 1
+    if void:
+        holes = ((4e-3, 6e-3, 0.5e-3, 2.5e-3, 0.5e-3, 2.2e-3),)
+    elif two:
+        holes = ((2e-3, 4e-3, 0.5e-3, 2.5e-3, 1e-3, 3e-3), (6e-3, 8e-3, 0.5e-3, 2.5e-3, 1e-3, 3e-3))
+    else:
+        holes = ((4e-3, 6e-3, 0.5e-3, 2.5e-3, 1e-3, 3e-3),)
+
+    def solid(i, j, k):
+        xc = 0.5 * (xs[i] + xs[i + 1])
+        yc = 0.5 * (ys[j] + ys[j + 1])
+        zc = 0.5 * (zs[k] + zs[k + 1])
+        return not any((h[0] < xc < h[1]) and (h[2] < yc < h[3]) and (h[4] < zc < h[5])
+                       for h in holes)
+
+    nodes, idx = [], {}
+    def node(i, j, k):
+        if (i, j, k) not in idx:
+            idx[(i, j, k)] = len(nodes)
+            nodes.append((xs[i], ys[j], zs[k]))
+        return idx[(i, j, k)]
+
+    def det(a, b, c, d):
+        p = [[nodes[v][q] - nodes[a][q] for q in range(3)] for v in (b, c, d)]
+        return (p[0][0] * (p[1][1] * p[2][2] - p[1][2] * p[2][1])
+                - p[0][1] * (p[1][0] * p[2][2] - p[1][2] * p[2][0])
+                + p[0][2] * (p[1][0] * p[2][1] - p[1][1] * p[2][0]))
+
+    cells = []
+    perms = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                if not solid(i, j, k):
+                    continue
+                if prism:
+                    v0 = [node(i, j, k), node(i + 1, j, k), node(i + 1, j + 1, k), node(i, j + 1, k)]
+                    v1 = [node(i, j, k + 1), node(i + 1, j, k + 1), node(i + 1, j + 1, k + 1), node(i, j + 1, k + 1)]
+                    for tr in ((0, 1, 2), (0, 2, 3)):
+                        cells.append((1, 6, [v0[tr[0]], v0[tr[1]], v0[tr[2]], v1[tr[0]], v1[tr[1]], v1[tr[2]]]))
+                    continue
+                if split == 0:
+                    cells.append((1, 5, [node(i, j, k), node(i + 1, j, k), node(i + 1, j + 1, k),
+                                         node(i, j + 1, k), node(i, j, k + 1), node(i + 1, j, k + 1),
+                                         node(i + 1, j + 1, k + 1), node(i, j + 1, k + 1)]))
+                    continue
+                for pm in perms:
+                    o = [0, 0, 0]
+                    t = [node(i, j, k)]
+                    for ax in pm:
+                        o[ax] += 1
+                        t.append(node(i + o[0], j + o[1], k + o[2]))
+                    if det(*t) < 0:
+                        t[1], t[2] = t[2], t[1]
+                    cells.append((1, 4, t))
+    for j in range(ny):
+        for k in range(nz):
+            for i, tag in ((0, 10), (nx, 11)):
+                a, b = node(i, j, k), node(i, j + 1, k)
+                c, d = node(i, j + 1, k + 1), node(i, j, k + 1)
+                if split == 0:
+                    cells.append((tag, 3, [a, b, c, d]))
+                else:
+                    cells.append((tag, 2, [a, b, c]))
+                    cells.append((tag, 2, [a, c, d]))
+    return nodes, cells
+
+
 def make_bar_air(nx=24, ny=2, nz=24, nza=4,
-                 lx=2e-3, ly=0.25e-3, lz=1e-3, gz=0.5e-3):
+                 lx=2e-3, ly=0.25e-3, lz=1e-3, gz=0.5e-3, yawall=0):
     """導体棒 + 非導電層 (3 次元渦電流 A-φ で空気を含む系の検証)
 
     make_bar の上に厚さ gz の空気層を載せる。解は依然 1 次元で、空気層は
@@ -1087,6 +1438,9 @@ def make_bar_air(nx=24, ny=2, nz=24, nza=4,
 
     物理タグ : 1 = 導体、2 = 空気、10 = x=0 の導体断面 (電極 0)、
                11 = x=lx の導体断面 (電極 1)、20 = A_t = 0 の面
+
+    yawall = 1 : ゲージ固定の検査用。電極の面を A_t = 0 にせず (タグ 10/11 だけ)、代わりに
+    y 面を A_t = 0 にする。電極の辺が awall の辺でなくなる (1 次元の解ではなくなる)。
     """
     zs = [lz * k / nz for k in range(nz + 1)] \
        + [lz + gz * k / nza for k in range(1, nza + 1)]
@@ -1128,9 +1482,16 @@ def make_bar_air(nx=24, ny=2, nz=24, nza=4,
                 b = idx[(i, j + 1, k)]
                 c = idx[(i, j + 1, k + 1)]
                 d = idx[(i, j, k + 1)]
-                quad(a, b, c, d, 20)
+                if not (yawall and k < nz):
+                    quad(a, b, c, d, 20)
                 if k < nz:
                     quad(a, b, c, d, tag)
+    if yawall:
+        for i in range(nx):
+            for k in range(nzt):
+                for j in (0, ny):
+                    quad(idx[(i, j, k)], idx[(i + 1, j, k)],
+                         idx[(i + 1, j, k + 1)], idx[(i, j, k + 1)], 20)
     return nodes, tets, tris
 
 
@@ -1143,7 +1504,9 @@ def main():
     opt = {}
     a = 3
     while a + 1 < len(sys.argv):
-        opt[sys.argv[a].lstrip("-")] = int(sys.argv[a + 1])
+        v = sys.argv[a + 1]
+        # 寸法 (-lx 0.01 など) は実数、分割数は整数
+        opt[sys.argv[a].lstrip("-")] = (float(v) if any(c in v for c in ".eE") else int(v))
         a += 2
     order = opt.pop("order", 1)
     opt41 = opt.pop("v41", 0)			# -v41 1 で Gmsh 4.1 形式で書く
@@ -1172,10 +1535,25 @@ def main():
         write_msh_cells(path, nodes, cells)
         print("%s : pyramids, %d nodes, %d cells" % (path, len(nodes), len(cells)))
         return 0
+    elif kind == "cavity_hex":
+        nodes, cells = make_cavity_hex(**opt)
+        write_msh_cells(path, nodes, cells)
+        print("%s : cavity, %d nodes, %d cells" % (path, len(nodes), len(cells)))
+        return 0
+    elif kind == "neck_hex":
+        nodes, cells = make_neck_hex(**opt)
+        write_msh_cells(path, nodes, cells)
+        print("%s : neck, %d nodes, %d cells" % (path, len(nodes), len(cells)))
+        return 0
     elif kind == "bar_hex":
         nodes, cells = make_bar_hex(**opt)
         write_msh_cells(path, nodes, cells)
         print("%s : bar, %d nodes, %d cells" % (path, len(nodes), len(cells)))
+        return 0
+    elif kind in ("slab2", "annulus2"):
+        nodes, cells = (make_slab2(**opt) if kind == "slab2" else make_annulus2(**opt))
+        write_msh_cells(path, nodes, cells)
+        print("%s : %d nodes, %d cells" % (path, len(nodes), len(cells)))
         return 0
     elif kind in ("coax_hex2", "box_hex2_warp", "box_prism2_warp"):
         nodes, cells = (make_coax_hex2(**opt) if kind == "coax_hex2"

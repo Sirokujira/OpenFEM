@@ -1,0 +1,39 @@
+OpenFEM 1 0
+title = electro-thermal coupling on hexahedra : a bar cooled at both ends
+#
+# 電気-熱連成 (thermal) の非構造格子 (1 次の六面体) 版。thermal_bar.ofe と同じ棒
+# (長さ L = 10mm、断面 1mm x 1mm、ρ0 = 1e-6 Ωm、α = 4e-3、k = 10、両端を
+# 20 degC のヒートシンク) を 40 x 1 x 1 の六面体で切ったもの。x は不等間隔
+# (x < 4mm に 10 分割、残りに 30 分割) にして要素の体積を揃えない (T_mean の体積の
+# 重みの検査)。構造格子では xmesh = 0 10 4e-3 30 0.01 に当たる。
+#
+# 六面体の要素行列・発熱・質量・要素の温度は構造格子と同じ 2x2x2 Gauss (積分点 API
+# elem3d_ip) なので、**同じ格子点の構造格子** (thermal_bar.ofe の xmesh を上のものに
+# したもの) **と同じ離散問題**になり、R・T_max・T_mean は
+# 丸めを除いて全桁一致する (rlc_check.sh で見る)。閉形式は thermal_bar.ofe と同じ
+# (40 分割の不等間隔で R -0.025%):
+#   R     = (ρ_s L / A) tan(mL/2) / (mL/2)       = 1.3414989023e-02 [ohm]
+#   T_max = T_s + (1/α') (1/cos(mL/2) - 1)       = 1.1900930366e+02 [degC]
+#
+# 格子は mkmesh.py で作る (角柱は -split 1、ピラミッドは -split 2 で各セルを体心で
+# 6 つに割る):
+#   python3 mkmesh.py neck_hex thermal_hex40.msh -bar 1 -nx 40 -grade 1
+#   python3 mkmesh.py neck_hex thermal_pri40.msh -bar 1 -nx 40 -split 1
+#   python3 mkmesh.py neck_hex thermal_pyr80.msh -bar 1 -nx 80 -split 2
+# 物理タグ 1 = 体積、10 = x=0 面 (電極 0)、11 = x=L 面 (電極 1)。
+#
+mesh = thermal_hex40.msh
+material = 1.0 1e6
+tempco = 2 4e-3 0
+kthermal = 2 10
+region = 1 2
+electrode = 10 0
+electrode = 11 1
+heatsink = 0 20
+heatsink = 1 20
+
+temperature = 50
+thermal = 7.5
+analysis = R
+solver = 20000 500 1e-12
+end

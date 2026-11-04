@@ -69,10 +69,14 @@ set(SOL_SOURCES
     sol/solver_direct.c
     sol/solver_cocg.c
     sol/solve.c
+    sol/thermal.c
     sol/matutil.c
     sol/unstruct.c
     sol/edge.c
     sol/eddy3d.c
+    sol/eddy3d_p2.c
+    sol/eddy3d_pr.c
+    sol/expr.c
     sol/fieldout.c
     sol/hdf5out.c
     sol/mpiwrap.c

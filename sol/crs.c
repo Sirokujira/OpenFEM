@@ -100,6 +100,129 @@ void crs_alloc(crs_t *A)
 }
 
 
+/*
+行列の分散 (mpisolve = 2、C / L / R)。rank は行ブロック [r0, r1) (mpisolve = 1 の行列ベクトル積と
+同じ分け方。構造格子の節点は k が最も速く変わる並びなので、x 方向に切った板状の領域。非構造格子は gmsh の
+節点番号の連続ブロック) の**行だけ**を持ち、組み立ても自分の行にしか足さない (構造格子は assemble_core が
+crs_owns で飛ばし、非構造格子は crs_find が空の行で -1 を返すので p >= 0 の検査で飛ぶ)。rowptr は n + 1 個のまま持ち、
+他の rank の行は空 (p0 == p1) にするので、行を引く既存のコードは自分の行についてそのまま動く。
+行ごとの和の順序は直列と同じなので、行列ベクトル積・対角・反作用は直列と**ビット単位で同じ**になる。
+分散する行列は crs_distribute で登録したもの (DIST_MAX 個まで) だけなので、他の行列の扱いは一切変わらない。
+*/
+#define DIST_MAX (8)		// 分散する行列の数の上限 (A-φ の実部・虚部、熱連成の電気・熱・熱容量など)
+static const crs_t *DistM[DIST_MAX];
+static int64_t DistR0[DIST_MAX], DistR1[DIST_MAX];
+static int NDist = 0;
+
+static int dist_slot(const crs_t *A)
+{
+	for (int k = 0; k < NDist; k++) {
+		if (DistM[k] == A) return k;
+	}
+	return -1;
+}
+
+
+// 確保済み (組み立て前) の行列を自分の行ブロックだけに詰め直して登録する (mpisolve = 2 で mpirun のときだけ。
+// それ以外は何もしない)。戻り値は 1 なら分散した
+int crs_distribute(crs_t *A)
+{
+	if ((MpiSolve != 2) || (mpi_size() < 2) || (NDist >= DIST_MAX)) return 0;
+	const int n = (int)A->n;
+	int r0, r1;
+	mpi_row_range(n, &r0, &r1);
+	const int64_t q0 = A->rowptr[r0], q1 = A->rowptr[r1];
+	const int64_t nl = q1 - q0;
+	int32_t *col = (int32_t *)malloc((size_t)(nl > 0 ? nl : 1) * sizeof(int32_t));
+	memcpy(col, &A->col[q0], (size_t)nl * sizeof(int32_t));
+	free(A->col);
+	free(A->val);
+	A->col = col;
+	A->val = (double *)calloc((size_t)(nl > 0 ? nl : 1), sizeof(double));
+	for (int row = 0; row <= n; row++) {
+		const int64_t p = A->rowptr[row];
+		A->rowptr[row] = ((row <= r0) ? 0 : (row >= r1) ? nl : (p - q0));
+	}
+	A->nnz = nl;
+	DistM[NDist] = A;
+	DistR0[NDist] = r0;
+	DistR1[NDist] = r1;
+	NDist++;
+	return 1;
+}
+
+
+// A-φ の実部・虚部 (同じパターン) を同じ分け方で分散してログに出す。b は NULL でもよい
+int crs_distribute_pair(FILE *fp_log, crs_t *a, crs_t *b)
+{
+	if (!crs_distribute(a)) return 0;
+	if (b != NULL) crs_distribute(b);
+	if (fp_log != NULL) {
+		fprintf(fp_log, "\n=== MPI : the matrix is distributed by rows (mpisolve = 2) : rank %d holds rows %lld..%lld "
+			"of %lld (%lld nonzeros) ===\n", mpi_rank(), (long long)DistR0[NDist - 1], (long long)(DistR1[NDist - 1] - 1),
+			(long long)a->n, (long long)a->nnz);
+	}
+	return 1;
+}
+
+
+void crs_alloc_dist(crs_t *A)
+{
+	crs_alloc(A);
+	crs_distribute(A);
+}
+
+
+// 行 row がこの rank の持ち分か (分散していない行列は常に 1)
+int crs_owns(const crs_t *A, int64_t row)
+{
+	const int k = dist_slot(A);
+	return ((k < 0) || ((row >= DistR0[k]) && (row < DistR1[k])));
+}
+
+
+// 分散した行列なら 1 (ログ用に持ち分の行範囲も返す)
+int crs_dist_info(const crs_t *A, int64_t *r0, int64_t *r1)
+{
+	const int k = dist_slot(A);
+	if (k < 0) return 0;
+	*r0 = DistR0[k];
+	*r1 = DistR1[k];
+	return 1;
+}
+
+
+// 分散した行列 (mpisolve = 2) の全体を全 rank に集めて F に作る (直接解法の分解のため)。戻り値 0 なら分散していない (F は触らない)。
+// 行の長さを行ブロックの分け方で Allgatherv し (mpi_allgather_rows)、列番号 (double に載せる、2^31 未満なので厳密) と値を
+// rank ごとの非零の数で Allgatherv する。行の中の並びは組み立てたときのまま (直列と同じ)
+int crs_gather_full(const crs_t *A, crs_t *F)
+{
+	const int k = dist_slot(A);
+	if (k < 0) return 0;
+	const int n = (int)A->n;
+	double *len = (double *)calloc((size_t)n + 1, sizeof(double));
+	for (int64_t row = DistR0[k]; row < DistR1[k]; row++) len[row] = (double)(A->rowptr[row + 1] - A->rowptr[row]);
+	mpi_allgather_rows(len, n);
+	F->n = n;
+	F->rowptr = (int64_t *)malloc(((size_t)n + 1) * sizeof(int64_t));
+	F->rowptr[0] = 0;
+	for (int row = 0; row < n; row++) F->rowptr[row + 1] = F->rowptr[row] + (int64_t)len[row];
+	F->nnz = F->rowptr[n];
+	free(len);
+	const int64_t nz = (F->nnz > 0) ? F->nnz : 1;
+	F->col = (int32_t *)malloc((size_t)nz * sizeof(int32_t));
+	F->val = (double *)malloc((size_t)nz * sizeof(double));
+	double *cd = (double *)malloc((size_t)((A->nnz > 0) ? A->nnz : 1) * sizeof(double));
+	double *ca = (double *)malloc((size_t)nz * sizeof(double));
+	for (int64_t q = 0; q < A->nnz; q++) cd[q] = (double)A->col[q];
+	mpi_allgather_nnz(cd, A->nnz, ca, F->rowptr, n);
+	for (int64_t q = 0; q < F->nnz; q++) F->col[q] = (int32_t)ca[q];
+	mpi_allgather_nnz(A->val, A->nnz, F->val, F->rowptr, n);
+	free(cd); free(ca);
+	return 1;
+}
+
+
 void crs_zero(crs_t *A)
 {
 	// IEEE754 の 0.0 は全ビット 0 なので memset で足りる
@@ -109,6 +232,17 @@ void crs_zero(crs_t *A)
 
 void crs_free(crs_t *A)
 {
+	{
+		const int k = dist_slot(A);
+		if (k >= 0) {
+			for (int m = k; m < NDist - 1; m++) {
+				DistM[m] = DistM[m + 1];
+				DistR0[m] = DistR0[m + 1];
+				DistR1[m] = DistR1[m + 1];
+			}
+			NDist--;
+		}
+	}
 	free(A->rowptr);
 	free(A->col);
 	free(A->val);
@@ -125,12 +259,16 @@ void crs_spmv(const crs_t *A, const double *x, double *y, const unsigned char *f
 	// MSVC の OpenMP 2.0 は 64bit のループ変数を受け付けないので int を使う
 	// (節点数が INT32_MAX 未満であることは setup() で確認済み)
 	const int n = (int)A->n;
+	// mpisolve : この rank の行ブロックだけ計算して全 rank で揃える (行ごとの和の順序は分け方に
+	// 依らないので直列とビット単位で同じ。無効のときは r0 = 0, r1 = n で従来どおり)
+	int r0, r1;
+	mpi_row_range(n, &r0, &r1);
 
 	int row;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-	for (row = 0; row < n; row++) {
+	for (row = r0; row < r1; row++) {
 		if ((fix != NULL) && fix[row]) {
 			y[row] = x[row];
 			continue;
@@ -143,6 +281,7 @@ void crs_spmv(const crs_t *A, const double *x, double *y, const unsigned char *f
 		}
 		y[row] = s;
 	}
+	mpi_allgather_rows(y, n);
 }
 
 
@@ -202,6 +341,8 @@ void crs_diag(const crs_t *A, double *d)
 		}
 		d[row] = s;
 	}
+	// 分散した行列 : 他の rank の行は空なので 0 が入っている。持ち主の値で揃える
+	if (dist_slot(A) >= 0) mpi_allgather_rows(d, n);
 }
 
 
@@ -214,6 +355,8 @@ double crs_row_dot(const crs_t *A, int64_t row, const double *x)
 	for (int64_t p = p0; p < p1; p++) {
 		s += A->val[p] * x[A->col[p]];
 	}
+	// 分散した行列 : 行の持ち主が計算した値を配る (全 rank が同じ順に呼ぶので集団通信が揃う)
+	if (dist_slot(A) >= 0) mpi_bcast_dbl(&s, 1, mpi_row_owner((int)A->n, (int)row));
 
 	return s;
 }

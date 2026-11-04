@@ -59,6 +59,44 @@ static void alloc_matrices(void)
 //
 // 単位長あたりの量として扱うので TlineLength = 1 とし、以降の
 // 「体積」はすべて面積になる。
+// Jiles-Atherton の状態 (Gauss 点毎、セル / 三角形あたり 8 個の枠。1 次の三角形は先頭の 1 個だけを使う)
+static void ja_alloc(int hysteresis, int64_t ncell)
+{
+	JaB = JaH = JaM = JaBn = JaHn = JaMn = JaD = JaDn = NULL;
+	JaVB = JaVH = JaVM = JaVBn = JaVHn = JaVMn = NULL;
+	JaNu6 = NULL;
+	if (hysteresis) {
+		const size_t njasz = (size_t)ncell * 8 * sizeof(double);
+		JaB  = (double *)malloc(njasz);
+		JaH  = (double *)malloc(njasz);
+		JaM  = (double *)malloc(njasz);
+		JaBn = (double *)malloc(njasz);
+		JaHn = (double *)malloc(njasz);
+		JaMn = (double *)malloc(njasz);
+		memset(JaB,  0, njasz);		// 初期状態 : 処女 (B = H = M = 0)
+		memset(JaH,  0, njasz);
+		memset(JaM,  0, njasz);
+		memset(JaBn, 0, njasz);
+		memset(JaHn, 0, njasz);
+		memset(JaMn, 0, njasz);
+		JaD  = (double *)malloc(njasz * 3);
+		JaDn = (double *)malloc(njasz * 3);
+		memset(JaD,  0, njasz * 3);		// 0 : 方向未確定 (未磁化)
+		memset(JaDn, 0, njasz * 3);
+		if (JaVector) {
+			JaVB  = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVH  = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVM  = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVBn = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVHn = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaVMn = (double *)calloc((size_t)ncell * 16, sizeof(double));
+			JaNu6 = (double *)calloc((size_t)ncell * 6, sizeof(double));
+		}
+	}
+
+}
+
+
 static int setup_tri2d(void)
 {
 	// 断面 2 次元の格子で解けるのは M / F だけ
@@ -72,14 +110,11 @@ static int setup_tri2d(void)
 		printf("%s\n", "*** a 2-D (cross-section) mesh needs the tline key");
 		return 1;
 	}
-	// 非線形 (B-H) とヒステリシス (J-A) は Gauss 点毎の状態を構造格子の
-	// セル配列で持っているので、2 次元格子では使えない
+	// ヒステリシス (J-A) と静磁場の過渡解析は 1 次 / 高次の三角形で解く (状態は積分点ごと、assemble_ja_tri)。
+	// B-H 曲線は M (Newton、積分点ごとの ν、assemble_newton_tri) も F (実効磁気抵抗率法、要素ごとの ν) も三角形の 1 次 / 高次で解く
+	int hysteresis = 0;
 	for (int m = 0; m < NMaterial; m++) {
-		if ((Material[m].nbh[0] > 0) || Material[m].ja.on) {
-			printf("%s\n", "*** nonlinear (bh) and hysteresis (ja) materials are "
-				"available only on a structured mesh");
-			return 1;
-		}
+		if (Material[m].ja.on) hysteresis = 1;
 	}
 	{
 		const double *c = ((Tline == 'X') ? Xp : (Tline == 'Y') ? Yp : Zp);
@@ -159,6 +194,10 @@ static int setup_tri2d(void)
 	TlineLength = 1;
 	if (LineLength <= 0) LineLength = 1;
 
+	// J-A の状態 (1 次の三角形は要素に 1 つで枠は構造格子と同じ 8 個の先頭だけを使う。高次は積分点ごとで、三角形あたり
+	// tri_ja_stride() 個 = 8 個の枠 x tri_ja_stride() / 8)
+	ja_alloc(hysteresis, (int64_t)NTri * (tri_ja_stride() / 8));
+
 	alloc_matrices();
 
 	// 導体の DC 直列抵抗 [ohm/m] (3 次元格子と同じ式。面積は単位長あたり)
@@ -193,19 +232,163 @@ static int setup_unstruct(void)
 	// 黙って誤答を出すより弾く
 	// 辺要素 (Whitney) も節点要素の自己検証も四面体の形状関数に基づく。
 	// 六面体格子を渡されたら黙って誤答を出さずに弾く
-	// 辺要素は種別が 1 つの 1 次格子 (四面体 / 六面体 / 角柱) でだけ使える。
-	// 混在は種別をまたぐ面の接線連続性 (Nedelec の適合性) の検査が別に要り、
-	// ピラミッドには多項式の Nedelec 基底が無いので、どちらも弾く
-	if (((MeshElem == MESHELEM_MIXED) || (MeshElem == MESHELEM_PYR))
-	 && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
-		printf("%s\n", "*** analysis E / A (edge elements) need a single-kind "
-			"tetrahedral, hexahedral or prism mesh (mixed element kinds and "
-			"pyramids are not supported)");
+	// 辺要素は 1 次の四面体・六面体・角柱で使える (**種別の混在も可**)。
+	// 最低次 Nedelec の接線トレースは三角形面・四角形面のどちらでも面の辺の
+	// 自由度だけで決まるので、面を共有する要素の種別が違っても接線連続性は
+	// 保たれる (solve_edge_test の (g) が直接検査する)。
+	// ピラミッドは有理関数の Nedelec 基底 (edge.c の epyr_basis、ND1 ⊕ ∇(ξη/(1−ζ)) ⊕ 1) で 1 次の格子だけ解く。
+	// 高次の格子にピラミッドがあると高次の経路 (eddy3d_p2.c / eddy3d_pr.c) が扱えないので弾く
+	if ((NPyr > 0) && (TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
+		printf("%s\n", "*** analysis E / A (edge elements) support pyramids only on first-order meshes "
+			"(the rational pyramid Nedelec basis is the lowest order)");
 		return 1;
 	}
-	if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
-		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh");
+	// 2 次の四面体 (10 節点) の A は 2 次の Nedelec 要素 (eddy3d_p2.c) で解く。対応するのは周波数領域の
+	// 線形材料・ゲージなし・場の出力なし・単体の四面体格子だけなので、それ以外は理由を付けて弾く
+	// (2 次の六面体・角柱の格子も TetOrder = 2 になるので、四面体だけの格子に限る)
+	if ((TetOrder == 2) && ((NHex + NPrism + NPyr) == 0) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+		// B-H 曲線は A の周波数領域 (実効磁気抵抗率法) と過渡解析 (固定点反復)、J-A は A の過渡解析だけ。
+		// 交流の発熱と E は線形のみ
+		int nl = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			const int nonl = (Material[m].ja.on || (Material[m].nbh[0] > 0));
+			if (nonl && (Analysis & ANALYSIS_E)) nl = 1;
+			if (Material[m].ja.on && (ThermalOn || !TransientOn)) nl = 1;
+		}
+		const char *why = NULL;
+		if (nl) why = "linear materials with analysis E (bh : A, also with thermal; ja : A with transient, no thermal)";
+		else if ((GaugeTree || Direct) && (TransientOn || ThermalOn || (Analysis & ANALYSIS_E)))
+			why = "gauge = 0 and the iterative solver in the time domain / with thermal";
+		if (why != NULL) {
+			printf("*** analysis A / E on a second-order (10-node) mesh supports %s only\n", why);
+			return 1;
+		}
+	}
+	// 3 次以上の四面体 (20 / 35 / 56 / 84 / 120 節点) の A / E は次数 r の Nedelec 要素 (eddy3d_pr.c) で解く。
+	// 対応するのは線形材料 (周波数領域・過渡解析・交流の発熱)・ゲージなし・反復解法・単体の四面体格子だけ
+	else if ((TetOrder >= 3) && ((NHex + NPrism + NPyr) == 0) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+		// B-H 曲線は A の周波数領域 (実効磁気抵抗率法) と過渡解析 (固定点反復)、J-A は A の過渡解析だけ。
+		// 交流の発熱と E は線形のみ (2 次と同じ範囲)
+		int nl = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			const int nonl = (Material[m].ja.on || (Material[m].nbh[0] > 0));
+			if (nonl && (Analysis & ANALYSIS_E)) nl = 1;
+			if (Material[m].ja.on && (ThermalOn || !TransientOn)) nl = 1;
+		}
+		const char *why = NULL;
+		if (nl) why = "linear materials with analysis E (bh : A, also with thermal; ja : A with transient, no thermal)";
+		else if ((GaugeTree || Direct) && (TransientOn || ThermalOn || (Analysis & ANALYSIS_E)))
+			why = "gauge = 0 and the iterative solver in the time domain / with thermal / for E";
+		if (why != NULL) {
+			printf("*** analysis A / E on a mesh of order 3 and up (order-%d Nedelec) supports %s only\n", TetOrder, why);
+			return 1;
+		}
+	}
+	// 高次の六面体 (27 / 64 / 125 / 216 節点、完全 Lagrange) だけの格子の A は部分辺の Nedelec 要素 (eddy3d_pr.c の六面体)。
+	// 四面体の 3 次以上と同じ範囲 (周波数領域・過渡解析・交流の発熱、B-H 曲線、過渡解析の J-A、周波数領域のゲージ固定・直接解法・
+	// 場の出力)。E・serendipity・混在は弾く
+	else if ((TetOrder >= 2) && (NHex > 0) && ((NTet + NPrism + NPyr) == 0) && (HexNen != 20)
+		&& (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+		int ja = 0, nl = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.on) ja = 1;
+			if (Material[m].ja.on || (Material[m].nbh[0] > 0)) nl = 1;
+		}
+		if (nl && (Analysis & ANALYSIS_E)) {
+			printf("*** analysis E (edge self test) on a high-order hexahedral mesh supports linear materials only\n");
+			return 1;
+		}
+		if (ja && (ThermalOn || !TransientOn)) {
+			printf("*** analysis A on a high-order hexahedral mesh (order-%d sub-edge Nedelec) supports ja (hysteresis) "
+				"materials only in the time domain without thermal\n", TetOrder);
+			return 1;
+		}
+		if ((GaugeTree || Direct) && (TransientOn || ThermalOn)) {
+			printf("*** analysis A on a high-order hexahedral mesh (order-%d sub-edge Nedelec) supports gauge = 0 and the "
+				"iterative solver only in the time domain / with thermal\n", TetOrder);
+			return 1;
+		}
+	}
+	// 高次の角柱 (18 / 40 / 75 / 126 節点、完全 Lagrange) だけの格子の A は層ごとの三角形の Nedelec と ζ 方向の部分辺 (eddy3d_pr.c の
+	// 角柱)。六面体と同じ範囲から、ゲージ固定と直接解法を除く (面内の勾配が ±1 の接続行列でないので木で零空間が消えない)
+	else if ((TetOrder >= 2) && (NPrism > 0) && ((NTet + NHex + NPyr) == 0) && (PrismNen != 15)
+		&& (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+		int ja = 0, nl = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.on) ja = 1;
+			if (Material[m].ja.on || (Material[m].nbh[0] > 0)) nl = 1;
+		}
+		if (nl && (Analysis & ANALYSIS_E)) {
+			printf("*** analysis E (edge self test) on a high-order prism mesh supports linear materials only\n");
+			return 1;
+		}
+		if (ja && (ThermalOn || !TransientOn)) {
+			printf("*** analysis A on a high-order prism mesh (order-%d Nedelec) supports ja (hysteresis) "
+				"materials only in the time domain without thermal\n", TetOrder);
+			return 1;
+		}
+		if ((GaugeTree || Direct) && (TransientOn || ThermalOn)) {
+			printf("*** analysis A on a high-order prism mesh (order-%d Nedelec) supports gauge = 0 and the iterative "
+				"solver only in the time domain / with thermal\n", TetOrder);
+			return 1;
+		}
+	}
+	// 種別の混在した高次の格子 (四面体・六面体・角柱、同じ次数 2〜7、完全 Lagrange) も eddy3d_pr.c (辺の自由度をすべて部分辺にそろえる)
+	else if ((TetOrder >= 2) && (TetOrder <= 7) && (NPyr == 0) && (((NTet > 0) + (NHex > 0) + (NPrism > 0)) >= 2)
+		&& ((NHex == 0) || (HexNen != 20)) && ((NPrism == 0) || (PrismNen != 15)) && (Analysis & (ANALYSIS_A | ANALYSIS_E))) {
+		int ja = 0, nl = 0;
+		for (int m = 0; m < NMaterial; m++) {
+			if (Material[m].ja.on) ja = 1;
+			if (Material[m].ja.on || (Material[m].nbh[0] > 0)) nl = 1;
+		}
+		if (nl && (Analysis & ANALYSIS_E)) {
+			printf("*** analysis E (edge self test) on a mixed high-order mesh supports linear materials only\n");
+			return 1;
+		}
+		if (ja && (ThermalOn || !TransientOn)) {
+			printf("*** analysis A on a mixed high-order mesh supports ja (hysteresis) materials only in the time domain "
+				"without thermal\n");
+			return 1;
+		}
+		if ((GaugeTree || Direct) && (TransientOn || ThermalOn)) {
+			printf("*** analysis A on a mixed high-order mesh supports gauge = 0 and the iterative solver only in the time "
+				"domain / with thermal\n");
+			return 1;
+		}
+	}
+	else if ((TetOrder >= 2) && (Analysis & (ANALYSIS_E | ANALYSIS_A))) {
+		// "need a first-order mesh" は rlc_check.sh が理由として grep する (3 次 / 4 次 / 2 次の六面体)
+		printf("%s\n", "*** analysis E / A (edge elements) need a first-order mesh "
+			"(or, for a high order, tetrahedra / full Lagrange hexahedra / prisms of one order, mixed kinds allowed: "
+			"not 20-node / 15-node serendipity elements or pyramids)");
 		return 1;
+	}
+	// 10 節点の四面体も組み立てで積分点の det J の符号が揃わない要素を飛ばす (tet10_element が 1 を
+	// 返す) ので、同じく先に全要素を見て弾く。**内部の中間節点を要素の大きさの 1/4 ずらした格子で、
+	// 裏返った要素が黙って飛ばされ R が +8.7% になった** (実測。曲がった要素の 2 次の A の検査で踏んだ)
+	if ((MeshDim == 3) && (TetOrder == 2)) {
+		const double c1[6] = {1, 1, 1, 0, 0, 0};
+		for (int e = 0; e < NTet; e++) {
+			double ke[10][10], vol;
+			if (tet10_element(e, c1, ke, &vol)) {
+				printf("*** tetrahedron %d (10-node) is degenerate or inverted (det J changes "
+					"sign inside the element)\n", e + 1);
+				return 1;
+			}
+		}
+	}
+	// 20 節点の四面体は、組み立てで積分点の det J の符号が揃わない要素を飛ばすので
+	// (2 次と同じ経路)、黙って誤答にしないよう先に全要素を見て弾く
+	if ((MeshDim == 3) && (TetOrder >= 3)) {
+		const double c1[6] = {1, 1, 1, 0, 0, 0};
+		for (int e = 0; e < NTet; e++) {
+			double ke[TET_NMAX][TET_NMAX], vol;
+			if (tet20_element(e, c1, ke, &vol)) {
+				printf("*** tetrahedron %d (%d-node) is degenerate or inverted (det J changes "
+					"sign inside the element)\n", e + 1, tet_nen());
+				return 1;
+			}
+		}
 	}
 
 	if (MeshDim == 2) return setup_tri2d();
@@ -266,8 +449,8 @@ static int setup_unstruct(void)
 				NodeConductor[Quad[(t * 4) + l]] = (signed char)ElecCond[q];
 			}
 			if (Quad2 != NULL) {
-				for (int l = 0; l < 5; l++) {
-					const int32_t n = Quad2[(t * 5) + l];
+				for (int l = 0; l < QUAD2_W; l++) {
+					const int32_t n = Quad2[(t * QUAD2_W) + l];
 					if (n >= 0) NodeConductor[n] = (signed char)ElecCond[q];
 				}
 			}
@@ -279,6 +462,11 @@ static int setup_unstruct(void)
 			for (int l = 0; l < 3; l++) {
 				NodeConductor[Tri[(t * 3) + l]] = (signed char)ElecCond[q];
 				NodeConductor[Tri2[(t * 3) + l]] = (signed char)ElecCond[q];
+			}
+			// 3 次 (10 節点) の三角形は辺の 6 節点と面心も固定する (-1 は「無い」)
+			for (int l = 0; l < TRI_HO_MAX; l++) {
+				const int32_t n3 = Tri3[(t * TRI_HO_MAX) + l];
+				if (n3 >= 0) NodeConductor[n3] = (signed char)ElecCond[q];
 			}
 		}
 	}
@@ -463,26 +651,7 @@ int setup(void)
 	for (int m = 0; m < NMaterial; m++) {
 		if (Material[m].ja.on) hysteresis = 1;
 	}
-	JaB = JaH = JaM = JaBn = JaHn = JaMn = JaD = JaDn = NULL;
-	if (hysteresis) {
-		const size_t njasz = (size_t)ncell * 8 * sizeof(double);
-		JaB  = (double *)malloc(njasz);
-		JaH  = (double *)malloc(njasz);
-		JaM  = (double *)malloc(njasz);
-		JaBn = (double *)malloc(njasz);
-		JaHn = (double *)malloc(njasz);
-		JaMn = (double *)malloc(njasz);
-		memset(JaB,  0, njasz);		// 初期状態 : 処女 (B = H = M = 0)
-		memset(JaH,  0, njasz);
-		memset(JaM,  0, njasz);
-		memset(JaBn, 0, njasz);
-		memset(JaHn, 0, njasz);
-		memset(JaMn, 0, njasz);
-		JaD  = (double *)malloc(njasz * 3);
-		JaDn = (double *)malloc(njasz * 3);
-		memset(JaD,  0, njasz * 3);		// 0 : 方向未確定 (未磁化)
-		memset(JaDn, 0, njasz * 3);
-	}
+	ja_alloc(hysteresis, ncell);
 
 	// 結果行列
 
@@ -521,8 +690,8 @@ void memfree(void)
 	free(Geometry);
 	free(Conductor);
 	free(Xp); free(Yp); free(Zp);
-	free(Tet); free(TetTag); free(TetMat); free(Tet2);
-	free(Tri); free(TriTag); free(Tri2); free(TriMat); free(TriCond); free(TriArea);
+	free(Tet); free(TetTag); free(TetMat); free(Tet2); free(Tet3);
+	free(Tri); free(TriTag); free(Tri2); free(Tri3); free(TriMat); free(TriCond); free(TriArea);
 	free(Hex); free(HexTag); free(HexMat); free(Hex2);
 	free(Quad); free(QuadTag); free(Quad2);
 	free(Prism); free(PrismTag); free(PrismMat); free(Prism2);
@@ -534,4 +703,5 @@ void memfree(void)
 	free(Rfmat); free(Lfmat); free(Pfemat);
 	free(JaB); free(JaH); free(JaM); free(JaBn); free(JaHn); free(JaMn);
 	free(JaD); free(JaDn);
+	free(JaVB); free(JaVH); free(JaVM); free(JaVBn); free(JaVHn); free(JaVMn); free(JaNu6);
 }

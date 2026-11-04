@@ -1,0 +1,38 @@
+OpenFEM 1 0
+title = electro-thermal coupling on a mixed mesh : hexahedra + pyramids in the neck
+#
+# 首のある導体 (thermal_neck.ofe と同じ形・同じ格子) を非構造格子で切ったもの。
+# 首の外は六面体、首は各セルを体心で 6 つのピラミッドに割った混在格子
+# (界面は四角形面なので適合する)。電流が首に集中して ∇φ が要素内で変わるので、
+# 発熱の節点荷重を剛性と同じ積分点で組んだことの検査になる:
+#   Σf = φᵀKφ = I²R = ヒートシンクへの熱 (丸めを除いて厳密)
+# 1 次元の棒では ∇φ が要素内で一定なので、発熱を 1 点で取る手抜きでも通ってしまう。
+#
+# 首 (タグ 2) は別の材料 (σ = 2e6、k = 25、α = 2e-3) にして、要素番号から材料を引く
+# 経路 (種別ごとに添字が違う) を効かせる。同じ材料の置き方の構造格子
+# (thermal_neck.ofe の首を材料 3 にしたもの) と六面体だけの格子
+# (thermal_neck_hex.msh) は同じ離散問題なので全桁一致する (rlc_check.sh)。
+#
+# 格子は mkmesh.py で作る:
+#   python3 mkmesh.py neck_hex thermal_neck_mix.msh -pyrneck 1
+#   (六面体 thermal_neck_hex.msh は引数なし、角柱 -split 1、ピラミッド -split 2)
+# 物理タグ 1 = 首の外、2 = 首、10 = x=0 面 (電極 0)、11 = x=3mm 面 (電極 1)。
+#
+mesh = thermal_neck_mix.msh
+material = 1.0 1e6
+material = 1.0 2e6
+tempco = 2 4e-3 0
+kthermal = 2 10
+kthermal = 3 25
+tempco = 3 2e-3 0
+region = 1 2
+region = 2 3
+electrode = 10 0
+electrode = 11 1
+heatsink = 0 20
+heatsink = 1 20
+
+thermal = 8
+analysis = R
+solver = 20000 500 1e-12
+end

@@ -1,0 +1,31 @@
+OpenFEM 1 0
+title = eddy-current lamination : step response of a conducting magnetic core
+#
+# 静磁場の過渡解析 (analysis = M + transient) の線形の検証。平行平板線路
+# (plate_line_dc.ofe の形) の間を導電性の磁性体 (μr = 1000、σ = 1e6、厚さ d = 0.2mm) で
+# 埋め、t = 0 で電流 I = 1 A を入れる。導体は撚り線とみなす (一様な電流密度)。
+# 磁性体の両面の H は Ampère の法則で H_s = I/W に決まり、中は拡散方程式
+#   ∂²H/∂y² = σμ ∂H/∂t,   H(表面) = H_s
+# に従う (積層板の 1 次元問題)。板の平均の磁束密度は
+#   B̄(t) = μ H_s [1 - Σ_{k 奇数} 8/(k²π²) exp(-k²π² t/τ)],   τ = σμd² = 5.027e-5 s
+# で、t = 1e-5 s では 1.1136604856 T。
+# 時間は後退 Euler なので誤差は Δt の 1 次 (100 / 200 刻みの誤差比 2.05)。
+# 孤立した導電領域は正味の電流が 0 (射影質量で消去)。ログの最後に
+#   入力 (端子の仕事) = 磁気の仕事 + 渦電流損
+# が出る (離散でも厳密)。
+#
+xmesh = 0 4 1e-3
+ymesh = 0 10 0.05e-3 40 0.25e-3 10 0.30e-3
+zmesh = 0 1 1e-4
+material = 1.0 1e6
+mur = 2 1000
+geometry = 2 1 0 1e-3 0.05e-3 0.25e-3 0 1e-4
+conductor = 0 1 0 1e-3 0      0.05e-3 0 1e-4
+conductor = 1 1 0 1e-3 0.25e-3 0.30e-3 0 1e-4
+analysis = M
+tline = Z
+current = 1.0
+transient = 1e-5 100
+nlsolver = 50 1e-10 1.0
+solver = 50000 5000 1e-13
+end

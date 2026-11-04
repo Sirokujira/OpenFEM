@@ -44,6 +44,7 @@ extern "C" {
 #define FN_field "ofe_field.vtk"
 #define FN_sweep "ofe_sweep.csv"
 #define FN_series "ofe_series.h5"
+#define FN_transient "ofe_transient.csv"
 
 // 数学・物理定数 (OpenFDTD の ofd.h と同じ定義)
 #define PI     (4.0 * atan(1.0))
@@ -52,6 +53,8 @@ extern "C" {
 #define EPS0   (1 / (C0 * C0 * MU0))
 #define ETA0   (C0 * MU0)
 #define EPS    (1e-6)
+#define STEFAN (5.670374419e-8)	// Stefan-Boltzmann 定数 [W/(m^2 K^4)]
+#define KELVIN (273.15)			// 0 degC の絶対温度 [K]
 
 // 解析種別ビット (analysis キー)
 #define ANALYSIS_C (1 << 0)		// 静電界 -> 容量行列 C
@@ -66,12 +69,24 @@ extern "C" {
 #define MAXPORT (16)			// 導体 (基準導体 + ポート) の最大数
 #define MAXBH   (64)			// B-H 曲線の点数の最大数
 #define MAXPOLE (8)				// 分散材料の極の最大数
-#define MAXSWEEP (64)			// 電流掃引の点数の最大数
+#define MAXSWEEP (256)			// 電流掃引の点数の最大数
 
 // Jiles-Atherton ヒステリシスモデルのパラメータ
 //   M_an(He) = Ms (coth(He/a) - a/He),  He = H + α M
 //   dM/dH = [ (1-c) δ_M (M_an-M)/(δk - α(M_an-M)) + c dM_an/dHe ]
 //         / [ 1 - α c dM_an/dHe ]
+#define MAXTEMPTAB (32)		// 温度係数の表の点数の上限
+#define EXPR_MAXOP (256)		// 位置の式 (convectionexpr / radiationexpr) の命令の数の上限
+#define EXPR_MAXSTACK (32)		// 位置の式の評価のスタックの深さの上限
+#define EXPR_MAXLEN (1024)		// 位置の式の文字数の上限
+
+// 位置の式 f(x, y, z) を逆ポーランド記法に翻訳したもの (sol/expr.c)
+typedef struct {
+	int n;
+	int op[EXPR_MAXOP];
+	double val[EXPR_MAXOP];
+} expr_t;
+
 typedef struct {
 	int    on;					// 1 : このモデルを使う
 	double ms;					// 飽和磁化 Ms [A/m]
@@ -79,6 +94,11 @@ typedef struct {
 	double alpha;				// 磁区間結合 α
 	double k;					// ピン止め k [A/m]
 	double c;					// 可逆成分の割合 c
+	// 異方性 (jaaxis) : 全体の軸 x / y / z ごとの (Ms, a, α, k, c)。指定しない軸は ja の行の値。
+	// ベクトル J-A (javector の断面 2 次元と 3 次元の A) だけが読む
+	int aniso;					// 1 : 軸ごとのパラメータを使う
+	int axset;					// 指定された軸 (bit 0..2)
+	double axp[3][5];
 } ja_t;
 
 // 分散材料の極 (時間因子 e^{jωt}、ε = ε' - jε'')
@@ -128,6 +148,14 @@ typedef struct {
 	double epstempco, epstemp0;
 	double mutempco,  mutemp0;
 	double bhtempco,  bhtemp0;
+	// 温度係数の表 (epstemptable / mutemptable / bhtemptable / tempcotable)。
+	// [0] εr、[1] μr、[2] B-H の倍率、[3] 抵抗率の倍率 ρ(T)/ρ0 (σ = σ0 / f)。
+	// 点数 0 なら 1 次係数を使う。キュリー点近傍の非線形な落ち込みを折れ線で書く
+	int    ntemp[4];
+	double tempT[4][MAXTEMPTAB], tempF[4][MAXTEMPTAB];
+	// 熱伝導率 [W/(m K)] (熱連成 thermal で使う。0 : 熱を通さない)
+	double kth;
+	double cth;					// 体積熱容量 ρc [J/(m^3 K)] (熱連成の過渡解析 transient で使う)
 	// B-H 曲線 (軸毎)。bhaniso = 0 なら軸 0 の曲線を |B| に対して等方的に使う
 	int    bhaniso;				// 1 : 軸毎に別の曲線 (直交異方性)
 	int    nbh[3];				// 各軸の点数 (0 : 線形、mu6 を使う)
@@ -187,18 +215,38 @@ EXTERN unsigned char *TetMat;	// [NTet] 材料番号
 //   Tet2 : (0,1) (1,2) (2,0) (3,0) (3,2) (3,1)
 //   Tri2 : (0,1) (1,2) (2,0)
 EXTERN int TetOrder;
+EXTERN int MeshRaisedElem, MeshRaisedNode, MeshRaisedFrom, MeshRaisedKinds;	// 次数の違う要素を最高次数に上げた数 / 足した節点 / 元の最低次数
 EXTERN int32_t *Tet2;			// [6*NTet] 2 次のときのみ (1 次では NULL)
 EXTERN int32_t *Tri2;			// [3*NTri] 2 次のときのみ (1 次では NULL)
+// 四面体が 3 次 (20 節点) のとき Tet3 に頂点以外の 16 節点 (局所 4..19)、Tri3 に三角形の
+// 頂点以外の 7 節点 (局所 3..9) が入る。並びは Gmsh の tet20 / tri10 (unstruct.c の
+// TET3_A / TRI3_A、gmsh の出力を分類した実測の表)。3 次でない三角形の Tri3 は -1
+EXTERN int32_t *Tet3;			// [TET_HO_MAX*NTet] 3 次・4 次のときのみ (3 次は先頭 16 個)
+#define TRI_NMAX (36)		// 三角形 1 個の最大節点数 (7 次の tri36)
+#define TET_NMAX (120)		// 四面体 1 個の最大節点数 (7 次の tet120)
+#define ELEM_NMAX (512)		// 3 次元要素 1 個の最大節点数 (7 次の hexa512)
+#define HEXP_NMAX (512)		// 六面体 1 個の節点数の上限 (7 次の hexa512)
+#define PRISMP_NMAX (288)	// 角柱 1 個の節点数の上限 (7 次の prism288)
+#define HEX2_W (504)		// Hex2 の 1 要素あたりの欄数 (頂点以外、7 次で 504)
+#define PRISM2_W (282)		// Prism2 の 1 要素あたりの欄数 (頂点以外、7 次で 282)
+#define QUAD2_W (60)		// Quad2 の 1 面あたりの欄数 (頂点以外、64 節点四角形で 60)
+#define TET_HO_MAX (116)		// Tet3 の 1 要素あたりの幅 (頂点以外の節点、3 次 16 / 4 次 31 / 5 次 52 / 6 次 80 / 7 次 116)
+#define TRI_HO_MAX (33)		// Tri3 の 1 要素あたりの幅 (頂点以外の節点、3 次 7 / 4 次 12 / 5 次 18 / 6 次 25 / 7 次 33)
+#define GL_NMAX (10)		// 1 次元 Gauss-Legendre の最大点数 (7 次の自己検証で 9)
+#define QTRI_MAX (100)		// 三角形の Duffy 則の最大点数 (GL_NMAX²)
+EXTERN int32_t *Tri3;			// [TRI_HO_MAX*NTri] 常に確保 (3 次は先頭 7 個、使わない欄は -1)
 // 辺 (3 次元渦電流の辺要素で使う)。辺は節点番号の小さい方から大きい方へ向ける
 EXTERN int NEdge;
 EXTERN int64_t *EdgePtr;		// [NNode+1] 節点 i を始点とする辺の範囲
 EXTERN int32_t *EdgeTo;			// [NEdge] 終点 (昇順)
 EXTERN int32_t *EdgeFrom;		// [NEdge] 始点 (節点番号の小さい方)
-// 要素毎の辺番号と向き。stride は要素あたりの辺数 (四面体 6 / 六面体 12 /
-// 角柱 9)。辺要素は種別が 1 つの格子でだけ使うので stride は格子で 1 つ。
-// 名前は四面体由来だが純六面体・純角柱の格子でも使う
-EXTERN int32_t *TetEdge;		// [nedge*nelem] 要素の辺番号
-EXTERN signed char *TetEdgeSgn;	// [nedge*nelem] 局所の並びと全体の向きの符号
+// 要素毎の辺番号と向き。要素あたりの辺数は種別で違う (四面体 6 / 六面体 12 /
+// 角柱 9) ので、**要素 e の辺は EdgeOff[e] から EdgeOff[e+1] まで**を見る。
+// 種別が 1 つの格子では EdgeOff[e] = e * nedge になり、従来の並びと一致する。
+// 名前は四面体由来だが六面体・角柱・混在格子でも使う
+EXTERN int32_t *TetEdge;		// [EdgeOff[nelem]] 要素の辺番号
+EXTERN signed char *TetEdgeSgn;	// [EdgeOff[nelem]] 局所の並びと全体の向きの符号
+EXTERN int64_t *EdgeOff;		// [nelem+1] 要素毎の辺の開始位置
 
 EXTERN int NTri;				// 三角形数 (電極面の指定に使う)
 EXTERN int32_t *Tri;			// [3*NTri]
@@ -227,13 +275,13 @@ EXTERN unsigned char *HexMat;	// [NHex] 材料番号
 //        y+ (2,3,7,6), z+ (4,5,6,7)、最後に体心
 // 次数の混在は弾くので HexNen は格子全体で 1 つ (8 / 20 / 27)
 EXTERN int HexNen;				// 六面体 1 個の節点数
-EXTERN int32_t *Hex2;			// [19*NHex] 2 次のときのみ (1 次では NULL)
+EXTERN int32_t *Hex2;			// [HEX2_W*NHex] 2 次以上のときのみ (1 次では NULL)
 EXTERN int NQuad;				// 四角形数 (電極面の指定に使う)
 EXTERN int32_t *Quad;			// [4*NQuad] 頂点
 EXTERN int *QuadTag;			// [NQuad] 物理タグ
 // 2 次の四角形 (型 16 = 8 節点 / 10 = 9 節点)。辺 (0,1)(1,2)(2,3)(3,0) の
 // 中間節点 4 個 + 中心 (8 節点では -1)。電極の中間節点の固定にだけ使う
-EXTERN int32_t *Quad2;			// [5*NQuad] 2 次のときのみ (1 次では NULL)
+EXTERN int32_t *Quad2;			// [QUAD2_W*NQuad] 2 次以上のとき (1 次では -1)
 
 // 角柱 (6 節点、三角形を押し出した形)。局所の並びは Gmsh / VTK と同じ
 // 「下面の三角形 (0,1,2)、その真上に上面 (3,4,5)」。境界面は三角形と四角形の
@@ -248,7 +296,7 @@ EXTERN unsigned char *PrismMat;	// [NPrism] 材料番号
 //   辺 : (0,1)(0,2)(0,3)(1,2)(1,4)(2,5)(3,4)(3,5)(4,5)
 //   四角形面 : (0,1,4,3) (0,2,5,3) (1,2,5,4)
 EXTERN int PrismNen;			// 角柱 1 個の節点数 (6 / 15 / 18)
-EXTERN int32_t *Prism2;			// [12*NPrism] 2 次のときのみ (1 次では NULL)
+EXTERN int32_t *Prism2;			// [PRISM2_W*NPrism] 2 次以上のときのみ (1 次では NULL)
 
 // ピラミッド (5 節点、四角形の底面 + 頂点)。局所の並びは Gmsh / VTK と同じ
 // 「底面を反時計回り (0..3)、最後に頂点 (4)」。四角形面 1 枚と三角形面 4 枚を
@@ -307,6 +355,48 @@ EXTERN double Freq;				// 周波数 [Hz] (tanδ による誘電損の計算に�
 EXTERN double Curr;				// 静磁場解析の励振電流 [A]
 EXTERN double Temperature;		// 動作温度 [degC] (tempco と併せて σ を補正する)
 
+// 電気-熱連成 (thermal)。定常電流界 (R) の Joule 発熱で温度分布を解き、
+// σ(T) を要素ごとに更新して R が収束するまで繰り返す
+EXTERN int ThermalOn;			// 1 : 熱連成を行う
+EXTERN double ThermalCurrent;	// 駆動電流 [A]
+EXTERN int ThermalMaxIter;		// 連成反復の上限
+EXTERN double ThermalTol;		// 連成反復の収束判定 (R と T_max の相対変化)
+EXTERN int HeatSinkOn[MAXPORT];	// 導体ごと : 1 なら温度を固定する (ヒートシンク)
+EXTERN double HeatSinkT[MAXPORT];	// ヒートシンクの温度 [degC]
+// 露出面の境界条件 (convection / radiation) の 1 行。box があればその直方体に
+// 中心が入る面だけ、無ければすべての露出面。面はあとに書いた行ほど優先する
+#define MAXSURF (64)
+typedef struct {
+	double c;					// h [W/(m^2 K)] (対流) または放射率 ε (輻射)
+	double t;					// 周囲温度 [degC]
+	int    box;					// 1 : g の直方体に限る
+	double g[6];				// x1 x2 y1 y2 z1 z2 [m]
+} surfbc_t;
+EXTERN int NConv, NRad;
+EXTERN surfbc_t ConvBC[MAXSURF], RadBC[MAXSURF];
+EXTERN double ConvH;			// 対流の h の最大値 (0 : 対流なし)
+EXTERN double RadEps;			// 輻射の ε の最大値 (0 : 輻射なし)
+EXTERN int ConvTabN;			// 対流の h の温度依存の折れ線の点数 (0 : h は一定)
+EXTERN double ConvTabT[MAXTEMPTAB], ConvTabF[MAXTEMPTAB];	// 面の温度 [degC] と h の倍率
+EXTERN int ProfN[2];			// 面の係数の位置の折れ線 (0 : 対流 h、1 : 輻射 ε) の点数 (0 : 位置に依らない)
+EXTERN int ProfAxis[2];			// 折れ線の座標軸 (0 = x, 1 = y, 2 = z)
+EXTERN double ProfX[2][MAXTEMPTAB], ProfF[2][MAXTEMPTAB];	// 位置 [m] と倍率
+EXTERN int MpiSolve;				// 1 : mpirun で行列ベクトル積を行ブロックに分ける (mpisolve)
+EXTERN int ExprOn[2];				// 面の係数の位置の式 (0 : 対流 h、1 : 輻射 ε) がある
+EXTERN expr_t ExprF[2];				// 位置の式 (面の中心で評価して倍率にする)
+EXTERN char ExprStr[2][EXPR_MAXLEN];	// 位置の式の文字列 (ログ用)
+EXTERN int ExprT[2];				// 式が面の温度 T を含む (Newton 線形化の経路で面ごと・温度ごとに評価)
+EXTERN int ExprBad[2];				// 位置の式が負・非有限 (輻射は ε f > 1 も) になった面の数
+EXTERN int RadExchange;			// 1 : 輻射の面どうしの相互放射 (形態係数、構造格子)
+EXTERN int RadTabN;				// 輻射の ε の温度依存の折れ線の点数 (0 : ε は一定)
+EXTERN double RadTabT[MAXTEMPTAB], RadTabF[MAXTEMPTAB];	// 面の温度 [degC] と ε の倍率
+EXTERN int TransientOn;			// 1 : 熱連成を過渡解析にする (電流を t = 0 で入れる)
+EXTERN double TransientTime;	// 終了時刻 [s]
+EXTERN int TransientSteps;		// 時間刻みの数 (Δt = TransientTime / TransientSteps)
+EXTERN double TransientTheta;	// θ 法の θ (1 : 後退 Euler、0.5 : Crank-Nicolson)
+EXTERN int WaveN;				// 過渡解析の電流の折れ線の点数 (0 : 一定)
+EXTERN double *WaveT, *WaveF;	// その時刻 [s] と電流の倍率 (thermal の I に掛ける)
+
 // 周波数掃引 (frequencysweep)。各点で分散材料を展開し直して解き直す
 EXTERN int NFreqSweep;
 EXTERN double FreqSweep[MAXSWEEP];
@@ -336,9 +426,18 @@ EXTERN double Sweep[MAXSWEEP];
 
 // Jiles-Atherton の状態 (Gauss 点毎、添字 = cell * 8 + g)
 EXTERN double *JaB, *JaH, *JaM;		// 収束済みの |B|, H, M
+EXTERN int JaSafeSlope;			// 1 : dH/dB に両方向の枝の大きい方を返す (固定点の安定化)
 EXTERN double *JaBn, *JaHn, *JaMn;	// 反復中の |B|, H, M
 EXTERN double *JaD, *JaDn;		// 磁化方向の基準ベクトル (符号付き B を取るため)
 EXTERN int JaSub;				// 1 ステップあたりの部分積分数
+EXTERN int JaVector;			// 1 : ベクトル J-A (等方性、面内 2 成分。回転磁界)
+EXTERN double *JaVB, *JaVH, *JaVM;		// ベクトル J-A の収束済みの B, H, M (面内 2 成分、添字 = id * 2)
+EXTERN double *JaVBn, *JaVHn, *JaVMn;	// 反復中の B, H, M
+EXTERN double *JaNu6;			// ベクトル J-A の固定点行列のテンソル (セル毎 6 成分)
+EXTERN int NSweep2;				// 2 番目のポートの電流掃引の点数 (0 : 1 ポートだけ)
+EXTERN double Sweep2[MAXSWEEP];
+EXTERN int JaProbeOn;			// 1 : 指定点に近い Gauss 点の H, B (ベクトル) を掃引の各点でログに出す
+EXTERN double JaProbe[3];
 
 // 非線形 (B-H) 反復の設定
 EXTERN int NlMaxiter;			// 最大反復回数
@@ -358,6 +457,8 @@ EXTERN signed char *CellConductor;
 EXTERN double CondSigma[MAXPORT];	// 導電率 [S/m] (0 = 未指定)
 EXTERN double CondTempco[MAXPORT];	// 抵抗率の温度係数 α [1/K] (0 = 温度依存なし)
 EXTERN double CondTemp0[MAXPORT];	// 基準温度 T0 [degC]
+EXTERN int CondNTemp[MAXPORT];		// conductortempcotable の点数 (0 : 1 次係数)
+EXTERN double CondTempT[MAXPORT][MAXTEMPTAB], CondTempF[MAXPORT][MAXTEMPTAB];
 EXTERN double CondArea[MAXPORT];	// 断面積 [m^2] (tline 指定時)
 
 // 抽出結果 (行列は [NPort][NPort]、単位は Tline 指定時 F/m, H/m, S/m)

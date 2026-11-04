@@ -1,0 +1,41 @@
+OpenFEM 1 0
+title = electro-thermal coupling, transient : a rectangular current pulse on a convection-cooled bar
+#
+# 過渡解析の電流波形 (waveform) の検証。thermal_conv.ofe の棒 (断面 1mm x 0.5mm、
+# 側面だけから h = 200 W/(m² K)、T_a = 30 degC へ対流) に、t = 0 から 2 s まで
+# I = 6 A のパルスを流し、そのあと 4 s まで冷やす。初期温度 50 degC。
+#   waveform = 0 1 2 1 2 0   ((t, 倍率) の折れ線。t = 2 を 2 回書くと段差)
+#
+# 温度は棒の中で一様なので (断面 1 x 1 セル、電極の面は断熱)、θ = T - T_a は
+#   ρc dθ/dt = J² ρ_a (1 + α_a θ) - (hP/A) θ
+# に従う。t < 2 は y' = -b1 y (y = θ - θ∞、b1 = (hP/A - J² ρ0 α)/ρc、
+# θ∞ = J² ρ_a / (ρc b1))、t > 2 は θ' = -b2 θ (b2 = hP/(A ρc)):
+#   T(4) = 7.604130776404e+01 [degC],  R(4) = 2.608330462112e-02 [ohm]
+#
+# 刻みの中の電流は始めの時刻の右極限と終わりの時刻の左極限を使うので、段差が
+# 刻みの境目にあれば Crank-Nicolson は 2 次のまま (64 刻みで R の相対誤差 3.0e-6、
+# 128 刻みとの誤差比 4.0)。離散解そのものも 1 次の漸化式で厳密に書ける
+# (rlc_check.sh で機械精度で比べる)。Δt = 1/16 s は 2 進で厳密なので、
+# 段差の時刻 t = 2 が丸めずに刻みの境目に乗る。
+#
+xmesh = 0 40 0.01
+ymesh = 0 1 1e-3
+zmesh = 0 1 0.5e-3
+
+material = 1.0 1e6
+tempco = 2 4e-3 0
+kthermal = 2 10
+heatcap = 2 3.4e6
+geometry = 2 1 0 0.01 0 1e-3 0 0.5e-3
+
+conductor = 0 1 0    0    0 1e-3 0 0.5e-3
+conductor = 1 1 0.01 0.01 0 1e-3 0 0.5e-3
+convection = 200 30
+
+temperature = 50
+thermal = 6
+transient = 4 64 0.5
+waveform = 0 1 2 1 2 0
+analysis = R
+solver = 20000 500 1e-12
+end

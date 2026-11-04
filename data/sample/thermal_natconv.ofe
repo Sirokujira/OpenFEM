@@ -1,0 +1,33 @@
+OpenFEM 1 0
+title = electro-thermal coupling : a bar cooled by natural convection, h(T) from a table
+#
+# 対流の熱伝達係数を面の温度の関数にする (convectiontemptable、h(T) = h f(T))。
+# 自然対流の h ∝ (T - T_a)^(1/4) を折れ線で近似した f を thermal_conv.ofe の棒
+# (側面だけから冷やす、両端は断熱) に掛ける。温度は一様なので、釣り合い
+#   J² ρ0 (1 + α (T - T0)) A = P h f(T) (T - T_a)
+# を二分法で解いた値と機械精度で一致する (rlc_check.sh)。f は折れ線そのものを使う
+# (閉形式の (T - T_a)^(1/4) ではなく) ので、離散化誤差は入らない。
+#
+# 対流が非線形になるので、輻射と同じく Picard の各回で Newton 線形化する:
+#   q(T) = h f(T) (T - T_a),   q'(T) = h (f(T) + f'(T) (T - T_a))
+# α = 0 なら非線形は対流だけで、6 回で収束する (接線の f' 項を落とすと遅くなる)。
+#
+xmesh = 0 40 0.01
+ymesh = 0 1 1e-3
+zmesh = 0 1 0.5e-3
+
+material = 1.0 1e6
+tempco = 2 4e-3 0
+kthermal = 2 10
+geometry = 2 1 0 0.01 0 1e-3 0 0.5e-3
+
+conductor = 0 1 0    0    0 1e-3 0 0.5e-3
+conductor = 1 1 0.01 0.01 0 1e-3 0 0.5e-3
+convection = 200 30
+convectiontemptable = 30 0  40 0.562  60 0.740  100 0.915  200 1.142  400 1.387  800 1.666
+
+temperature = 50
+thermal = 6
+analysis = R
+solver = 20000 500 1e-12
+end
